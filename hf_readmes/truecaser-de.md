@@ -28,9 +28,9 @@ At inference, the variant with the highest count is applied. Sentence-initial wo
 
 ## Stats
 
-- **Entries**: 452,835 unique words
-- **Training data**: German Wikipedia (2M lines, mid-sentence words only)
-- **File size**: 11 MB
+- **Entries**: 375,283 unique words
+- **Training data**: German Wikipedia (3M lines, mid-sentence words only, min count 5)
+- **File size**: 9.2 MB
 - **Inference**: instant (hash table lookup, no neural network)
 
 ## Usage with CrispASR
