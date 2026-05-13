@@ -945,7 +945,9 @@ Probable kickoff: mid-to-late May 2026 if the queue clears.
 | fullstop-multilingual | MIT | XLM-R punct (en/de/fr/it) | **DONE** — runtime in fireredpunc.cpp |
 | punctuate-all (kredor) | MIT | XLM-R-base punct (12 langs) | **DONE** — `--punc-model punctuate-all` |
 | 1-800-BAD-CODE PCS | Apache-2.0 | XLM-R punc+truecase+SBD (47 langs) | **DONE** — `--punc-model pcs` |
-| truecaser-de (statistical) | MIT | Wikipedia word-freq (452K entries) | **DONE** — `--truecase-model auto` |
+| truecaser-lstm (BiLSTM) | Apache-2.0 | mayhewsw char-level BiLSTM (3.2 MB, 97.9% F1) | **DONE** — `--truecase-model lstm` (recommended) |
+| truecaser-crf | MIT | CRF + context features (24 MB) | **DONE** — `--truecase-model crf` |
+| truecaser-de (statistical) | MIT | Wikipedia word-freq (375K entries, 9 MB) | **DONE** — `--truecase-model auto` |
 | bert-restore-punctuation | MIT | BERT punct+truecase (en) | Low |
 | xashru/punctuation | Apache-2.0 | XLM-R+BiLSTM-CRF (40+ langs) | Low |
 

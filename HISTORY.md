@@ -339,7 +339,9 @@ Moved here once shipped. See git history for code diffs.
 - **moonshine-de** / **moonshine-tiny-de**: fidoriel German fine-tunes (6.9% / 11.4% WER, CC-BY-NC-SA-4.0) wired as registered backends with `-m auto` support. Also converted dattazigzag/moonshine-tiny-de (MIT, 36.7% WER)
 - **punctuate-all**: kredor/punctuate-all (XLM-RoBERTa-base, 12 languages, MIT, 154 MB Q4_K) — `--punc-model punctuate-all`
 - **PCS model**: 1-800-BAD-CODE XLM-RoBERTa punc+truecase+SBD (47 languages, Apache-2.0) — ONNX→GGUF converter + 4-head C++ runtime: post-punc, pre-punc, sentence boundary, per-character truecasing. `--punc-model pcs`
-- **truecaser-de**: Statistical German truecaser (452K words from Wikipedia, 11 MB, MIT) — `--truecase-model auto`
+- **truecaser-lstm**: BiLSTM character-level truecaser (mayhewsw/pytorch-truecaser, Apache-2.0, 3.2 MB, 97.9% F1). Handles adjective/noun distinction ("braune Katze"), formal "Ihnen", compound words — `--truecase-model lstm` (recommended)
+- **truecaser-crf**: CRF with context features (word, prev/next, article, suffix), Viterbi decode — `--truecase-model crf`
+- **truecaser-de**: Statistical word-frequency truecaser (375K entries, 9 MB) — `--truecase-model auto`
 - **License field**: Registry entries carry optional license tag; NC models emit a stderr note on download
 - **--punc-model** shortcuts: `auto`/`firered`/`fullstop`/`punctuate-all`/`pcs`
 

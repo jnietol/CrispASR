@@ -158,7 +158,9 @@ Work with all backends.
 | **fullstop-punc** | Punctuation restoration | XLM-RoBERTa-large (24L, d=1024), 6 classes | EN, DE, FR, IT | MIT | [`cstr/fullstop-punc-multilang-GGUF`](https://huggingface.co/cstr/fullstop-punc-multilang-GGUF) |
 | **punctuate-all** | Punctuation restoration | XLM-RoBERTa-base (12L, d=768), 6 classes | 12 languages | MIT | [`cstr/punctuate-all-GGUF`](https://huggingface.co/cstr/punctuate-all-GGUF) |
 | **PCS** | Punc + truecase + SBD | XLM-RoBERTa-base (12L), 4 heads | 47 languages | Apache-2.0 | `--punc-model pcs` |
-| **truecaser-de** | Simplest German truecasing| (mere educational demo, not for production usage) Statistical word-frequency (452K entries) | German | MIT | [`cstr/truecaser-de`](https://huggingface.co/cstr/truecaser-de) |
+| **truecaser&#8209;lstm** | German truecasing (best) | BiLSTM char-level (2×150, 3.2 MB, 97.9% F1) | German | Apache-2.0 | `--truecase-model lstm` |
+| **truecaser&#8209;crf** | German truecasing | CRF + context features (24 MB) | German | MIT | `--truecase-model crf` |
+| **truecaser&#8209;de** | German truecasing (simple) | Statistical word-frequency (375K entries, 9 MB) | German | MIT | `--truecase-model auto` |
 | **CLD3** | Text language ID | Embedding-bag → FC + ReLU → softmax (~1.5 MB F32) | 109 ISO 639-1 | Apache-2.0 | [`cstr/cld3-GGUF`](https://huggingface.co/cstr/cld3-GGUF) |
 | **GlotLID-V3** | Text language ID | fastText supervised, flat softmax | 2102 ISO 639-3 + script | Apache-2.0 | [`cstr/glotlid-GGUF`](https://huggingface.co/cstr/glotlid-GGUF) |
 | **LID-176** | Text language ID | fastText supervised, hierarchical softmax | 176 ISO 639-1 | CC-BY-SA-3.0 | [`cstr/fasttext-lid176-GGUF`](https://huggingface.co/cstr/fasttext-lid176-GGUF) |
@@ -214,7 +216,7 @@ The matrix above covers ASR backends. **TTS-only backends** (`kokoro`, `qwen3-tt
 
 **Punctuation restoration** (`--punc-model`): CTC-based backends output lowercase without punctuation. Named shortcuts: `auto`/`firered` (Chinese+English), `fullstop` (EN/DE/FR/IT, XLM-R-large), `punctuate-all` (12 languages, XLM-R-base), `pcs` (47 languages, punc + truecasing + sentence boundary detection in one model). Or pass a GGUF path directly. Also available via Python/Rust/Dart wrappers (`crispasr.PuncModel`).
 
-**Truecasing** (`--truecase-model`): Restore German noun/name capitalization in lowercase ASR output. `--truecase-model auto` downloads a statistical truecaser (11 MB, 452K German words from Wikipedia). For neural truecasing, use `--punc-model pcs` instead — it handles punctuation + truecasing + sentence boundaries in one pass for 47 languages.
+**Truecasing** (`--truecase-model`): Restore German noun/name capitalization in lowercase ASR output. Three options in ascending quality: `auto` (statistical, 9 MB), `crf` (CRF with context, 24 MB), `lstm` (BiLSTM char-level, 3.2 MB, **recommended** — 97.9% F1, handles adjective/noun distinction and formal "Ihnen"). All auto-download from [`cstr/truecaser-de`](https://huggingface.co/cstr/truecaser-de). Or use `--punc-model pcs` for neural punc + truecasing in one pass (47 languages).
 
 <details>
 <summary>Which backends produce punctuation natively?</summary>
