@@ -158,7 +158,7 @@ Work with all backends.
 | **fullstop-punc** | Punctuation restoration | XLM-RoBERTa-large (24L, d=1024), 6 classes | EN, DE, FR, IT | MIT | [`cstr/fullstop-punc-multilang-GGUF`](https://huggingface.co/cstr/fullstop-punc-multilang-GGUF) |
 | **punctuate-all** | Punctuation restoration | XLM-RoBERTa-base (12L, d=768), 6 classes | 12 languages | MIT | [`cstr/punctuate-all-GGUF`](https://huggingface.co/cstr/punctuate-all-GGUF) |
 | **PCS** | Punc + truecase + SBD | XLM-RoBERTa-base (12L), 4 heads | 47 languages | Apache-2.0 | `--punc-model pcs` |
-| **truecaser-de** | German truecasing | Statistical word-frequency (452K entries) | German | MIT | [`cstr/truecaser-de`](https://huggingface.co/cstr/truecaser-de) |
+| **truecaser-de** | Simplest German truecasing| (mere educational demo, not for production usage) Statistical word-frequency (452K entries) | German | MIT | [`cstr/truecaser-de`](https://huggingface.co/cstr/truecaser-de) |
 | **CLD3** | Text language ID | Embedding-bag → FC + ReLU → softmax (~1.5 MB F32) | 109 ISO 639-1 | Apache-2.0 | [`cstr/cld3-GGUF`](https://huggingface.co/cstr/cld3-GGUF) |
 | **GlotLID-V3** | Text language ID | fastText supervised, flat softmax | 2102 ISO 639-3 + script | Apache-2.0 | [`cstr/glotlid-GGUF`](https://huggingface.co/cstr/glotlid-GGUF) |
 | **LID-176** | Text language ID | fastText supervised, hierarchical softmax | 176 ISO 639-1 | CC-BY-SA-3.0 | [`cstr/fasttext-lid176-GGUF`](https://huggingface.co/cstr/fasttext-lid176-GGUF) |
