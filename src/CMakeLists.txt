@@ -1004,6 +1004,18 @@ if(NOT MSVC)
 endif()
 
 # ---------------------------------------------------------------------------
+# pcs — Punctuation + Capitalization + Segmentation (1-800-BAD-CODE XLM-R)
+# ---------------------------------------------------------------------------
+add_library(pcs STATIC pcs.h pcs.cpp)
+set_target_properties(pcs PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(pcs PUBLIC .)
+target_compile_features   (pcs PUBLIC cxx_std_17)
+target_link_libraries     (pcs PUBLIC crispasr-core ggml ggml-base ggml-cpu)
+if(NOT MSVC)
+    target_compile_options(pcs PRIVATE -O3)
+endif()
+
+# ---------------------------------------------------------------------------
 # ctc-align — CTC forced alignment (Viterbi DP, CPU-only, no ggml dependency)
 # ---------------------------------------------------------------------------
 add_library(ctc-align STATIC align.h align.cpp)
@@ -1162,6 +1174,9 @@ if (TARGET fireredpunc)
 endif()
 if (TARGET truecaser)
     target_link_libraries(crispasr PUBLIC truecaser)
+endif()
+if (TARGET pcs)
+    target_link_libraries(crispasr PUBLIC pcs)
 endif()
 # Pyannote segmentation is not a backend; it's consumed by
 # crispasr_diarize.cpp for the "pyannote" method. Still needs linking in
