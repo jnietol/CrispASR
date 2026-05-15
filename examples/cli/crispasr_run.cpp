@@ -1483,13 +1483,12 @@ int crispasr_run_backend(const whisper_params& params_in) {
                 const int64_t window_start_sample_now = cumulative_samples - (int64_t)pcm_window.size();
                 constexpr int kStraddleMinSamples = 32000; // 2 s @ 16 kHz; backend-safe tail decode floor.
                 for (const auto& sl : slices) {
-                    const int64_t s_start_abs = window_start_sample_now + (int64_t)sl.start;
-                    const int64_t s_end_abs = window_start_sample_now + (int64_t)sl.end;
-                    if (params.stream_json && s_end_abs <= finalized_until_sample)
-                        continue;
-
                     std::vector<crispasr_segment> slice_segs;
                     if (params.stream_json) {
+                        const int64_t s_start_abs = window_start_sample_now + (int64_t)sl.start;
+                        const int64_t s_end_abs = window_start_sample_now + (int64_t)sl.end;
+                        if (s_end_abs <= finalized_until_sample)
+                            continue;
                         // Apply punc/strip on a copy so the per-slice text
                         // is in its final form before we hand it to the
                         // utterance state machine. JSON mode can filter or

@@ -207,6 +207,19 @@ catch_discover_tests(test-stream-finalize
     PROPERTIES LABELS "unit;regression-84"
 )
 
+# Pre-decode finalized-slice skip added in PR #90 (stream JSON mode).
+# Pure arithmetic, no model load.
+add_executable(test-stream-vad-skip
+    test-stream-vad-skip.cpp
+)
+target_link_libraries(test-stream-vad-skip PRIVATE
+    Catch2::Catch2WithMain
+)
+catch_discover_tests(test-stream-vad-skip
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit;stream-json"
+)
+
 # ─── test - punctuation - policy — Catch2 unit tests for punctuation auto - enable
 #policy.Pure logic, no model load.
 add_executable(test-punctuation-policy
