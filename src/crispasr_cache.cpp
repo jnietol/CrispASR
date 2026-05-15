@@ -343,15 +343,14 @@ std::string dir(const std::string& cache_dir_override) {
     const char* home = std::getenv("HOME");
 #ifdef _WIN32
     // In a plain cmd.exe shell HOME is typically unset; USERPROFILE is
-    // always set by Windows itself.  Fall through to LOCALAPPDATA as a
-    // last resort before the /tmp fallback (which is meaningless on Windows).
+    // always set by Windows itself. Fall through to LOCALAPPDATA.
     if (!home || !*home)
         home = std::getenv("USERPROFILE");
     if (!home || !*home)
         home = std::getenv("LOCALAPPDATA");
 #endif
 
-    std::string d = (home && *home) ? home : "/tmp";
+    std::string d = (home && *home) ? home : ".";
     d += "/.cache";
     mkdir(d.c_str(), 0755); // ignore EEXIST
     d += "/crispasr";

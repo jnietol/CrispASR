@@ -22,9 +22,11 @@
 
 #ifdef _WIN32
 #include <fcntl.h>
+#include <direct.h>
 #include <io.h>
 #include <sys/stat.h>
 #define close _close
+#define mkdir(d, m) _mkdir(d)
 #define popen _popen
 #define pclose _pclose
 static int mkstemps(char* t, int s) {
@@ -58,6 +60,13 @@ constexpr const char* kFireredLidDefaultUrl =
 constexpr const char* kFireredLidDefaultFile = "firered-lid-f16.gguf";
 constexpr const char* kEcapaLidDefaultUrl =
     "https://huggingface.co/cstr/ecapa-lid-107-GGUF/resolve/main/ecapa-lid-107.gguf";
+
+std::string scratch_dir() {
+    const char* env = std::getenv("CRISPASR_SCRATCH_DIR");
+    std::string d = (env && *env) ? std::string(env) : crispasr_cache::dir() + "/scratch";
+    mkdir(d.c_str(), 0755);
+    return d;
+}
 constexpr const char* kEcapaLidDefaultFile = "ecapa-lid-107.gguf";
 
 std::string resolve_whisper_lid_model(const whisper_params& p) {
@@ -116,14 +125,16 @@ bool detect_with_sherpa(const float* samples, int n_samples, const whisper_param
     const std::string bin =
         env_bin && *env_bin ? std::string(env_bin) : std::string("sherpa-onnx-offline-language-identification");
 
-    char tmpl[] = "/tmp/crispasr-lid-XXXXXX.wav";
-    int fd = mkstemps(tmpl, 4);
+    std::string tmpl_s = scratch_dir() + "/crispasr-lid-XXXXXX.wav";
+    std::vector<char> tmpl(tmpl_s.begin(), tmpl_s.end());
+    tmpl.push_back('\0');
+    int fd = mkstemps(tmpl.data(), 4);
     if (fd < 0) {
         fprintf(stderr, "crispasr[lid]: mkstemps failed\n");
         return false;
     }
     close(fd);
-    const std::string wav_path = tmpl;
+    const std::string wav_path = tmpl.data();
 
     FILE* f = fopen(wav_path.c_str(), "wb");
     if (!f) {

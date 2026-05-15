@@ -22,12 +22,14 @@
 #include <vector>
 
 #ifdef _WIN32
+#include <direct.h>
 #include <fcntl.h>
 #include <io.h>
 #include <sys/stat.h>
 #define close _close
 #define popen _popen
 #define pclose _pclose
+#define mkdir(d, m) _mkdir(d)
 static int mkstemps(char* t, int s) {
     (void)s;
     return _mktemp_s(t, strlen(t) + 1) == 0 ? _open(t, _O_CREAT | _O_WRONLY, 0600) : -1;
@@ -38,6 +40,13 @@ static int mkstemps(char* t, int s) {
 #endif
 
 namespace {
+
+std::string scratch_dir() {
+    const char* env = std::getenv("CRISPASR_SCRATCH_DIR");
+    std::string d = (env && *env) ? std::string(env) : crispasr_cache::dir() + "/scratch";
+    mkdir(d.c_str(), 0755);
+    return d;
+}
 
 // Map the library's integer speaker index to the `"(speaker N) "` string
 // shape CLI consumers have relied on since the original crispasr
@@ -62,12 +71,14 @@ std::vector<CrispasrDiarizeSegment> lib_view(const std::vector<crispasr_segment>
 
 // Helper: write a temporary 16 kHz mono f32→int16 WAV that sherpa can read.
 std::string write_temp_mono_wav(const float* samples, int n_samples) {
-    char buf[] = "/tmp/crispasr-sherpa-XXXXXX.wav";
-    int fd = mkstemps(buf, 4);
+    std::string tmpl_s = scratch_dir() + "/crispasr-sherpa-XXXXXX.wav";
+    std::vector<char> buf(tmpl_s.begin(), tmpl_s.end());
+    buf.push_back('\0');
+    int fd = mkstemps(buf.data(), 4);
     if (fd < 0)
         return {};
     close(fd);
-    std::string path = buf;
+    std::string path = buf.data();
     FILE* f = fopen(path.c_str(), "wb");
     if (!f)
         return {};

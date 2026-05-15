@@ -60,7 +60,23 @@
 // Helpers
 // ---------------------------------------------------------------------------
 
-// Create a temporary file securely via mkstemp (POSIX) or _mktemp_s (Win).
+static std::string scratch_dir() {
+    const char* env = std::getenv("CRISPASR_SCRATCH_DIR");
+    if (env && *env)
+        return std::string(env);
+    const char* cache = std::getenv("XDG_CACHE_HOME");
+    if (cache && *cache) {
+        std::string d = std::string(cache) + "/crispasr/scratch";
+        std::filesystem::create_directories(d);
+        return d;
+    }
+    const char* home = std::getenv("HOME");
+    std::string d = std::string(home && *home ? home : ".") + "/.cache/crispasr/scratch";
+    std::filesystem::create_directories(d);
+    return d;
+}
+
+// Create a scratch file securely via mkstemp (POSIX) or _mktemp_s (Win).
 // Writes `data` to it and returns the path. On failure returns "".
 // The caller is responsible for calling std::remove() on the returned path.
 static std::string write_temp_audio(const char* data, size_t size) {
@@ -78,8 +94,10 @@ static std::string write_temp_audio(const char* data, size_t size) {
     f.close();
     return std::string(tmp_path);
 #else
-    char tmpl[] = "/tmp/crispasr-XXXXXX";
-    int fd = mkstemp(tmpl);
+    std::string tmpl_s = scratch_dir() + "/crispasr-XXXXXX";
+    std::vector<char> tmpl(tmpl_s.begin(), tmpl_s.end());
+    tmpl.push_back('\0');
+    int fd = mkstemp(tmpl.data());
     if (fd < 0)
         return "";
     // Write all data; retry on partial write.
@@ -91,14 +109,14 @@ static std::string write_temp_audio(const char* data, size_t size) {
             if (errno == EINTR)
                 continue;
             ::close(fd);
-            ::unlink(tmpl);
+            ::unlink(tmpl.data());
             return "";
         }
         p += n;
         remaining -= (size_t)n;
     }
     ::close(fd);
-    return std::string(tmpl);
+    return std::string(tmpl.data());
 #endif
 }
 

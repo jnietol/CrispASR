@@ -21,7 +21,7 @@ namespace crispasr_cache {
 //   • If cache_dir_override is non-empty, use it directly (creating the leaf
 //     directory if it does not exist; parents must already exist).
 //   • Otherwise use the platform default:
-//       - POSIX : $HOME/.cache/crispasr   (falls back to /tmp/.cache/crispasr)
+//       - POSIX : $HOME/.cache/crispasr
 //       - Windows: %USERPROFILE%/.cache/crispasr
 //                  (%HOME% / %LOCALAPPDATA% as fallbacks if USERPROFILE unset)
 std::string dir(const std::string& cache_dir_override = "");
