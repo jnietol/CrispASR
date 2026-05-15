@@ -13,6 +13,23 @@
 #     is discarded anyway.
 #   - HF cache lives under $RUNNER_TEMP so it's automatically gone at
 #     the end of the job; no GitHub cache eviction concerns.
+#
+# Three tiers of tests (all run on GH free tier):
+#
+#   Tier 0 — smoke (no network, no model, <2 s):
+#     manifest schema validation + driver unit tests
+#     also: fast Python unit tests (backend_config, driver_smoke)
+#
+#   Tier 0.5 — unit-tests (no network, no model, <10 s):
+#     all no-model Python tests in tests/ (test_backend_config.py, etc.)
+#
+#   Tier 1 — preflight dry-run (HF API, no download, ~5 s):
+#     HEAD-check every pinned HF artifact referenced by manifest.json
+#
+#   Tier 2 — per-backend regression (nightly only):
+#     full build + download + crispasr + crispasr-diff against pinned refs
+#     entries with skip_diff=true run transcript check only (no ref dump
+#     needed); useful while the Kaggle rebake for a new backend is pending
 
 name: Regression (nightly)
 
@@ -48,13 +65,27 @@ jobs:
       - name: Run driver smoke test
         run: python tests/regression/test_driver_smoke.py
 
+  # Tier 0.5: no-model Python unit tests. Validates backend config
+  # invariants and other source-level assertions that don't require a
+  # built binary or a model download. Runs in <10 s.
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run no-model Python unit tests
+        run: |
+          python -m pytest tests/test_backend_config.py -v || \
+          python -m unittest tests/test_backend_config.py -v
+
   # Dry-run preflight: confirm every pinned HF artifact in the
   # manifest actually exists (GGUF + fixture ref.gguf + fixture
-  # audio.wav). Catches the "added a backend, forgot to upload"
-  # case in PR CI without the 1+ GB pull. ~1 s for the seed
-  # manifest; O(N+1) HF API calls for N backends.
+  # audio.wav). Entries with skip_diff=true skip the ref.gguf check.
+  # Catches the "added a backend, forgot to upload" case in PR CI
+  # without the 1+ GB pull. ~1 s for the seed manifest; O(N+1) HF
+  # API calls for N backends.
   preflight:
-    needs: smoke
+    needs: [smoke, unit-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -62,15 +93,21 @@ jobs:
       - run: pip install huggingface_hub
       - run: python tests/regression/run_one.py --dry-run
 
-  # Tier 1: per-backend regression. Each entry of the matrix downloads
+  # Tier 2: per-backend regression. Each entry of the matrix downloads
   # its pinned-revision GGUF + pinned-revision reference dump from HF,
   # runs crispasr + crispasr-diff against the manifest's expected
   # transcript and per-stage cos_min thresholds. `fail-fast: false`
   # so one bad backend doesn't mask the rest.
   #
-  # Skipped on `pull_request` — PRs only get smoke + preflight,
-  # which run in <2 minutes total. Full matrix runs nightly +
-  # on manual workflow_dispatch.
+  # Backends with skip_diff=true in manifest.json run only the
+  # transcript check (no ref.gguf download, no crispasr-diff). Add
+  # new backends with skip_diff=true to get transcript regression
+  # on GH immediately; graduate them to full diff entries once the
+  # Kaggle rebake lands in cstr/crispasr-regression-fixtures.
+  #
+  # Skipped on `pull_request` — PRs only get smoke + unit-tests +
+  # preflight, which run in <5 minutes total. Full matrix runs
+  # nightly + on manual workflow_dispatch.
   #
   # The matrix is intentionally small; expand as backends get their
   # fixtures uploaded to HF (see `tests/regression/README.md`

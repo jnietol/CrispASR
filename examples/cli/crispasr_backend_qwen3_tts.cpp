@@ -188,7 +188,8 @@ public:
         if (qwen3_tts_is_voice_design(ctx_)) {
             voice_key = "vd:" + params.tts_instruct;
         } else if (qwen3_tts_is_custom_voice(ctx_)) {
-            voice_key = "cv:" + params.tts_voice;
+            // Include instruct in key so a style change triggers a re-load.
+            voice_key = "cv:" + params.tts_voice + "\x01" + params.tts_instruct;
         } else {
             voice_key = "base:" + resolved_voice + "\x01" + resolved_ref_text;
         }
@@ -239,6 +240,13 @@ public:
                         fprintf(stderr, "%s%s", i ? ", " : "", qwen3_tts_get_speaker_name(ctx_, i));
                     }
                     fprintf(stderr, ")\n");
+                }
+                // Style control for CustomVoice 1.7B (issue #91).
+                // --instruct is optional; pass "" to clear any previous style.
+                qwen3_tts_set_cv_style_instruct(ctx_, params.tts_instruct.c_str());
+                if (!params.tts_instruct.empty() && !params.no_prints) {
+                    fprintf(stderr, "crispasr[qwen3-tts]: CustomVoice style instruct = \"%s\"\n",
+                            params.tts_instruct.c_str());
                 }
             } else if (!resolved_voice.empty()) {
                 const std::string& v = resolved_voice;

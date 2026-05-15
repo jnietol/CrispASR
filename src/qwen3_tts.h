@@ -149,6 +149,19 @@ int qwen3_tts_is_voice_design(struct qwen3_tts_context* ctx);
 // Returns 0 on success, -1 if the loaded model is not VoiceDesign.
 int qwen3_tts_set_instruct(struct qwen3_tts_context* ctx, const char* instruct);
 
+// Set a style-control instruction for CustomVoice synthesis (issue #91).
+// CustomVoice combines a fixed speaker (--voice <name>) with an optional
+// natural-language style description prepended to the prefill, e.g.
+// "spoke with a very sad and tearful voice". When set, an instruct block
+// is prepended before the role tokens (same mechanism as VoiceDesign)
+// while the speaker embedding is kept in the codec bridge.
+// Supported by the 1.7B CustomVoice variant; calling this on a 0.6B
+// model will inject the block but the model was not fine-tuned to heed it.
+// Pass nullptr or "" to clear any previously set style.
+// Re-callable; latest call wins.
+// Returns 0 on success, -1 if the loaded model is not CustomVoice.
+int qwen3_tts_set_cv_style_instruct(struct qwen3_tts_context* ctx, const char* instruct);
+
 // ---------------------------------------------------------------------------
 // Diff-harness stage APIs (PLAN #52 step 4)
 //

@@ -92,7 +92,28 @@ asserts both transcript and diff thresholds, and frees disk before
 exiting. Each backend is its own matrix entry with
 `fail-fast: false` so one bad backend doesn't mask the rest.
 
-## Adding a new backend
+## Fast-track: transcript-only entry (`skip_diff`)
+
+If you have a pinned GGUF and a known expected transcript but the Kaggle
+rebake hasn't run yet, add the backend with `"skip_diff": true`:
+
+```json
+{
+  "name": "my-backend",
+  "backend_id": "my-backend",
+  "skip_diff": true,
+  "gguf": { "repo": "cstr/my-backend-GGUF", "revision": "<sha>", "file": "model.gguf", "approx_size_mb": 400 },
+  "fixture_sample_path": "my-backend/sample/audio.wav",
+  "expected_transcript": "The quick brown fox."
+}
+```
+
+**Do not** include `fixture_ref_path` or `diff_thresholds` — the smoke
+test enforces their absence. The nightly matrix will run the transcript
+check immediately; once the Kaggle rebake produces a `ref.gguf`, remove
+`skip_diff` and fill in the full fields.
+
+## Adding a new backend (full diff entry)
 
 1. **Dump the reference** on a known-good commit:
 

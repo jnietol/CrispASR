@@ -10,6 +10,12 @@ For each backend in ``tests/regression/manifest.json``:
 4. Run ``crispasr-diff <backend_id> <gguf> <ref> <sample>`` and assert
    every stage's ``cos_min`` is at or above its pinned threshold.
 
+Backends with ``"skip_diff": true`` in the manifest skip steps 2 and 4
+(transcript-only check). This lets lightweight backends join the GH
+Actions nightly matrix before their Kaggle-baked reference dumps are
+ready. The GGUF + sample are still downloaded at pinned revisions so
+upstream re-quantise is caught.
+
 Pinned revisions guard against:
 
 - Upstream re-quantise of the GGUF on HF silently changing what users
@@ -210,12 +216,15 @@ def regression_for(name: str, manifest: dict, work_dir: Path,
         entry["gguf"]["revision"],
         work_dir,
     )
-    ref_local = hf_download(
-        manifest["fixtures"]["repo"],
-        entry["fixture_ref_path"],
-        manifest["fixtures"]["revision"],
-        work_dir,
-    )
+    skip_diff = entry.get("skip_diff", False)
+    ref_local: Path | None = None
+    if not skip_diff:
+        ref_local = hf_download(
+            manifest["fixtures"]["repo"],
+            entry["fixture_ref_path"],
+            manifest["fixtures"]["revision"],
+            work_dir,
+        )
     # Sample WAVs live alongside the ref dumps in the fixtures HF repo
     # (samples/.gitignore in CrispASR excludes them from the source
     # tree to keep clones small). An in-tree fallback `sample` field
@@ -233,6 +242,7 @@ def regression_for(name: str, manifest: dict, work_dir: Path,
             die(f"sample WAV missing: {sample}")
 
     failures = 0
+    skip_diff = entry.get("skip_diff", False)
 
     # ----- 1. Transcript -----
     print(f"\n[transcript] {name}")
@@ -248,6 +258,10 @@ def regression_for(name: str, manifest: dict, work_dir: Path,
         print(f"    {actual!r}")
 
     # ----- 2. Diff harness -----
+    if skip_diff:
+        print(f"\n[diff-harness] {name}  \033[33mSKIP\033[0m (skip_diff=true; no ref dump baked yet)")
+        return failures
+
     print(f"\n[diff-harness] {name}")
     stages = run_diff(diff_bin, entry["backend_id"], gguf_local, ref_local, sample)
     thresholds = entry["diff_thresholds"]
@@ -277,10 +291,12 @@ def dry_run(manifest: dict, backend_filter: str | None = None) -> int:
 
     Catches the "added a backend, forgot to upload its fixtures" case
     in PR CI in ~1 second, well before the 25-minute Tier 1 run would
-    discover it. Three checks per backend:
+    discover it. Checks per backend:
 
       1. The GGUF file exists at the pinned revision SHA.
-      2. The fixture ref.gguf exists at fixtures.revision.
+      2. The fixture ref.gguf exists at fixtures.revision
+         (skipped for entries with ``skip_diff: true`` — they have no
+         baked reference dump yet).
       3. The fixture audio.wav exists at fixtures.revision (if the
          entry uses `fixture_sample_path` rather than the legacy
          in-tree `sample`).
@@ -337,12 +353,14 @@ def dry_run(manifest: dict, backend_filter: str | None = None) -> int:
             continue
 
         # Fixture ref.gguf — membership check against the listing.
-        ref_path = entry["fixture_ref_path"]
-        if ref_path not in fx_files:
-            print(f"  \033[31mFAIL\033[0m {name}: fixture ref {ref_path!r} "
-                  f"not in {fx_repo}@{fx_rev[:8]}")
-            failures += 1
-            continue
+        # Skipped for transcript-only entries (skip_diff: true).
+        if not entry.get("skip_diff", False):
+            ref_path = entry["fixture_ref_path"]
+            if ref_path not in fx_files:
+                print(f"  \033[31mFAIL\033[0m {name}: fixture ref {ref_path!r} "
+                      f"not in {fx_repo}@{fx_rev[:8]}")
+                failures += 1
+                continue
 
         # Fixture audio.wav (new-style) — same membership check.
         if "fixture_sample_path" in entry:

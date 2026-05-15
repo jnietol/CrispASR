@@ -773,6 +773,14 @@ struct qwen3_tts_context {
     // qwen3_tts_set_instruct. Tokenised to instruct_ids via
     // tokenise_user_instruct on each prefill build.
     std::string runtime_instruct;
+
+    // CustomVoice style-control instruction (1.7B only), set by
+    // qwen3_tts_set_cv_style_instruct. When non-empty, an instruct block is
+    // prepended to the CustomVoice prefill (same embedding path as
+    // VoiceDesign) while the speaker embed is kept in the codec bridge. The
+    // 0.6B CustomVoice variant ignores this field (it was not fine-tuned for
+    // style control). See issue #91.
+    std::string runtime_cv_style_instruct;
 };
 
 // ---------------------------------------------------------------------------
@@ -2996,6 +3004,25 @@ bool build_customvoice_prefill_embeds(qwen3_tts_context* c, const std::string& s
     free(codec_pre_emb);
     free(codec_pb_emb);
 
+    // ---- optional style instruct block (CustomVoice 1.7B) ----
+    // When runtime_cv_style_instruct is non-empty, prepend an instruct block
+    // (same path as VoiceDesign) while keeping the speaker frame in the
+    // codec bridge. Mirrors modeling_qwen3_tts.py lines 2076-2095 for the
+    // combined speaker+instruct path.
+    std::vector<float> instruct_block;
+    int M_instruct = 0;
+    if (!c->runtime_cv_style_instruct.empty()) {
+        auto instruct_ids = tokenise_user_instruct(c, c->runtime_cv_style_instruct);
+        if (!instruct_ids.empty()) {
+            float* instruct_emb = run_embed_text(c, instruct_ids.data(), (int)instruct_ids.size());
+            if (instruct_emb) {
+                M_instruct = (int)instruct_ids.size();
+                instruct_block.assign(instruct_emb, instruct_emb + (size_t)M_instruct * d);
+                free(instruct_emb);
+            }
+        }
+    }
+
     // ---- role embed: text_proj(text_embd(syn_ids[:3])) ----
     std::vector<int32_t> role_ids(syn_ids.begin(), syn_ids.begin() + 3);
     float* role_emb = run_embed_text(c, role_ids.data(), 3);
@@ -3065,10 +3092,16 @@ bool build_customvoice_prefill_embeds(qwen3_tts_context* c, const std::string& s
     free(codec_bos_emb);
     free(codec_pad_emb);
 
-    // ---- concat: role(3) + bridge(L_bridge) + text_block(L_text) + final(1) ----
-    T_prefill = 3 + L_bridge + L_text + 1;
+    // ---- concat: [instruct(M)] + role(3) + bridge(L_bridge) + text_block(L_text) + final(1) ----
+    // The instruct block is absent (M_instruct=0) for plain CustomVoice use;
+    // present when the caller set a style description via set_cv_style_instruct.
+    T_prefill = M_instruct + 3 + L_bridge + L_text + 1;
     prefill_embeds.assign((size_t)T_prefill * d, 0.0f);
     size_t off = 0;
+    if (M_instruct > 0) {
+        std::memcpy(prefill_embeds.data() + off, instruct_block.data(), instruct_block.size() * sizeof(float));
+        off += instruct_block.size();
+    }
     std::memcpy(prefill_embeds.data() + off, role_emb, (size_t)3 * d * sizeof(float));
     off += (size_t)3 * d;
     std::memcpy(prefill_embeds.data() + off, bridge.data(), bridge.size() * sizeof(float));
@@ -3082,8 +3115,16 @@ bool build_customvoice_prefill_embeds(qwen3_tts_context* c, const std::string& s
     M_trailing = 1;
 
     if (c->params.verbosity >= 1) {
-        fprintf(stderr, "qwen3_tts[customvoice]: prefill role=3 + bridge=%d + text=%d + final=1 = T=%d trailing=1\n",
-                L_bridge, L_text, T_prefill);
+        if (M_instruct > 0) {
+            fprintf(stderr,
+                    "qwen3_tts[customvoice]: prefill instruct=%d + role=3 + bridge=%d + text=%d + final=1 = T=%d "
+                    "trailing=1\n",
+                    M_instruct, L_bridge, L_text, T_prefill);
+        } else {
+            fprintf(stderr,
+                    "qwen3_tts[customvoice]: prefill role=3 + bridge=%d + text=%d + final=1 = T=%d trailing=1\n",
+                    L_bridge, L_text, T_prefill);
+        }
     }
 
     free(tts_special_emb);
@@ -5468,6 +5509,22 @@ extern "C" int qwen3_tts_set_instruct(struct qwen3_tts_context* ctx, const char*
     ctx->runtime_instruct = instruct ? instruct : "";
     if (ctx->params.verbosity >= 1 && !ctx->runtime_instruct.empty()) {
         fprintf(stderr, "qwen3_tts: VoiceDesign instruct set (%zu chars)\n", ctx->runtime_instruct.size());
+    }
+    return 0;
+}
+
+extern "C" int qwen3_tts_set_cv_style_instruct(struct qwen3_tts_context* ctx, const char* instruct) {
+    if (!ctx) {
+        return -1;
+    }
+    if (ctx->hp.tts_model_type != "custom_voice") {
+        fprintf(stderr, "qwen3_tts: model is not CustomVoice — set_cv_style_instruct not applicable\n");
+        return -1;
+    }
+    ctx->runtime_cv_style_instruct = instruct ? instruct : "";
+    if (ctx->params.verbosity >= 1 && !ctx->runtime_cv_style_instruct.empty()) {
+        fprintf(stderr, "qwen3_tts: CustomVoice style instruct set (%zu chars)\n",
+                ctx->runtime_cv_style_instruct.size());
     }
     return 0;
 }

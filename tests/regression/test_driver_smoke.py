@@ -85,15 +85,14 @@ class ManifestSchemaTests(unittest.TestCase):
         self.assertGreater(len(self.manifest["backends"]), 0)
 
     def test_backend_entries_have_required_keys(self):
-        required = {
-            "name", "backend_id", "gguf",
-            "expected_transcript",
-            "fixture_ref_path", "diff_thresholds",
-        }
+        # Keys required by every entry regardless of skip_diff.
+        always_required = {"name", "backend_id", "gguf", "expected_transcript"}
+        # Keys required only for full diff entries (skip_diff absent or false).
+        diff_required = {"fixture_ref_path", "diff_thresholds"}
         gguf_required = {"repo", "revision", "file"}
         names_seen: set[str] = set()
         for entry in self.manifest["backends"]:
-            missing = required - set(entry)
+            missing = always_required - set(entry)
             self.assertEqual(missing, set(),
                 f"backend missing keys: {missing} in {entry.get('name', '?')}")
             self.assertNotIn(entry["name"], names_seen,
@@ -109,16 +108,33 @@ class ManifestSchemaTests(unittest.TestCase):
                 rev, r"^[0-9a-f]{7,40}$",
                 f"{entry['name']}.gguf.revision must be a SHA, got {rev!r}",
             )
-            self.assertIsInstance(entry["diff_thresholds"], dict)
-            self.assertGreater(len(entry["diff_thresholds"]), 0,
-                f"{entry['name']} has empty diff_thresholds — at least one stage must be tracked")
-            for stage, threshold in entry["diff_thresholds"].items():
-                self.assertIsInstance(threshold, (int, float),
-                    f"{entry['name']}.{stage} threshold must be numeric")
-                self.assertTrue(
-                    0.0 <= threshold <= 1.0,
-                    f"{entry['name']}.{stage} threshold {threshold} out of [0,1]",
-                )
+            skip_diff = entry.get("skip_diff", False)
+            if not skip_diff:
+                # Full diff entry: fixture_ref_path + diff_thresholds required.
+                missing_diff = diff_required - set(entry)
+                self.assertEqual(missing_diff, set(),
+                    f"{entry['name']}: diff entry missing keys {missing_diff} "
+                    f"(set skip_diff=true if no ref dump exists yet)")
+                self.assertIsInstance(entry["diff_thresholds"], dict)
+                self.assertGreater(len(entry["diff_thresholds"]), 0,
+                    f"{entry['name']} has empty diff_thresholds — at least one stage must be tracked")
+                for stage, threshold in entry["diff_thresholds"].items():
+                    self.assertIsInstance(threshold, (int, float),
+                        f"{entry['name']}.{stage} threshold must be numeric")
+                    self.assertTrue(
+                        0.0 <= threshold <= 1.0,
+                        f"{entry['name']}.{stage} threshold {threshold} out of [0,1]",
+                    )
+            else:
+                # Transcript-only entry: diff_thresholds and fixture_ref_path
+                # must NOT be present (forces the maintainer to graduate it
+                # to a full diff entry once the ref dump is baked).
+                self.assertNotIn("diff_thresholds", entry,
+                    f"{entry['name']}: skip_diff=true but diff_thresholds is also set — "
+                    f"remove skip_diff once the ref dump is in cstr/crispasr-regression-fixtures")
+                self.assertNotIn("fixture_ref_path", entry,
+                    f"{entry['name']}: skip_diff=true but fixture_ref_path is also set — "
+                    f"remove skip_diff once the ref dump is in cstr/crispasr-regression-fixtures")
 
     def test_sample_source_declared(self):
         """Every backend must declare its sample source: either a
