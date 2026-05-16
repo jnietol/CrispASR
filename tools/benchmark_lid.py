@@ -13,7 +13,7 @@ Usage:
   # Compare Q4_K vs Q2_K:
   python tools/benchmark_lid.py firered-lid-q4_k.gguf firered-lid-q2_k.gguf
 
-The script generates ~36 short wav files in /tmp/lid_bench/ on first
+The script generates ~36 short wav files under CRISPASR_SCRATCH_DIR on first
 run. Subsequent runs reuse cached audio if present.
 
 License: MIT (script only — generated TTS audio is transient and
@@ -89,7 +89,8 @@ LANGS = {
     ]),
 }
 
-CACHE_DIR = "/tmp/lid_bench"
+SCRATCH_ROOT = os.environ.get("CRISPASR_SCRATCH_DIR") or os.environ.get("CRISP_SCRATCH_DIR") or ".scratch"
+CACHE_DIR = os.path.join(SCRATCH_ROOT, "lid_bench")
 
 
 async def generate_samples():

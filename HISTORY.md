@@ -6,6 +6,31 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-05-16 Cross-Stack Audit Hardening
+
+Cross-repo audit work covered `CrispASR`, `CrispLens`, and `cloud-backup`.
+Completed items:
+
+- Added `AUDIT.md` and cross-stack tests for repository wiring, VPS services,
+  scratch roots, transcript search, and SSH-only deployment shape.
+- Removed hardcoded `/tmp` usage from audited production/test paths; local
+  scratch now uses configured durable roots such as `/Volumes/backups`.
+- CrispLens video transcript search works for imported videos, including the
+  real 70 second PURplus MP4 crop test searched by `Detektivarbeit`.
+- iOS Capacitor smoke passed: CocoaPods sync under Ruby 3.1.3 detected the
+  CrispASR plugin, Xcode built the simulator app with derived data on
+  `/Volumes/backups`, and the app installed/launched on the iPhone 17 simulator.
+- Android Capacitor packaging passed: the v4 app now has a real native
+  CrispASR JNI bridge, the generated Android project builds a debug APK with
+  JDK 21, and the verified APK was saved under `/Volumes/backups` before
+  generated build outputs were cleaned from the repo volume.
+- Installed `ripgrep 14.1.0` on the VPS for future SSH service/env audits.
+
+TB-scale confidence testing was not run. It remains blocked until a real-world
+dataset is specified so the resulting cloud/index state is worth keeping.
+
+---
+
 ## Timeline
 
 ### 1. Cohere Transcribe — the original port

@@ -13,6 +13,8 @@ MLS_LANGS = {
 
 N = 2
 
+SCRATCH_ROOT = os.environ.get("CRISPASR_SCRATCH_DIR") or os.environ.get("CRISP_SCRATCH_DIR") or ".scratch"
+
 def run_lid(model_path, cli, wav_path):
     try:
         out = subprocess.run(
@@ -26,7 +28,10 @@ def run_lid(model_path, cli, wav_path):
 def main():
     models = sys.argv[1:]
     if not models:
-        models = ["/tmp/lid-4L-last-q2k.gguf"]
+        default_model = os.environ.get("CRISPASR_LID_MODEL")
+        if not default_model:
+            raise SystemExit("Usage: tools/test_lid_mls.py MODEL.gguf [MODEL2.gguf ...]")
+        models = [default_model]
     cli = "./build/bin/crispasr"
 
     for model_path in models:
@@ -54,7 +59,8 @@ def main():
                 pcm = np.array(audio["array"], dtype=np.float32)
                 sr = audio["sampling_rate"]
                 dur = len(pcm) / sr
-                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                os.makedirs(SCRATCH_ROOT, exist_ok=True)
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False, dir=SCRATCH_ROOT) as f:
                     sf.write(f.name, pcm, sr)
                     wav_path = f.name
                 predicted = run_lid(model_path, cli, wav_path)

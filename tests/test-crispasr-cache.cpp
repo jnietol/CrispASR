@@ -9,6 +9,7 @@
 #include "crispasr_cache.h"
 
 #include <cerrno>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -34,8 +35,13 @@ static void remove_file(const std::string & path) { DeleteFileA(path.c_str()); }
 #  include <sys/stat.h>
 #  include <unistd.h>
 static std::string make_temp_dir() {
-    char buf[] = "/tmp/crispasr_unit_XXXXXX";
-    return mkdtemp(buf) ? std::string(buf) : std::string("/tmp");
+    const char * env = std::getenv("CRISPASR_SCRATCH_DIR");
+    std::string base = (env && *env) ? env : ".scratch";
+    mkdir(base.c_str(), 0755);
+    std::string pattern = base + "/crispasr_unit_XXXXXX";
+    std::string writable = pattern;
+    char * buf = writable.data();
+    return mkdtemp(buf) ? std::string(buf) : base;
 }
 static void remove_file(const std::string & path) { ::unlink(path.c_str()); }
 #endif
