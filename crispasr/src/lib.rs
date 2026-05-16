@@ -1368,6 +1368,13 @@ pub enum LidMethod {
     Whisper = 0,
     /// GGUF-packed Silero 95-language classifier.
     Silero = 1,
+    /// FireRedTeam/FireRedLID — encoder + 6-layer LID Transformer, 120 langs.
+    /// Wired through the same module-level `crispasr_detect_language` C-ABI
+    /// as Whisper/Silero — no session required.
+    Firered = 2,
+    /// SpeechBrain ECAPA-TDNN VoxLingua107 — attentive statistical pooling,
+    /// 107 langs.  Same module-level path as the others.
+    Ecapa = 3,
 }
 
 #[derive(Clone, Debug)]
