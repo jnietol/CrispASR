@@ -95,7 +95,7 @@ step("install-deps.done")
 step("apt-install.begin")
 subprocess.check_call(
     "apt-get update -qq && apt-get install -y --no-install-recommends "
-    "cmake ninja-build g++ libopenblas-dev ccache mold || true",
+    "cmake ninja-build g++ libopenblas-dev ccache lld mold || true",
     shell=True)
 step("apt-install.done")
 
@@ -121,6 +121,8 @@ CMAKE_FLAGS = [
     "-DGGML_CUDA=OFF",
     "-DGGML_BLAS=ON",
     "-DGGML_BLAS_VENDOR=OpenBLAS",
+    # Skip warning emission — saves ~5 % compile time and log noise
+    "-DCRISPASR_ALL_WARNINGS=OFF",
 ]
 if _shutil.which("ccache"):
     CCACHE_DIR = WORK / ".ccache"
@@ -130,9 +132,14 @@ if _shutil.which("ccache"):
         "-DCMAKE_C_COMPILER_LAUNCHER=ccache",
         "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache",
     ]
-if _shutil.which("mold"):
+# Fast linker: prefer mold, fall back to lld, then default ld
+_linker = ("mold" if _shutil.which("mold")
+           else "lld" if _shutil.which("ld.lld") or _shutil.which("lld")
+           else None)
+if _linker:
+    step(f"linker.selected", linker=_linker)
     for kind in ("EXE", "SHARED", "MODULE"):
-        CMAKE_FLAGS.append(f"-DCMAKE_{kind}_LINKER_FLAGS=-fuse-ld=mold")
+        CMAKE_FLAGS.append(f"-DCMAKE_{kind}_LINKER_FLAGS=-fuse-ld={_linker}")
 subprocess.check_call(
     ["cmake", "-S", str(REPO), "-B", str(BUILD), "-G", "Ninja", *CMAKE_FLAGS])
 step("cmake-configure.done")
