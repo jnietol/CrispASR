@@ -178,6 +178,7 @@ target_include_directories(test-params PRIVATE
     ${PROJECT_SOURCE_DIR}/ggml/include
     ${PROJECT_SOURCE_DIR}/examples
     ${PROJECT_SOURCE_DIR}/examples/cli
+    ${PROJECT_SOURCE_DIR}/src
 )
 target_link_libraries(test-params PRIVATE
     Catch2::Catch2WithMain
@@ -230,6 +231,7 @@ target_include_directories(test-punctuation-policy PRIVATE
     ${PROJECT_SOURCE_DIR}/ggml/include
     ${PROJECT_SOURCE_DIR}/examples
     ${PROJECT_SOURCE_DIR}/examples/cli
+    ${PROJECT_SOURCE_DIR}/src
 )
 target_link_libraries(test-punctuation-policy PRIVATE
     Catch2::Catch2WithMain

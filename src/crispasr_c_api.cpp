@@ -2116,9 +2116,7 @@ static crispasr_session_result* transcribe_single(crispasr_session* s, const flo
         // at a heap blob with zero length.
         wparams.suppress_nst = s->whisper_suppress_nst;
         wparams.carry_initial_prompt = s->whisper_carry_initial_prompt;
-        wparams.suppress_regex = s->whisper_suppress_regex.empty()
-            ? nullptr
-            : s->whisper_suppress_regex.c_str();
+        wparams.suppress_regex = s->whisper_suppress_regex.empty() ? nullptr : s->whisper_suppress_regex.c_str();
         // GBNF grammar-constrained sampling (whisper-only). The
         // `grammar_rules_ptrs` vector and the parsed rules it points
         // into both live on the session struct so they outlive the
@@ -3382,8 +3380,7 @@ CA_EXPORT int crispasr_detect_language_pcm(const float* samples, int32_t n_sampl
 //   * -1 — invalid args (null pointer, n_samples <= 0, out_cap < n_samples).
 //   * -2 — RNNoise init / processing failure (resampler init, etc).
 // ---------------------------------------------------------------------------
-CA_EXPORT int crispasr_enhance_audio_rnnoise(const float* in_pcm, int32_t n_samples, float* out_pcm,
-                                             int32_t out_cap) {
+CA_EXPORT int crispasr_enhance_audio_rnnoise(const float* in_pcm, int32_t n_samples, float* out_pcm, int32_t out_cap) {
     if (!in_pcm || !out_pcm || n_samples <= 0 || out_cap < n_samples)
         return -1;
 
@@ -4534,9 +4531,7 @@ CA_EXPORT int crispasr_session_set_beam_size(crispasr_session* s, int n) {
 //    0 = grammar parsed and stored (or cleared, when text was empty)
 //   -1 = null session
 //   -2 = parse failed (invalid GBNF) or root_rule not found in parsed grammar
-CA_EXPORT int crispasr_session_set_grammar_text(crispasr_session* s,
-                                                const char* gbnf_text,
-                                                const char* root_rule,
+CA_EXPORT int crispasr_session_set_grammar_text(crispasr_session* s, const char* gbnf_text, const char* root_rule,
                                                 float penalty) {
     if (!s)
         return -1;
@@ -4594,11 +4589,8 @@ CA_EXPORT int crispasr_session_set_grammar_text(crispasr_session* s,
 // Caller passes whatever values they want — there's no "leave
 // default" sentinel because every value in this set is a real
 // float with meaningful semantics, not a presence flag.
-CA_EXPORT int crispasr_session_set_fallback_thresholds(crispasr_session* s,
-                                                       float entropy_thold,
-                                                       float logprob_thold,
-                                                       float no_speech_thold,
-                                                       float temperature_inc) {
+CA_EXPORT int crispasr_session_set_fallback_thresholds(crispasr_session* s, float entropy_thold, float logprob_thold,
+                                                       float no_speech_thold, float temperature_inc) {
     if (!s)
         return -1;
     s->entropy_thold = entropy_thold;
@@ -4632,10 +4624,8 @@ CA_EXPORT int crispasr_session_set_fallback_thresholds(crispasr_session* s,
 // `suppress_regex` is copied into a std::string on the session;
 // the caller can free their copy after this returns. Empty
 // string clears any prior regex.
-CA_EXPORT int crispasr_session_set_whisper_decode_extras(crispasr_session* s,
-                                                         int suppress_nst,
-                                                         const char* suppress_regex,
-                                                         int carry_initial_prompt) {
+CA_EXPORT int crispasr_session_set_whisper_decode_extras(crispasr_session* s, int suppress_nst,
+                                                         const char* suppress_regex, int carry_initial_prompt) {
     if (!s)
         return -1;
     s->whisper_suppress_nst = suppress_nst != 0;

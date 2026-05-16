@@ -17,13 +17,13 @@
 #include <string>
 
 namespace grammar_parser {
-    struct parse_state {
-        std::map<std::string, uint32_t>                   symbol_ids;
-        std::vector<std::vector<whisper_grammar_element>> rules;
+struct parse_state {
+    std::map<std::string, uint32_t> symbol_ids;
+    std::vector<std::vector<whisper_grammar_element>> rules;
 
-        std::vector<const whisper_grammar_element *>      c_rules() const;
-    };
+    std::vector<const whisper_grammar_element*> c_rules() const;
+};
 
-    parse_state parse(const char * src);
-    void print_grammar(FILE * file, const parse_state & state);
-}
+parse_state parse(const char* src);
+void print_grammar(FILE* file, const parse_state& state);
+} // namespace grammar_parser
