@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 os.environ["PYTHONUNBUFFERED"] = "1"
+os.environ["PYDEVD_DISABLE_FILE_VALIDATION"] = "1"  # suppress pydevd frozen-module noise
 try:
     sys.stdout.reconfigure(line_buffering=True)
     sys.stderr.reconfigure(line_buffering=True)
@@ -72,6 +73,14 @@ def step(name, **extra):
 
 step("script.start")
 
+# Open build-log early so ALL noisy subprocesses (pip, apt, cmake, ninja)
+# are redirected there. Unicode box-drawing from pip progress bars and ANSI
+# codes from mold corrupt the notebook's cell-output JSON when papermill
+# tries to serialize them → the "Invalid \uXXXX" crash on disk-save.
+_BUILD_LOG = WORK / "build.log"
+_BUILD_LOG.parent.mkdir(parents=True, exist_ok=True)
+_blog = open(_BUILD_LOG, "a")
+
 # %% [code]
 try:
     from kaggle_secrets import UserSecretsClient
@@ -87,16 +96,12 @@ step("install-deps.begin")
 subprocess.check_call([
     sys.executable, "-m", "pip", "install", "--quiet",
     "huggingface_hub", "hf_transfer",
-])
+], stdout=_blog, stderr=_blog)
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 step("install-deps.done")
 
 # %% [code]
 step("apt-install.begin")
-# Redirect noisy build steps to a log file; ANSI escape codes in mold/apt
-# output can produce invalid \uXXXX in the notebook cell-output JSON.
-_BUILD_LOG = WORK / "build.log"
-_blog = open(_BUILD_LOG, "a")
 subprocess.check_call(
     "apt-get update -qq && apt-get install -y --no-install-recommends "
     "cmake ninja-build g++ libopenblas-dev ccache lld mold || true",
@@ -213,20 +218,36 @@ print(f"\nQ4_K ({r_q4k['wallclock_s']}s exit={r_q4k.get('exit','?')}): {r_q4k['t
 print(f"GOLD: {GOLD!r}\n", flush=True)
 
 # %% [code]
-# ── F16 only if ≥30 min remain ───────────────────────────────────────────────
+# ── F16 only if time AND disk space allow ────────────────────────────────────
+import shutil as _shutil2
+import warnings as _warnings
+
+# Delete build object files to recover ~1 GB before F16 download check.
+_cmake_files = BUILD / "CMakeFiles"
+if _cmake_files.exists():
+    _shutil2.rmtree(str(_cmake_files), ignore_errors=True)
+    step("cleanup-build-objects")
+
 elapsed_now = time.time() - _T0
 remaining = MAX_WALL_S - elapsed_now
-step("time-check", elapsed_s=round(elapsed_now), remaining_s=round(remaining))
+free_gb = _shutil2.disk_usage(str(WORK)).free / 1e9
+F16_SIZE_GB = 16.7  # vibevoice-asr-f16.gguf is ~16.6 GB
+step("time-check", elapsed_s=round(elapsed_now), remaining_s=round(remaining),
+     free_gb=round(free_gb, 1))
 
-if remaining >= 60 * 60:
+if remaining >= 60 * 60 and free_gb >= F16_SIZE_GB + 0.5:
     step("download-f16.begin")
-    f16_path = hf_hub_download(
-        repo_id="cstr/vibevoice-asr-GGUF",
-        filename="vibevoice-asr-f16.gguf",
-        local_dir=str(MODELS_DIR),
-    )
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("ignore")
+        f16_path = hf_hub_download(
+            repo_id="cstr/vibevoice-asr-GGUF",
+            filename="vibevoice-asr-f16.gguf",
+            local_dir=str(MODELS_DIR),
+        )
     step("download-f16.done", size_gb=round(Path(f16_path).stat().st_size / 1e9, 2))
     results.append(transcribe(Path(f16_path), "F16"))
+elif free_gb < F16_SIZE_GB + 0.5:
+    step("skip-f16", reason=f"disk full ({free_gb:.1f} GB free < {F16_SIZE_GB+0.5:.1f} GB needed)")
 else:
     step("skip-f16", reason="insufficient time remaining")
 
