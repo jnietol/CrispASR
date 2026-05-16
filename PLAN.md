@@ -2525,10 +2525,49 @@ gap is visible:
   Needs an engine-side `audio[t0:t0+d]` slice + timestamp shift
   (similar mechanics to the existing resume-offset routing).
   Estimate: 1 day end-to-end (CrispASR Dart binding + UI).
-* `--alt N` / `--alt-n N` — alternative token candidates with
-  probabilities. Power-user feature for transcript correction.
-  C surface: would need an "alternates" array on the
-  segment/word structs, plus a runtime cap. ~2 days end-to-end.
+* ~~`--alt N` / `--alt-n N`~~ — alternative-candidate tokens —
+  **shipped May 2026 (0.5.13 + CrisperWeaver §5.8)**. Whisper
+  internals carry a parallel `alts` vector on `whisper_segment`
+  (mirrored at every `tokens.{clear,push_back,resize}` site
+  through the fallback-temperature loop, `result_len`
+  truncation, and `max_len` wrap-segment splitter). New
+  `wparams.alt_n` (default 0 = off). Capture happens inside
+  `whisper_sample_token` — beam search is excluded because
+  siblings are beam-conditional rather than greedy
+  alternatives. Six new public getters
+  (`whisper_full_get_token_n_alts` / `_alt_id` / `_alt_p` +
+  `_from_state` variants); new C-ABI for both the low-level
+  (`crispasr_token_n_alts` / `_alt_id` / `_alt_p` /
+  `_alt_text`) and the unified session result
+  (`crispasr_session_result_word_n_alts` / `_alt_text` /
+  `_alt_p`); sticky session setter
+  `crispasr_session_set_alt_n`. The whisper session-transcribe
+  path now also populates `seg.words` via
+  `emit_words_from_tokens` (it previously emitted only
+  segment text — closing a long-standing gap with the parakeet
+  / canary backends as a side benefit). Dart 0.5.13 + smoke
+  test pinned. CrisperWeaver surfaces this as
+  `AdvancedOptions.altN` (0..5 slider in the Whisper-only
+  section) and a tap-to-pick chip row in the segment edit
+  dialog.
+
+  Deferred follow-ups (low priority — v1 covers the common
+  case):
+  - **Beam-search alt capture.** Siblings ≠ greedy
+    alternatives; needs a different capture path and a
+    different chip-walk UX. Defer until a user actually asks.
+  - **Full word-level alt enumeration.** Sub-word BPE means
+    multi-token words ("kubectl" → `["kub","ect","l"]`) only
+    surface alts for the first content token. Whole-word
+    alternates would need a per-word token-tree expansion —
+    not free; v1's first-token alts already catch most real
+    mishears.
+  - **Widget test for the alt-picker popover** (CrisperWeaver
+    side; Riverpod + l10n scaffolding nontrivial).
+  - **Live end-to-end test** with `altN: 3` against a
+    downloaded `ggml-tiny.en.bin`, asserting ≥1 returned word
+    has alts and the chosen word's probability sits above the
+    top alt. Needs a model on CI.
 * Whisper decoder fallback knobs (`--word-thold`,
   `--entropy-thold`, `--logprob-thold`, `--no-speech-thold`,
   `--no-fallback`, `--temperature-inc`) — already in the Dart
