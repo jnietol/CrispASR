@@ -40,6 +40,15 @@
   `whisper_full_get_token_n_alts` / `_alt_id` / `_alt_p`
   (plus `_from_state` variants). All nine symbols pinned in
   `bindings_smoke_test.dart`.
+- Live test `test/alt_tokens_live_test.dart` (tagged `live`)
+  exercises the full stack against `ggml-tiny.en.bin` +
+  `samples/jfk.wav`. Asserts ≥1 returned word has alts,
+  every alt's p ∈ [0, 1] and the list is descending,
+  chosen token excluded from its own alts, and `setAltN(0)`
+  on a re-decode actually clears them. Skips silently when
+  `CRISPASR_LIB` / `CRISPASR_MODEL` aren't set. Representative
+  dev-box result: 22/22 words on JFK get runner-ups (e.g.
+  "Americans → America(4.85%), americ(3.84%), American(3.35%)").
 
 ## 0.5.12
 
