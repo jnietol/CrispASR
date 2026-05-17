@@ -61,6 +61,7 @@
 #include "moonshine_streaming.h"
 #include "glm_asr.h"
 #include "firered_asr.h"
+#include "voxcpm2_tts.h"
 
 #include "common-crispasr.h"
 
@@ -2493,6 +2494,66 @@ int main(int argc, char** argv) {
             n_fail++;
         }
 
+        // Staged encoder: per-layer comparison using reference mel
+        // (use ref mel to eliminate mel frame-count differences)
+        {
+            auto mel_pair = ref.get_f32("mel_spectrogram");
+            auto mel_shp = ref.shape("mel_spectrogram");
+            int staged_n_mels = mel_shp.size() >= 1 ? (int)mel_shp[0] : 128;
+            int staged_T_mel = mel_shp.size() >= 2 ? (int)mel_shp[1] : 0;
+            const float* staged_mel = mel_pair.first;
+
+            struct CohereStageCap {
+                std::map<std::string, std::vector<float>> stages;
+            };
+            auto stage_cb = [](const char* name, const float* data, int T_enc, int d_model, void* ud) {
+                auto* c = static_cast<CohereStageCap*>(ud);
+                c->stages[name].assign(data, data + (size_t)T_enc * d_model);
+            };
+
+            CohereStageCap cap;
+            int rc = (staged_mel && staged_T_mel > 0)
+                         ? cohere_run_encoder_staged(ctx, staged_mel, staged_n_mels, staged_T_mel, stage_cb, &cap)
+                         : -1;
+            // Debug: print pre_enc_out and layer 0 first values
+            if (rc == 0 && cap.stages.count("pre_enc_out")) {
+                auto& pe = cap.stages["pre_enc_out"];
+                printf("[DBG ] pre_enc_out[0..3]=%.4f %.4f %.4f %.4f  size=%zu\n", pe[0], pe[1], pe[2], pe[3],
+                       pe.size());
+            }
+            if (rc == 0 && cap.stages.count("enc_L00")) {
+                auto& l0 = cap.stages["enc_L00"];
+                auto rp = ref.get_f32("encoder_layer_0");
+                printf("[DBG ] cpp L0[0..3]=%.4f %.4f %.4f %.4f\n", l0[0], l0[1], l0[2], l0[3]);
+                if (rp.first)
+                    printf("[DBG ] ref L0[0..3]=%.4f %.4f %.4f %.4f\n", rp.first[0], rp.first[1], rp.first[2],
+                           rp.first[3]);
+            }
+            if (rc == 0) {
+                char stage_cpp[32], stage_ref[32];
+                for (int il = 0; il < 48; il++) {
+                    snprintf(stage_cpp, sizeof(stage_cpp), "enc_L%02d", il);
+                    snprintf(stage_ref, sizeof(stage_ref), "encoder_layer_%d", il);
+                    if (!cap.stages.count(stage_cpp) || !ref.has(stage_ref))
+                        break;
+                    auto& v = cap.stages[stage_cpp];
+                    auto rep = ref.compare(stage_ref, v.data(), v.size());
+                    char label[48];
+                    snprintf(label, sizeof(label), "encoder_layer_%d", il);
+                    print_row(label, rep, COS_THRESHOLD);
+                    record(rep);
+                }
+                if (cap.stages.count("enc_out") && ref.has("encoder_output")) {
+                    auto& v = cap.stages["enc_out"];
+                    auto rep = ref.compare("encoder_output", v.data(), v.size());
+                    print_row("encoder_output_staged", rep, COS_THRESHOLD);
+                    record(rep);
+                }
+            } else {
+                printf("[SKIP] staged encoder  cohere_run_encoder_staged failed\n");
+            }
+        }
+
         cohere_free(ctx);
     } else if (backend_name == "gemma4" || backend_name == "gemma4-e2b") {
         auto cp = gemma4_e2b_context_default_params();
@@ -2942,6 +3003,112 @@ int main(int argc, char** argv) {
         }
 
         firered_asr_free(ctx);
+    } else if (backend_name == "voxcpm2-tts") {
+        auto cp = voxcpm2_context_default_params();
+        cp.n_threads = 4;
+        cp.verbosity = 0;
+        struct voxcpm2_context* ctx = voxcpm2_init_from_file(model_path.c_str(), cp);
+        if (!ctx) {
+            fprintf(stderr, "failed to load voxcpm2-tts model\n");
+            return 4;
+        }
+
+        // Retrieve the synthesis text from the reference archive metadata, or use default.
+        std::string syn_text = ref.meta("syn_text");
+        if (syn_text.empty())
+            syn_text = "Hello, this is a test of the VoxCPM2 text-to-speech system.";
+
+        // VoxCPM2 is a TTS model — the audio arg is only used for voice cloning.
+        // For zero-shot diff, ref_samples=nullptr.
+        const float* ref_audio = nullptr;
+        int ref_n_audio = 0;
+
+        // Use a lower threshold for VAE-decoded audio (lossy reconstruction).
+        const float COS_TTS_AUDIO = 0.99f;
+
+        // Stage list matching the Python dumper's DEFAULT_STAGES order.
+        static const char* stages[] = {
+            "text_input_ids",
+            "locenc_out",
+            "tslm_prefill_out",
+            "ralm_prefill_out",
+            "cfm_step0_result",
+            "decoded_audio",
+            // Stages not yet implemented in C++ — will gracefully skip:
+            "locenc_in",
+            "enc_to_lm",
+            "tslm_layer_0_out",
+            "tslm_layer_27_out",
+            "lm_to_dit_hidden",
+            "res_to_dit_hidden",
+            "cfm_step0_z",
+            "stop_logits_step0",
+        };
+
+        for (const char* stage : stages) {
+            // Check if reference has this stage
+            auto ref_shape = ref.shape(stage);
+            if (ref_shape.empty()) {
+                printf("[SKIP] %-22s (not in reference archive)\n", stage);
+                n_skip++;
+                continue;
+            }
+
+            int n_out = 0;
+            float* buf = voxcpm2_extract_stage(ctx, syn_text.c_str(), ref_audio, ref_n_audio, stage, &n_out);
+            if (!buf || n_out == 0) {
+                printf("[SKIP] %-22s (C++ stage not implemented)\n", stage);
+                n_skip++;
+                continue;
+            }
+
+            float threshold = COS_THRESHOLD;
+            if (strcmp(stage, "decoded_audio") == 0)
+                threshold = COS_TTS_AUDIO;
+            // text_input_ids is integer — ref stores I32, compare manually
+            if (strcmp(stage, "text_input_ids") == 0) {
+                auto ref_pair = ref.get_f32(stage);
+                if (!ref_pair.first || ref_pair.second == 0) {
+                    // Reference tensor exists but is I32 (not F32). The C++ stage
+                    // returns float-casted token IDs, so we can't compare via the
+                    // standard F32 path. Report the token count as informational.
+                    printf("[INFO] %-22s n_tokens=%d  (ref is I32, skipped — see dump log)\n", stage, n_out);
+                    n_skip++;
+                } else {
+                    size_t n = std::min((size_t)n_out, ref_pair.second);
+                    float max_abs = 0.0f;
+                    for (size_t i = 0; i < n; i++) {
+                        float d = buf[i] - ref_pair.first[i];
+                        float ad = d < 0 ? -d : d;
+                        if (ad > max_abs)
+                            max_abs = ad;
+                    }
+                    const bool pass = max_abs < 0.5f && (size_t)n_out == ref_pair.second;
+                    printf("%s %-22s n_tokens=%d (ref=%zu)  max_abs=%.1f%s\n", pass ? "[PASS]" : "[FAIL]", stage, n_out,
+                           ref_pair.second, max_abs, pass ? "" : "  TOKEN MISMATCH");
+                    if (pass)
+                        n_pass++;
+                    else
+                        n_fail++;
+                }
+                free(buf);
+                continue;
+            } else {
+                auto rep = ref.compare(stage, buf, (size_t)n_out);
+                print_row(stage, rep, threshold);
+                if (!rep.found) {
+                    n_skip++;
+                } else if (rep.is_pass(threshold)) {
+                    n_pass++;
+                } else {
+                    n_fail++;
+                }
+            }
+
+            free(buf);
+        }
+
+        voxcpm2_free(ctx);
     } else {
         fprintf(stderr,
                 "crispasr-diff: backend '%s' is not recognised. "

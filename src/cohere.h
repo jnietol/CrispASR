@@ -97,6 +97,12 @@ float* cohere_compute_mel(struct cohere_context* ctx, const float* samples, int 
 float* cohere_run_encoder(struct cohere_context* ctx, const float* mel, int n_mels, int T_mel, int* out_T_enc,
                           int* out_d_model);
 
+// Staged encoder: runs the encoder with per-layer snapshots for crispasr-diff.
+// Callback receives each snapshot: name, data, T_enc, d_model.
+typedef void (*cohere_stage_cb)(const char* name, const float* data, int T_enc, int d_model, void* userdata);
+int cohere_run_encoder_staged(struct cohere_context* ctx, const float* mel, int n_mels, int T_mel, cohere_stage_cb cb,
+                              void* userdata);
+
 #ifdef __cplusplus
 }
 #endif

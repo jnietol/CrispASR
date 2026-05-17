@@ -34,9 +34,7 @@ DEFAULT_STAGES = [
     "raw_audio",
     "mel_spectrogram",
     "enc_pre_subsample_out",
-    "enc_blk00_out",
-    "enc_blk_mid_out",
-    "enc_blk_last_out",
+] + [f"encoder_layer_{i}" for i in range(48)] + [
     "encoder_output",      # final encoder hidden state (post enc→dec proj)
     "llm_argmax",          # greedy decoded token IDs from model.generate()
     "generated_text",      # decoded transcript (special tokens stripped)
@@ -126,12 +124,19 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
 
     handles = []
     # Per-layer hooks (only the three we expose in DEFAULT_STAGES).
-    layer_hooks = {
+    # Per-layer hooks for full diagnosis
+    for i in range(n_layers):
+        stage_name = f"encoder_layer_{i}"
+        if stage_name in stages:
+            handles.append(
+                encoder.layers[i].register_forward_hook(cap(stage_name)))
+    # Legacy stage names (keep for backwards compat with old refs)
+    legacy_hooks = {
         "enc_blk00_out":    0,
         "enc_blk_mid_out":  max(1, n_layers // 2),
         "enc_blk_last_out": n_layers - 1,
     }
-    for stage_name, idx in layer_hooks.items():
+    for stage_name, idx in legacy_hooks.items():
         if stage_name in stages:
             handles.append(
                 encoder.layers[idx].register_forward_hook(cap(stage_name)))
