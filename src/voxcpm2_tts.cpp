@@ -2430,18 +2430,6 @@ static float* vox_synthesize_internal(voxcpm2_context* ctx, const char* text, co
         patch_enc_in.resize(feat_dim_vae * P_frames, 0.0f);
         std::vector<float> enc_out = locenc_forward(ctx, patch_enc_in.data(), cpu_be);
 
-        // c. Stop check (uses TSLM lm_hidden, not LocEnc output)
-        float sp = stop_score(ctx, tslm_hidden.data(), cpu_be);
-        if (ctx->verbosity >= 2) {
-            fprintf(stderr, "voxcpm2: step %d stop=%.3f (%.1f ms)\n", step, sp, vox_now_ms() - t0_step);
-        }
-        if (sp > stop_thresh && step > 0) {
-            if (ctx->verbosity >= 1) {
-                fprintf(stderr, "voxcpm2: stopped at step %d (stop=%.3f)\n", step, sp);
-            }
-            break;
-        }
-
         // d. enc_to_lm_proj: locenc_d -> tslm_d
         std::vector<float> enc_lm(d_lm, 0.0f);
         if (ctx->weights.enc_to_lm_w && ctx->weights.enc_to_lm_b) {
@@ -2466,6 +2454,20 @@ static float* vox_synthesize_internal(voxcpm2_context* ctx, const char* text, co
             rms_norm_cpu(h.data(), tensor_data_f32(ctx->weights.tslm_output_norm), normed.data(), d_lm,
                          ctx->hp.rms_norm_eps);
             tslm_hidden = normed;
+        }
+
+        // c. Stop check (after TSLM step, using updated lm_hidden)
+        {
+            float sp = stop_score(ctx, tslm_hidden.data(), cpu_be);
+            if (ctx->verbosity >= 2) {
+                fprintf(stderr, "voxcpm2: step %d stop=%.3f (%.1f ms)\n", step, sp, vox_now_ms() - t0_step);
+            }
+            if (sp > stop_thresh && step > 0) {
+                if (ctx->verbosity >= 1) {
+                    fprintf(stderr, "voxcpm2: stopped at step %d (stop=%.3f)\n", step + 1, sp);
+                }
+                break;
+            }
         }
 
         // f. FSQ
