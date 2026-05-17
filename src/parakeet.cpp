@@ -520,20 +520,28 @@ static void parakeet_fold_batchnorm(parakeet_model& model) {
         for (int c = 0; c < d; c++)
             s[c] = bn_w[c] / sqrtf(bn_var[c] + eps);
 
-        // Fold s into conv_dw_w (F16, ggml shape [K, 1, d]).
+        // Fold s into conv_dw_w (ggml shape [K, 1, d]).
         {
-            std::vector<float> w_f32((size_t)K * d);
-            // dw_w is stored as F16; read+convert via ggml helpers.
-            std::vector<ggml_fp16_t> w_f16((size_t)K * d);
-            ggml_backend_tensor_get(e.conv_dw_w, w_f16.data(), 0, w_f16.size() * sizeof(ggml_fp16_t));
-            for (size_t i = 0; i < w_f16.size(); i++)
-                w_f32[i] = ggml_fp16_to_fp32(w_f16[i]);
+            const size_t n = (size_t)K * d;
+            std::vector<float> w_f32(n);
+            if (e.conv_dw_w->type == GGML_TYPE_F32) {
+                ggml_backend_tensor_get(e.conv_dw_w, w_f32.data(), 0, n * sizeof(float));
+            } else {
+                std::vector<ggml_fp16_t> tmp(n);
+                ggml_backend_tensor_get(e.conv_dw_w, tmp.data(), 0, n * sizeof(ggml_fp16_t));
+                for (size_t i = 0; i < n; i++)
+                    w_f32[i] = ggml_fp16_to_fp32(tmp[i]);
+            }
             for (int c = 0; c < d; c++)
                 for (int ki = 0; ki < K; ki++)
                     w_f32[ki + c * K] *= s[c];
-            for (size_t i = 0; i < w_f16.size(); i++)
-                w_f16[i] = ggml_fp32_to_fp16(w_f32[i]);
-            ggml_backend_tensor_set(e.conv_dw_w, w_f16.data(), 0, w_f16.size() * sizeof(ggml_fp16_t));
+            if (e.conv_dw_w->type == GGML_TYPE_F32) {
+                ggml_backend_tensor_set(e.conv_dw_w, w_f32.data(), 0, n * sizeof(float));
+            } else {
+                std::vector<ggml_fp16_t> tmp(n);
+                ggml_fp32_to_fp16_row(w_f32.data(), tmp.data(), (int)n);
+                ggml_backend_tensor_set(e.conv_dw_w, tmp.data(), 0, n * sizeof(ggml_fp16_t));
+            }
         }
 
         // Fold into conv_dw_b: b[c] = (existing_b[c] - mean[c]) * s[c] + bn_b[c]

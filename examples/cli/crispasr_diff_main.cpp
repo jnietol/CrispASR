@@ -3098,7 +3098,8 @@ int main(int argc, char** argv) {
             }
 
             float threshold = COS_THRESHOLD;
-            if (strcmp(stage, "decoded_audio") == 0) threshold = COS_TTS_AUDIO;
+            if (strcmp(stage, "decoded_audio") == 0)
+                threshold = COS_TTS_AUDIO;
             // Stages computed via multi-layer F16-weight forward pass accumulate
             // precision differences (reference runs in F16, C++ in F32).
             // Use cos_mean >= 0.99 (relaxed) for these, strict cos_min >= 0.999 for others.
@@ -3168,19 +3169,23 @@ int main(int argc, char** argv) {
                     std::string shape_str = "[";
                     for (size_t i = 0; i < rep.shape.size(); i++) {
                         shape_str += std::to_string(rep.shape[i]);
-                        if (i + 1 < rep.shape.size()) shape_str += ",";
+                        if (i + 1 < rep.shape.size())
+                            shape_str += ",";
                     }
                     shape_str += "]";
                     printf("%s %-22s shape=%-16s cos_min=%.6f  cos_mean=%.6f  max_abs=%.2e  rms=%.2e"
                            "  thr=%.2f(cos_mean)\n",
-                           tag, stage, shape_str.c_str(), rep.cos_min, rep.cos_mean,
-                           rep.max_abs, rep.rms, threshold);
+                           tag, stage, shape_str.c_str(), rep.cos_min, rep.cos_mean, rep.max_abs, rep.rms, threshold);
                 } else {
                     print_row(stage, rep, threshold);
                 }
-                if (!rep.found) { n_skip++; }
-                else if (pass) { n_pass++; }
-                else { n_fail++; }
+                if (!rep.found) {
+                    n_skip++;
+                } else if (pass) {
+                    n_pass++;
+                } else {
+                    n_fail++;
+                }
             }
 
             free(buf);
