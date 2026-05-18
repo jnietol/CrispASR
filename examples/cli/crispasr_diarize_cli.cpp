@@ -220,7 +220,7 @@ bool apply_sherpa(const std::vector<float>& mono, int64_t slice_t0_cs, std::vect
     // clang-format off
     cmd << bin
         << " --clustering.num-clusters=" << params.sherpa_num_clusters
-        << " --segmentation.pyannote.model='" << params.sherpa_segment_model << "'"
+        << " --segmentation.pyannote-model='" << params.sherpa_segment_model << "'"
         << " --embedding.model='" << params.sherpa_embedding_model << "'"
         << " '" << wav_path << "'";
     // clang-format on
