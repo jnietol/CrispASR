@@ -172,13 +172,14 @@ static void bilstm_forward(const float* input, int T, int C_in, const pyannote_l
                 gates[g] = sum;
             }
 
-            // i=sigmoid, f=sigmoid, g=tanh, o=sigmoid
+            // ONNX LSTM gate order is i, o, f, c (cell candidate), not
+            // PyTorch's common i, f, g, o ordering.
             for (int j = 0; j < H; j++) {
                 float i_g = sigmoid(gates[0 * H + j]);
-                float f_g = sigmoid(gates[1 * H + j]);
-                float g_g = tanhf(gates[2 * H + j]);
-                float o_g = sigmoid(gates[3 * H + j]);
-                c[j] = f_g * c[j] + i_g * g_g;
+                float o_g = sigmoid(gates[1 * H + j]);
+                float f_g = sigmoid(gates[2 * H + j]);
+                float c_g = tanhf(gates[3 * H + j]);
+                c[j] = f_g * c[j] + i_g * c_g;
                 h[j] = o_g * tanhf(c[j]);
             }
 
