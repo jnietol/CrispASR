@@ -16,6 +16,35 @@ trade-off:
 
 All seven write 24 kHz mono WAV via `--tts-output`.
 
+### Reproducible / diverse generation (`--seed`)
+
+Pass `--seed N` (any non-zero integer) for **reproducible** output —
+the same seed + prompt + voice produces identical audio across runs.
+Pass `--seed 0` (the default) for non-deterministic sampling, where
+each run can produce a different prosody or phrasing.
+
+```bash
+# Reproducible:
+./build/bin/crispasr --backend qwen3-tts -m auto \
+    --tts "Good morning." --seed 42 --tts-output out1.wav
+./build/bin/crispasr --backend qwen3-tts -m auto \
+    --tts "Good morning." --seed 42 --tts-output out2.wav
+# out1.wav == out2.wav (bit-identical)
+
+# Diverse — different seeds produce different renderings:
+./build/bin/crispasr --backend qwen3-tts -m auto \
+    --tts "Good morning." --seed 1 --tts-output variant1.wav
+./build/bin/crispasr --backend qwen3-tts -m auto \
+    --tts "Good morning." --seed 2 --tts-output variant2.wav
+```
+
+The seed is wired through every TTS backend that samples: qwen3-tts,
+chatterbox, indextts, orpheus (via temperature), voxcpm2 (CFM noise),
+and vibevoice. It also works for ASR backends with temperature
+sampling (parakeet, canary, cohere, qwen3-asr, voxtral4b, granite,
+glm-asr, kyutai-stt, moonshine). The server API accepts `"seed"` in
+the `/v1/audio/speech` JSON body.
+
 For HTTP usage, see [`docs/server.md`](server.md) — `POST
 /v1/audio/speech` is the OpenAI-compatible TTS endpoint, available on
 any `crispasr --server` instance whose loaded backend declares
@@ -153,6 +182,7 @@ defaults reproduce the validated, end-to-end-tested code path.
 
 | Variable | Default | Effect when set |
 |---|---|---|
+| `QWEN3_TTS_SEED` | `42` | Override the AR sampling seed (superseded by `--seed N` on the CLI). |
 | `QWEN3_TTS_MAX_FRAMES` | `1500` | Hard cap on AR decode steps. Short prompts that fail to sample `codec_eos` would otherwise run to the 1500-frame ceiling. |
 | `QWEN3_TTS_O15` | unset | Pin code-predictor `Lk = cp_kv_max_ctx` and reuse one cached T=1 graph across AR steps 2..14 (saves ~14-19 ms/frame on Mac/Metal — alloc+build collapse from ~20 ms/frame to ~1.6 ms/frame). Default flipped back to OFF after [#56](https://github.com/CrispStrobe/CrispASR/issues/56): the cached-graph reuse asserts on the CUDA backend (`GGML_ASSERT` in `ggml_backend_tensor_set` on first `code_pred_generate_15` call, Jetson Orin AGX sm_87). M1 Metal users who want the speedup should set `QWEN3_TTS_O15=1`. Default goes back to ON once the CUDA path is verified. |
 | `QWEN3_TTS_FUSED_QKV` | unset | Fuse Q+K+V weights into one matmul per talker layer at load time (F16/F32 talker only; auto-skipped for Q8_0/Q4_K). Bit-identical to the unfused path on M1 Metal; speed effect is machine-dependent. |
@@ -337,8 +367,8 @@ forks on the input sample rate:
   underlying ggml-Metal numerical issue is tracked separately.
 - T3 sampling can produce unrelated text on long technical prompts
   (sampler drift). Short, common phrases work reliably; if a prompt
-  produces gibberish, try a different seed via
-  `CRISPASR_CHATTERBOX_SEED=<n>`.
+  produces gibberish, try a different seed via `--seed <n>` (or the
+  legacy env `CRISPASR_CHATTERBOX_T3_SEED=<n>`).
 
 The parity-quality compute kernels are bit- or fp32-rounding-tight
 against PyTorch — verified via `crispasr-diff chatterbox` on the
