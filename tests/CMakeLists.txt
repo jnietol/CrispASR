@@ -252,6 +252,22 @@ catch_discover_tests(test-stream-punc
     PROPERTIES LABELS "unit;stream-json"
 )
 
+# JSON streaming partial-decode cadence (PR #113). Pure arithmetic on
+# the throttle predicate + interval conversion; no model, no audio.
+add_executable(test-stream-partial-decode
+    test-stream-partial-decode.cpp
+)
+target_include_directories(test-stream-partial-decode PRIVATE
+    ${PROJECT_SOURCE_DIR}/examples/cli
+)
+target_link_libraries(test-stream-partial-decode PRIVATE
+    Catch2::Catch2WithMain
+)
+catch_discover_tests(test-stream-partial-decode
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit;stream-json"
+)
+
 # Pyannote-seg → ASR-segment speaker scoring (issue #107). Drives the
 # internal helper with synthetic log-softmax posteriors; no model, no
 # audio. Links against libcrispasr so it tests the actually-shipped

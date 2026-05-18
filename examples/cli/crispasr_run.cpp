@@ -23,6 +23,7 @@
 #include "crispasr_speaker_embedder.h"
 #include "crispasr_mem.h"
 #include "crispasr_stream_finalize.h"
+#include "crispasr_stream_partial_decode.h"
 #include "crispasr_stream_punc.h"
 #include "whisper_params.h"
 #include "fireredpunc.h"
@@ -1455,9 +1456,7 @@ int crispasr_run_backend(const whisper_params& params_in) {
         int64_t cumulative_samples = 0;
         const int64_t utterance_max_samples = (int64_t)params.stream_utterance_max_sec * SR;
         const int64_t partial_decode_interval_samples =
-            ((int64_t)(params.stream_partial_decode_ms > 0 ? params.stream_partial_decode_ms : params.stream_step_ms) *
-             SR) /
-            1000;
+            crispasr_stream_partial_decode_interval_samples(params.stream_partial_decode_ms, params.stream_step_ms, SR);
         // Track whether the audio source ever produced any samples; if
         // it goes EOF without a single one, the subprocess most likely
         // failed before delivering PCM (e.g. ffmpeg couldn't open the
@@ -1529,10 +1528,9 @@ int crispasr_run_backend(const whisper_params& params_in) {
                     params.stream_json && params.stream_final_silence_ms > 0 && have_open_utterance &&
                     last_speech_end_sample > 0 &&
                     (cumulative_samples - last_speech_end_sample) * 1000 / SR >= params.stream_final_silence_ms;
-                const bool allow_partial_decode =
-                    !params.stream_json || last_partial_decode_sample < 0 || final_silence_due ||
-                    (partial_decode_interval_samples <= 0 ||
-                     cumulative_samples - last_partial_decode_sample >= partial_decode_interval_samples);
+                const bool allow_partial_decode = crispasr_stream_partial_decode_allow(
+                    params.stream_json, last_partial_decode_sample, final_silence_due, cumulative_samples,
+                    partial_decode_interval_samples);
                 bool partial_decode_attempted_this_step = false;
                 constexpr int kStraddleMinSamples = 32000; // 2 s @ 16 kHz; backend-safe tail decode floor.
                 for (const auto& sl : slices) {

@@ -235,6 +235,20 @@ utterance state machine. When trailing silence has crossed the finalization
 threshold, one step may bypass the partial-decode throttle before finalization
 so short-utterance fallback finals can use a fresh normal partial.
 
+The default value `0` means **"follow `--stream-step`"** — the throttle is
+always conceptually present in the JSON+VAD path, but at `0` it locks to the
+step cadence so every step decodes (matching the pre-#113 behaviour). It is
+NOT "throttling disabled"; rather, the interval is set to one step's worth of
+audio. Set `--stream-partial-decode-ms` to a value **larger than `--stream-step`**
+to actually space out partial decodes. Setting it smaller than the step has no
+effect — the gate only fires on stream-step boundaries, so the effective
+minimum is one step regardless of what you pass.
+
+The first step of a stream is always allowed (so the first partial fires
+immediately), and `--stream-partial-decode-ms` is a no-op outside the
+`--stream-json --vad` combination — non-JSON streaming always decodes every
+step.
+
 > **Note (issue #84).** Before May 2026, `--stream-length` was a
 > *ceiling* on `keep + step` rather than a true rolling cap, so
 > `--stream-length 18000 --stream-keep 200 --stream-step 3000`
