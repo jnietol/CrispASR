@@ -16,6 +16,8 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <cmath>
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -382,20 +384,20 @@ CA_EXPORT float crispasr_detect_language(whisper_context* ctx, const float* pcm,
 }
 
 // =========================================================================
-// VAD — run Silero on PCM, return [start_s, end_s] pairs
+// VAD — run Silero on PCM, return [start_cs, end_cs] pairs
 // =========================================================================
 //
-// `out_spans` is a malloc'd array of floats (2 per span). The caller must
-// pass the pointer back to `crispasr_vad_free` when done. Returns the number
-// of speech segments detected (>= 0), or a negative error.
+// `out_spans` is a malloc'd array of centisecond floats (2 per span). The
+// caller must pass the pointer back to `crispasr_vad_free` when done. Returns
+// the number of speech segments detected (>= 0), or a negative error.
 //
 //   -1  bad arguments
 //   -2  model init failed
 //   -3  VAD inference failed
 
 CA_EXPORT int crispasr_vad_segments(const char* vad_model_path, const float* pcm, int n_samples, int sample_rate,
-                                    float threshold, int min_speech_ms, int min_silence_ms, int n_threads, bool use_gpu,
-                                    float** out_spans) {
+                                     float threshold, int min_speech_ms, int min_silence_ms, int n_threads, bool use_gpu,
+                                     float** out_spans) {
     if (!vad_model_path || !pcm || n_samples <= 0 || !out_spans)
         return -1;
     *out_spans = nullptr;
@@ -444,6 +446,68 @@ CA_EXPORT int crispasr_vad_segments(const char* vad_model_path, const float* pcm
     // Silero VAD internally assumes 16 kHz — if we later add automatic
     // resampling here, callers don't have to change.
     (void)sample_rate;
+    return n;
+}
+
+// Dispatcher-backed VAD slicing. Unlike crispasr_vad_segments above, this
+// routes through crispasr_compute_vad_slices so GGUF VAD backends such as
+// Whisper-VAD-EncDec, FireRedVAD, and MarbleNet use the same path as the CLI.
+//
+// `out_spans` is a malloc'd array of [start_s, end_s] float pairs. The caller
+// must pass it to crispasr_vad_free. Returns the number of slices (>= 0), or a
+// negative error.
+//
+//   -1  bad arguments
+//   -2  allocation failed
+CA_EXPORT int crispasr_vad_slices(const char* vad_model_path, const float* pcm, int n_samples, int sample_rate,
+                                  float threshold, int min_speech_ms, int min_silence_ms, int speech_pad_ms,
+                                  float max_chunk_duration_s, int n_threads, float** out_spans) {
+    if (!vad_model_path || !*vad_model_path || !pcm || n_samples <= 0 || sample_rate <= 0 || !out_spans)
+        return -1;
+    *out_spans = nullptr;
+
+    crispasr_vad_options opts;
+    if (threshold > 0.0f) {
+        opts.threshold = threshold;
+        opts.threshold_explicit = true;
+    }
+    if (min_speech_ms > 0)
+        opts.min_speech_duration_ms = min_speech_ms;
+    if (min_silence_ms > 0)
+        opts.min_silence_duration_ms = min_silence_ms;
+    const int pad_ms = speech_pad_ms > 0 ? speech_pad_ms : 0;
+    // Apply padding below for all dispatcher backends. Some implementations
+    // (for example Whisper-VAD-EncDec) ignore opts.speech_pad_ms internally.
+    opts.speech_pad_ms = 0;
+    if (max_chunk_duration_s > 0.0f)
+        opts.chunk_seconds = (int)std::ceil(max_chunk_duration_s);
+    else
+        opts.chunk_seconds = 0;
+    if (n_threads > 0)
+        opts.n_threads = n_threads;
+
+    std::vector<crispasr_audio_slice> slices = crispasr_compute_vad_slices(pcm, n_samples, sample_rate, vad_model_path, opts);
+    const int n = (int)slices.size();
+    if (n == 0)
+        return 0;
+
+    float* buf = (float*)std::malloc(sizeof(float) * 2 * n);
+    if (!buf)
+        return -2;
+
+    const float duration_s = (float)n_samples / (float)sample_rate;
+    const float pad_s = (float)pad_ms / 1000.0f;
+    for (int i = 0; i < n; ++i) {
+        float start_s = (float)slices[i].t0_cs / 100.0f;
+        float end_s = (float)slices[i].t1_cs / 100.0f;
+        if (pad_s > 0.0f) {
+            start_s = std::max(0.0f, start_s - pad_s);
+            end_s = std::min(duration_s, end_s + pad_s);
+        }
+        buf[2 * i + 0] = start_s;
+        buf[2 * i + 1] = end_s;
+    }
+    *out_spans = buf;
     return n;
 }
 

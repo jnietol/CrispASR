@@ -409,7 +409,7 @@ static wvad_result wvad_forward(whisper_vad_encdec_context* ctx, const float* me
         h = ggml_add(ctx0, h, f32(m.conv1_b));
         h = ggml_cont(ctx0, ggml_transpose(ctx0, h));
     }
-    h = ggml_gelu(ctx0, h);
+    h = ggml_gelu_erf(ctx0, h);
     ggml_tensor* conv2_w_f16 = ggml_cast(ctx0, m.conv2_w, GGML_TYPE_F16);
     h = ggml_conv_1d_ph(ctx0, conv2_w_f16, h, 2, 1); // stride=2: 3000->1500
     if (m.conv2_b) {
@@ -417,7 +417,7 @@ static wvad_result wvad_forward(whisper_vad_encdec_context* ctx, const float* me
         h = ggml_add(ctx0, h, f32(m.conv2_b));
         h = ggml_cont(ctx0, ggml_transpose(ctx0, h));
     }
-    h = ggml_gelu(ctx0, h);
+    h = ggml_gelu_erf(ctx0, h);
 
     // h after conv2+bias is [T, d] from transpose back. It was already transposed in bias add.
     // After conv2 bias: h = [T, C] → transposed back from [C, T].
@@ -476,7 +476,7 @@ static wvad_result wvad_forward(whisper_vad_encdec_context* ctx, const float* me
         h = ggml_mul_mat(ctx0, L.fc1_w, h);
         if (f32(L.fc1_b))
             h = ggml_add(ctx0, h, f32(L.fc1_b));
-        h = ggml_gelu(ctx0, h);
+        h = ggml_gelu_erf(ctx0, h);
         h = ggml_mul_mat(ctx0, L.fc2_w, h);
         if (f32(L.fc2_b))
             h = ggml_add(ctx0, h, f32(L.fc2_b));
@@ -493,10 +493,13 @@ static wvad_result wvad_forward(whisper_vad_encdec_context* ctx, const float* me
     ggml_set_output(enc_out);
 
     // ── Decoder (2 layers with self-attn + cross-attn) ──
-    // Input: position queries [d, T, 1] → squeeze to [d, T]
+    // ONNX/PyTorch initializes the decoder stream with encoder states plus
+    // learned position queries: `decoder_input = encoder_output + queries`.
+    // Using queries alone severely de-calibrates the frame classifier.
     ggml_tensor* tgt = m.dec_pos_queries;
     if (ggml_n_dims(tgt) > 2)
         tgt = ggml_cont(ctx0, ggml_reshape_2d(ctx0, tgt, d, T));
+    tgt = ggml_add(ctx0, enc_out, tgt);
 
     for (int il = 0; il < m.n_dec_layers; il++) {
         auto& L = m.dec[il];

@@ -745,6 +745,42 @@ extern "C" {
     CRISPASR_API void whisper_vad_free_segments(struct whisper_vad_segments * segments);
     CRISPASR_API void whisper_vad_free         (struct whisper_vad_context  * ctx);
 
+    // CrispASR C-ABI VAD helpers.
+    //
+    // crispasr_vad_segments is the legacy Silero/whisper_vad path and returns
+    // malloc-owned [start_cs, end_cs] float pairs in centiseconds.
+    CRISPASR_API int crispasr_vad_segments(
+            const char * vad_model_path,
+            const float * pcm,
+                    int   n_samples,
+                    int   sample_rate,
+                  float   threshold,
+                    int   min_speech_ms,
+                    int   min_silence_ms,
+                    int   n_threads,
+                   bool   use_gpu,
+                  float ** out_spans);
+
+    // crispasr_vad_slices routes through CrispASR's shared VAD dispatcher and
+    // can use Silero, FireRedVAD, MarbleNet, or Whisper-VAD-EncDec depending
+    // on the concrete model path. It returns malloc-owned [start_s, end_s]
+    // float pairs in seconds. Passing threshold <= 0 leaves per-model default
+    // threshold behavior intact, including Whisper-VAD-EncDec auto-tuning.
+    CRISPASR_API int crispasr_vad_slices(
+            const char * vad_model_path,
+            const float * pcm,
+                    int   n_samples,
+                    int   sample_rate,
+                  float   threshold,
+                    int   min_speech_ms,
+                    int   min_silence_ms,
+                    int   speech_pad_ms,
+                  float   max_chunk_duration_s,
+                    int   n_threads,
+                  float ** out_spans);
+
+    CRISPASR_API void crispasr_vad_free(float * spans);
+
     ////////////////////////////////////////////////////////////////////////////
 
     // Temporary helpers needed for exposing ggml interface
