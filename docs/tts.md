@@ -358,13 +358,15 @@ forks on the input sample rate:
   to get a real clone.
 
 **Known issues for the native path**:
-- **Chatterbox T3 forward auto-falls back to CPU** when GPU is
-  requested. Metal has cumulative F16 logit drift that breaks
-  chatterbox's multinomial sampler past ~16 decode steps; the
-  runtime detects GPU mode and quietly switches to CPU with a
-  loud stderr warning so the output stays correct. Override with
-  `CRISPASR_CHATTERBOX_FORCE_GPU=1` (output may be garbled). The
-  underlying ggml-Metal numerical issue is tracked separately.
+- **Chatterbox T3+S3Gen auto-fall back to CPU** when GPU is requested.
+  GPU quantized mul_mat (Q4_K/Q5_K/Q6_K/Q8_0 weights) uses a different
+  dot-product algorithm than CPU's Q8_K-input path, accumulating ~1e-2
+  logit drift per forward pass. Past ~16 decode steps, chatterbox's
+  multinomial sampler diverges into garbled/repeating speech. Affects
+  Metal, Vulkan, and CUDA — not Metal-specific. F16 weights match
+  bit-identical but quantized weights all drift. The runtime detects
+  GPU mode and quietly switches to CPU. Override with
+  `CRISPASR_CHATTERBOX_FORCE_GPU=1` (output may be garbled).
 - T3 sampling can produce unrelated text on long technical prompts
   (sampler drift). Short, common phrases work reliably; if a prompt
   produces gibberish, try a different seed via `--seed <n>` (or the

@@ -2359,16 +2359,22 @@ extern "C" struct chatterbox_context* chatterbox_init_from_file(const char* path
         const char* split_env = std::getenv("CRISPASR_CHATTERBOX_T3_CPU_S3GEN_GPU");
         const bool split = split_env && *split_env && std::strcmp(split_env, "0") != 0;
 
+        // The quantized-weight mul_mat drift affects Metal, Vulkan, and
+        // potentially CUDA — the GPU dot-product algorithm diverges from
+        // CPU's Q8_K-input path. F16 weights match bit-identical but
+        // Q4_K/Q5_K/Q6_K/Q8_0 all drift. Not Metal-specific: Vulkan's
+        // mul_mat_vec_q4_k.comp uses the same F32-input algorithm.
+        // See commit 53ac0aa and PLAN #83 round 3.
         if (force_gpu) {
             fprintf(stderr, "chatterbox: T3+s3gen forced to GPU (CRISPASR_CHATTERBOX_FORCE_GPU=1) — output may be "
-                            "garbled past ~16 decode steps due to Metal F16 drift.\n");
+                            "garbled past ~16 decode steps due to quantized mul_mat drift.\n");
         } else if (split) {
             fprintf(stderr, "chatterbox: T3 → CPU, s3gen → GPU (CRISPASR_CHATTERBOX_T3_CPU_S3GEN_GPU=1). "
                             "WARNING: s3gen also drifts on GPU; expect broken audio.\n");
             t3_use_gpu = false;
         } else {
-            fprintf(stderr, "chatterbox: T3+s3gen auto-falling back to CPU — Metal/GPU has cumulative F16 "
-                            "drift that breaks chatterbox sampling past ~16 decode steps. Override with "
+            fprintf(stderr, "chatterbox: T3+s3gen auto-falling back to CPU — GPU has cumulative quantized "
+                            "mul_mat drift that breaks chatterbox sampling past ~16 decode steps. Override with "
                             "CRISPASR_CHATTERBOX_FORCE_GPU=1 (output may be garbled).\n");
             t3_use_gpu = false;
             s3gen_use_gpu = false;
