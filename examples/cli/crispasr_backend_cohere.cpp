@@ -5,9 +5,10 @@
 // grouping, so we emit one segment per transcribe() call with tokens
 // attached.
 //
-// Cohere's punctuation and diarization toggles are set on the context
-// params at init() time, not per call, so this backend reads them from
-// whisper_params once during init.
+// Cohere's punctuation toggle is set on the context params at init() time,
+// not per call, so this backend reads it from whisper_params once during init.
+// CLI --diarize is a generic post-processing pass; do not map it to Cohere's
+// experimental <|diarize|> decode prompt because that changes ASR text.
 
 #include "crispasr_backend.h"
 #include "crispasr_backend_utils.h"
@@ -38,7 +39,7 @@ public:
         cp.use_flash = p.flash_attn;
         cp.use_gpu = crispasr_backend_should_use_gpu(p);
         cp.no_punctuation = !p.punctuation;
-        cp.diarize = p.diarize;
+        cp.diarize = false;
         cp.verbosity = p.no_prints ? 0 : 1;
         if (getenv("CRISPASR_VERBOSE") || getenv("COHERE_BENCH"))
             cp.verbosity = 2;
