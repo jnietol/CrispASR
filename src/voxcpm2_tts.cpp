@@ -16,6 +16,7 @@ static int g_cpu_n_threads = 4;
 
 #include "voxcpm2_tts.h"
 #include "core/gguf_loader.h"
+#include "core/torch_rng.h"
 #include "ggml.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
@@ -258,11 +259,16 @@ struct vox_tokenizer {
 };
 
 // ---------------------------------------------------------------------------
-// MT19937 state (needed by voxcpm2_context for CFM noise generation)
-struct mt19937_state {
-    uint32_t mt[624];
-    int mti;
-};
+// MT19937 + torch.randn-compatible noise live in core/torch_rng.h. We pull
+// the names in here so the rest of the file reads as before.
+using mt19937_state = crispasr::core::mt19937_state;
+using crispasr::core::bf16_round;
+using crispasr::core::fill_gaussian_noise;
+using crispasr::core::fill_gaussian_noise_bf16;
+using crispasr::core::mt19937_next;
+using crispasr::core::mt19937_seed;
+using crispasr::core::mt_uniform_torch_float;
+using crispasr::core::torch_normal_fill_16;
 
 // ---------------------------------------------------------------------------
 // Context struct
@@ -394,89 +400,8 @@ static void matmul_mm(ggml_tensor* W, const float* X, int cols, int rows, int T,
 }
 
 // ---------------------------------------------------------------------------
-// MT19937 + PyTorch-compatible Gaussian noise (matches torch.randn on CPU)
-// Copied from vibevoice.cpp / chatterbox_s3gen.cpp (same implementation).
-// (struct mt19937_state defined above, before voxcpm2_context)
-// ---------------------------------------------------------------------------
-
-static void mt19937_seed(mt19937_state& s, uint32_t seed) {
-    s.mt[0] = seed;
-    for (int i = 1; i < 624; i++)
-        s.mt[i] = 1812433253u * (s.mt[i - 1] ^ (s.mt[i - 1] >> 30)) + (uint32_t)i;
-    s.mti = 624;
-}
-
-static uint32_t mt19937_next(mt19937_state& s) {
-    if (s.mti >= 624) {
-        for (int i = 0; i < 624; i++) {
-            uint32_t y = (s.mt[i] & 0x80000000u) | (s.mt[(i + 1) % 624] & 0x7FFFFFFFu);
-            s.mt[i] = s.mt[(i + 397) % 624] ^ (y >> 1);
-            if (y & 1)
-                s.mt[i] ^= 0x9908B0DFu;
-        }
-        s.mti = 0;
-    }
-    uint32_t y = s.mt[s.mti++];
-    y ^= (y >> 11);
-    y ^= (y << 7) & 0x9D2C5680u;
-    y ^= (y << 15) & 0xEFC60000u;
-    y ^= (y >> 18);
-    return y;
-}
-
-static inline float mt_uniform_torch_float(mt19937_state& rng) {
-    return (float)(mt19937_next(rng) & 0x00FFFFFFu) * (1.0f / 16777216.0f);
-}
-
-static void torch_normal_fill_16(float* data) {
-    for (int j = 0; j < 8; j++) {
-        const float u1 = 1.0f - data[j];
-        const float u2 = data[j + 8];
-        const float radius = sqrtf(-2.0f * logf(u1));
-        const float theta = 2.0f * (float)M_PI * u2;
-        data[j] = radius * cosf(theta);
-        data[j + 8] = radius * sinf(theta);
-    }
-}
-
-static void fill_gaussian_noise(float* data, int n, mt19937_state& rng) {
-    if (n <= 0)
-        return;
-
-    if (n < 16) {
-        float tmp[16];
-        for (int i = 0; i < 16; i++)
-            tmp[i] = mt_uniform_torch_float(rng);
-        torch_normal_fill_16(tmp);
-        memcpy(data, tmp, (size_t)n * sizeof(float));
-        return;
-    }
-
-    for (int i = 0; i < n; i++)
-        data[i] = mt_uniform_torch_float(rng);
-
-    int i = 0;
-    for (; i <= n - 16; i += 16)
-        torch_normal_fill_16(data + i);
-
-    if (i < n) {
-        float* tail = data + n - 16;
-        for (int j = 0; j < 16; j++)
-            tail[j] = mt_uniform_torch_float(rng);
-        torch_normal_fill_16(tail);
-    }
-}
-
-static void fill_gaussian_noise(float* data, int n, uint32_t seed) {
-    mt19937_state rng;
-    mt19937_seed(rng, seed);
-    fill_gaussian_noise(data, n, rng);
-}
-
-// BF16-compatible noise: forward-declared, defined after bf16_round (line ~1093)
-static void fill_gaussian_noise_bf16(float* data, int n, mt19937_state& rng);
-static void fill_gaussian_noise_bf16(float* data, int n, uint32_t seed);
-
+// MT19937 + torch.randn (F32 and BF16) noise live in core/torch_rng.h.
+// The using-declarations earlier in this file pull them into scope.
 // ---------------------------------------------------------------------------
 // RMS Norm (CPU, in-place-safe: x and y may differ)
 // ---------------------------------------------------------------------------
@@ -1023,92 +948,28 @@ static std::vector<float> locenc_forward(voxcpm2_context* ctx, const float* patc
 
 // ---------------------------------------------------------------------------
 // Sinusoidal time embedding
-// ---------------------------------------------------------------------------
-
-// BF16 round-trip: simulate bfloat16 precision for a float value
-static inline float bf16_round(float x) {
-    ggml_bf16_t bf = ggml_fp32_to_bf16(x);
-    return ggml_bf16_to_fp32(bf);
-}
-
-// ---------------------------------------------------------------------------
-// BF16-compatible Gaussian noise (matches torch.randn with dtype=bfloat16)
-//
-// PyTorch's BF16 randn uses a DIFFERENT bit extraction from MT19937 than F32:
-//   F32: (mt19937_next() & 0x00FFFFFF) / 16777216.0   (24-bit mantissa)
-//   BF16: (mt19937_next() & 0xFF)      / 256.0         (8-bit mantissa)
-// Then Box-Muller is applied with intermediate results rounded to BF16 precision.
-// Both consume the same number of MT19937 values but produce completely different sequences.
-// ---------------------------------------------------------------------------
-
-static inline float mt_uniform_bf16(mt19937_state& rng) {
-    return (float)(mt19937_next(rng) & 0xFFu) / 256.0f;
-}
-
-static void bf16_normal_fill_16(float* data) {
-    for (int j = 0; j < 8; j++) {
-        float u1 = bf16_round(1.0f - data[j]);
-        float u2 = data[j + 8];
-        float radius = bf16_round(sqrtf(bf16_round(-2.0f * bf16_round(logf(u1)))));
-        float theta = bf16_round(bf16_round(2.0f * (float)M_PI * u2));
-        data[j] = bf16_round(radius * bf16_round(cosf(theta)));
-        data[j + 8] = bf16_round(radius * bf16_round(sinf(theta)));
-    }
-}
-
-static void fill_gaussian_noise_bf16(float* data, int n, mt19937_state& rng) {
-    if (n <= 0)
-        return;
-
-    if (n < 16) {
-        float tmp[16];
-        for (int i = 0; i < 16; i++)
-            tmp[i] = mt_uniform_bf16(rng);
-        bf16_normal_fill_16(tmp);
-        std::memcpy(data, tmp, (size_t)n * sizeof(float));
-        return;
-    }
-
-    for (int i = 0; i < n; i++)
-        data[i] = mt_uniform_bf16(rng);
-
-    int i = 0;
-    for (; i <= n - 16; i += 16)
-        bf16_normal_fill_16(data + i);
-
-    if (i < n) {
-        float* tail = data + n - 16;
-        for (int j = 0; j < 16; j++)
-            tail[j] = mt_uniform_bf16(rng);
-        bf16_normal_fill_16(tail);
-    }
-}
-
-static void fill_gaussian_noise_bf16(float* data, int n, uint32_t seed) {
-    mt19937_state rng;
-    mt19937_seed(rng, seed);
-    fill_gaussian_noise_bf16(data, n, rng);
-}
-
+// (bf16_round + BF16-noise helpers come from core/torch_rng.h via the
+// using-declarations near the top of this file.)
 // ---------------------------------------------------------------------------
 
 static std::vector<float> sinusoidal_time_emb(float t_scalar, int dim) {
     // Matches Python SinusoidalPosEmb(dim).forward(x, scale=1000) in BF16:
     //   half_dim = dim // 2
-    //   emb = log(10000) / (half_dim - 1)
-    //   emb = exp(arange(half_dim) * -emb)        ← computed in BF16
-    //   emb = scale * x.unsqueeze(1) * emb        ← BF16 multiply chain
+    //   emb = log(10000) / (half_dim - 1)               ← Python float (F64), NOT bf16
+    //   emb = exp(arange(half_dim, dtype=bf16) * -emb)  ← arange is bf16; mul is bf16(F32*F32)
+    //   emb = scale * x.unsqueeze(1) * emb              ← scale=1000 (exact), x is bf16
     //   return cat(sin(emb), cos(emb))
-    // The model runs in BF16, so intermediate values are BF16-rounded.
+    // Verified bit-identical to torch SinusoidalPosEmb(bf16) for half_dim=512.
     int half_dim = dim / 2;
-    float log_base = std::log(10000.0f) / (float)(half_dim - 1);
-    float scale_val = bf16_round(1000.0f);
+    double log_base = std::log(10000.0) / (double)(half_dim - 1); // F64, not bf16-rounded
+    float scale_val = bf16_round(1000.0f);                        // 1000 is exact in bf16
     float x_val = bf16_round(t_scalar);
     std::vector<float> emb(dim, 0.0f);
     for (int i = 0; i < half_dim; i++) {
-        // freq = exp(-(float)i * log_base) computed & stored as BF16
-        float freq = bf16_round(std::exp(bf16_round(-(float)i * bf16_round(log_base))));
-        // val = scale * x * freq (BF16 multiply chain: each intermediate rounded)
+        float i_bf = bf16_round((float)i); // arange(dtype=bf16) loses precision for i>256
+        // freq = bf16(exp(bf16(i_bf * (-log_base))))
+        float freq = bf16_round(std::exp(bf16_round((float)(-(double)i_bf * log_base))));
+        // scale*x then *freq — two bf16 rounds matching Python's chained ops
         float val = bf16_round(bf16_round(scale_val * x_val) * freq);
         emb[i] = bf16_round(std::sin(val));            // first half: sin
         emb[i + half_dim] = bf16_round(std::cos(val)); // second half: cos
@@ -1306,12 +1167,17 @@ static std::vector<float> cfm_euler_solve(voxcpm2_context* ctx, const float* mu,
     }
 
     // Sway schedule: t_span = linspace(1, 0, steps+1) + sway*(cos(pi/2*t) - 1 + t)
-    // with sway_sampling_coef = 1.0 (default in VoxCPM2)
+    // with sway_sampling_coef = 1.0 (default in VoxCPM2). Python computes this in
+    // BF16 (model dtype); emulate per-op bf16 rounding to match torch bit-exactly.
+    // Verified against torch.linspace(...,dtype=bfloat16) + sway transform.
     std::vector<float> t_span(steps + 1);
     for (int i = 0; i <= steps; i++) {
-        float t = 1.0f - (float)i / (float)steps;
-        float sway = std::cos((float)M_PI / 2.0f * t) - 1.0f + t;
-        t_span[i] = t + sway; // sway_coef=1.0
+        float t = bf16_round(1.0f - (float)i / (float)steps);
+        float a = bf16_round((float)M_PI / 2.0f * t);
+        float cos_a = bf16_round(std::cos(a));
+        float c = bf16_round(cos_a - 1.0f);
+        float d = bf16_round(c + t);   // (cos-1) + t in bf16
+        t_span[i] = bf16_round(t + d); // sway_coef=1.0 (no-op mul)
     }
 
     // CFG zero-star: first N steps skip computation (use zero velocity)
@@ -3392,10 +3258,14 @@ float* voxcpm2_extract_stage(struct voxcpm2_context* ctx, const char* text, cons
         }
 
         // Token 2: time embedding (sinusoidal → MLP)
-        // t value at sway step 2 (first real LocDiT step)
-        float t_raw = 1.0f - 1.0f / 10.0f; // 0.9
-        float sway = std::cos((float)M_PI / 2.0f * t_raw) - 1.0f + t_raw;
-        float t_val = t_raw + sway;
+        // t value at sway step 2 (first real LocDiT step). Compute in bf16 to
+        // match Python's BF16 t_span (linspace+sway both run in bf16).
+        float t_raw = bf16_round(1.0f - 1.0f / 10.0f); // bf16(0.9)
+        float a = bf16_round((float)M_PI / 2.0f * t_raw);
+        float cos_a = bf16_round(std::cos(a));
+        float c = bf16_round(cos_a - 1.0f);
+        float d_term = bf16_round(c + t_raw);
+        float t_val = bf16_round(t_raw + d_term);
         auto t_sin = sinusoidal_time_emb(t_val, d_dit);
         const vox_weights& W = ctx->weights;
         std::vector<float> t_emb(d_dit), dt_emb(d_dit);
