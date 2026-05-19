@@ -55,7 +55,13 @@ static double vox_now_ms() {
 }
 
 // ---------------------------------------------------------------------------
-// Shared CPU backend for tiny ggml graph matmuls
+// Shared CPU backend for tiny ggml graph matmuls. Note: tried switching to
+// ggml_backend_init_best (Metal/CUDA) here but the current matmul_mv_ggml
+// allocates input tensors in a CPU-side mem buffer that Metal can't read
+// → SIGSEGV on first kernel dispatch. The proper fix is the per-step graph
+// refactor (build_locdit_graph, build_tslm_step_graph) with
+// ggml_backend_tensor_set / ggml_backend_alloc_ctx_tensors — those WILL
+// pick up Metal automatically once they're in place.
 // ---------------------------------------------------------------------------
 
 static ggml_backend_t g_cpu_backend = nullptr;
@@ -376,7 +382,9 @@ static void matmul_mv_ggml(ggml_backend_t cpu_be, ggml_tensor* W, const float* v
     ggml_cgraph* gf = ggml_new_graph(tmp_ctx);
     ggml_build_forward_expand(gf, result);
 
-    ggml_backend_cpu_set_n_threads(cpu_be, g_cpu_n_threads);
+    if (ggml_backend_is_cpu(cpu_be)) {
+        ggml_backend_cpu_set_n_threads(cpu_be, g_cpu_n_threads);
+    }
     ggml_backend_graph_compute(cpu_be, gf);
 
     std::memcpy(out, result->data, (size_t)rows * sizeof(float));
@@ -2844,7 +2852,9 @@ static float* vox_synthesize_internal(voxcpm2_context* ctx, const char* text, co
     *out_n_samples = 0;
 
     ggml_backend_t cpu_be = get_cpu_backend();
-    ggml_backend_cpu_set_n_threads(cpu_be, ctx->n_threads);
+    if (ggml_backend_is_cpu(cpu_be)) {
+        ggml_backend_cpu_set_n_threads(cpu_be, ctx->n_threads);
+    }
 
     // Seed RNG for CFM noise
     mt19937_seed(ctx->rng, ctx->seed != 0 ? ctx->seed : 42);
@@ -3279,7 +3289,9 @@ float* voxcpm2_extract_stage(struct voxcpm2_context* ctx, const char* text, cons
     *out_n = 0;
 
     ggml_backend_t cpu_be = get_cpu_backend();
-    ggml_backend_cpu_set_n_threads(cpu_be, ctx->n_threads);
+    if (ggml_backend_is_cpu(cpu_be)) {
+        ggml_backend_cpu_set_n_threads(cpu_be, ctx->n_threads);
+    }
 
     std::string stage(stage_name);
     std::vector<int32_t> token_ids = vox_tokenize(ctx->tokenizer, std::string(text));
