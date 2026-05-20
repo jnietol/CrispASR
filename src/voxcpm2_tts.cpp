@@ -1744,10 +1744,15 @@ static ggml_cgraph* build_locdit_graph(voxcpm2_context* ctx, ggml_context* arena
         K = ggml_cont(ctx0, ggml_permute(ctx0, K, 0, 2, 1, 3));
         V = ggml_cont(ctx0, ggml_permute(ctx0, V, 0, 2, 1, 3));
 
-        // Bidirectional flash-attn (no mask).
+        // Bidirectional flash-attn (no mask). PREC_F32 NOT set here —
+        // Metal's `supports_op` for FLASH_ATTN_EXT refuses any op tagged
+        // PREC_F32 (the chatterbox patch — gpu accumulator drift work),
+        // so leaving the default lets Metal pick its native F16 simdgroup
+        // path. The diff-harness gate (cfm_step0_result cos_mean ≥ 0.93)
+        // tolerates the resulting drift; bit-identical CPU vs Metal isn't
+        // required for voxcpm2.
         ggml_tensor* attn = ggml_flash_attn_ext(ctx0, Q, K, V, /*mask=*/nullptr, ascale, /*max_bias*/ 0.0f,
                                                 /*logit_softcap*/ 0.0f);
-        ggml_flash_attn_ext_set_prec(attn, GGML_PREC_F32);
         attn = ggml_reshape_2d(ctx0, attn, hd * n_q, T);
 
         // Output projection (no bias on attn)
@@ -3158,9 +3163,12 @@ static bool vox_load_weights(voxcpm2_context* ctx, const char* path) {
     free_metadata(meta);
 
     // --- Pass 2: weights ---
-    ggml_backend_t cpu_be = get_cpu_backend();
+    // Load onto ctx->backend (Metal when use_gpu on Apple Silicon, else
+    // CPU). Caller (voxcpm2_init_from_file) has already set ctx->backend
+    // / ctx->backend_cpu.
+    ggml_backend_t weight_backend = ctx->backend ? ctx->backend : get_cpu_backend();
     WeightLoad wl;
-    if (!load_weights(path, cpu_be, "voxcpm2", wl))
+    if (!load_weights(path, weight_backend, "voxcpm2", wl))
         return false;
 
     ctx->ggml_ctx = wl.ctx;
@@ -3912,19 +3920,39 @@ struct voxcpm2_context* voxcpm2_init_from_file(const char* path_model, struct vo
     ctx->max_len = params.max_len > 0 ? params.max_len : 2000;
     ctx->seed = params.seed;
 
-    if (!vox_load_weights(ctx, path_model)) {
-        fprintf(stderr, "voxcpm2: failed to load '%s'\n", path_model);
+    // Backend pool. With `use_gpu`, init_best picks Metal on Apple Silicon
+    // (the only relevant target for now — CUDA/Vulkan are untested for
+    // this backend). On Apple Silicon, Metal allocates in unified-memory
+    // "shared" mode, so `tensor->data` stays CPU-readable and the
+    // remaining legacy `matmul_mv_ggml` paths (TSLM/RALM prefill, LocEnc,
+    // VAE encode/decode, FSQ, stop) keep working against the same
+    // weight pointers the graph paths use. On non-shared Metal (rare on
+    // M-series) or discrete GPUs the legacy paths would SIGSEGV — we'd
+    // need to graph-ify them first; for now fall back to CPU there.
+    ctx->backend_cpu = get_cpu_backend();
+    if (!ctx->backend_cpu) {
+        fprintf(stderr, "voxcpm2: failed to init CPU backend\n");
         delete ctx;
         return nullptr;
     }
+    if (params.use_gpu) {
+        ctx->backend = ggml_backend_init_best();
+        if (!ctx->backend) {
+            if (params.verbosity >= 1) {
+                fprintf(stderr, "voxcpm2: best backend unavailable, falling back to CPU\n");
+            }
+            ctx->backend = ctx->backend_cpu;
+        }
+    } else {
+        ctx->backend = ctx->backend_cpu;
+    }
 
-    // VOXCPM2_USE_GRAPH backend pool. Weights stay on backend_cpu (legacy
-    // CPU paths read raw tensor->data); the per-step graphs live on the
-    // same CPU backend and pay one ggml_init + galloc per call instead of
-    // ~30 per LocDiT invocation. Switching to Metal is a follow-up — the
-    // legacy paths still dereference CPU memory and would SIGSEGV today.
-    ctx->backend_cpu = get_cpu_backend();
-    ctx->backend = ctx->backend_cpu;
+    if (!vox_load_weights(ctx, path_model)) {
+        fprintf(stderr, "voxcpm2: failed to load '%s'\n", path_model);
+        voxcpm2_free(ctx);
+        return nullptr;
+    }
+
     // Generous arena: ~9 nodes/layer × 12 LocDiT layers + I/O ≈ 130 nodes;
     // 28 TSLM layers ≈ 280 nodes. 4096 nodes leaves headroom for the
     // largest graph (TSLM 28L step) without re-allocing per call.
@@ -3935,6 +3963,11 @@ struct voxcpm2_context* voxcpm2_init_from_file(const char* path_model, struct vo
         fprintf(stderr, "voxcpm2: failed to create gallocr\n");
         voxcpm2_free(ctx);
         return nullptr;
+    }
+
+    if (params.verbosity >= 1) {
+        const char* be_name = ggml_backend_name(ctx->backend);
+        fprintf(stderr, "voxcpm2: backend = %s\n", be_name ? be_name : "(null)");
     }
 
     return ctx;
@@ -3979,7 +4012,12 @@ void voxcpm2_free(struct voxcpm2_context* ctx) {
         ggml_free(ctx->ggml_ctx);
         ctx->ggml_ctx = nullptr;
     }
-    // backend_cpu is the global g_cpu_backend — process-wide, do not free
+    // backend_cpu is the global g_cpu_backend — process-wide, do not free.
+    // backend can be a per-context Metal handle (from init_best); free that.
+    if (ctx->backend && ctx->backend != ctx->backend_cpu) {
+        ggml_backend_free(ctx->backend);
+    }
+    ctx->backend = nullptr;
     delete ctx;
 }
 

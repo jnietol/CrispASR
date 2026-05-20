@@ -212,7 +212,7 @@ share enough that landing one substantially de-risks the other.
 
 ---
 
-## 96. voxcpm2-tts perf — switch to per-step ggml graph (Metal-ready) — CPU target met (LocDiT + TSLM cached)
+## 96. voxcpm2-tts perf — switch to per-step ggml graph (Metal-ready) — Metal live
 
 ### Where we are (2026-05-19)
 
@@ -377,17 +377,55 @@ Steady-state CFM per step in the cached path: **~410 ms** (target
 with legacy, vs ~1781 ms uncached). Voice cloning end-to-end (jfk
 ref + "Hello world") AR loop drops to **4.1 s**.
 
+### Progress (2026-05-20)
+
+Weights now load on `c->backend = ggml_backend_init_best()` when
+`params.use_gpu` is true. Apple Silicon Metal uses unified-memory
+"shared" buffers — `tensor->data` stays CPU-readable, so the
+remaining legacy `matmul_mv_ggml` paths (TSLM/RALM prefill, LocEnc,
+VAE encode/decode, FSQ, stop) keep working against Metal-resident
+weight pointers. Dropped `GGML_PREC_F32` on the LocDiT bidirectional
+flash-attn since Metal's `supports_op` refuses any FA op tagged
+PREC_F32 (chatterbox-style); the per-stage cosine bar tolerates the
+resulting F16 simdgroup drift.
+
+Diff harness `voxcpm2-q4_k.gguf` (CPU path, use_gpu=false): still
+14 pass / 0 fail / 3 skip. Smoke "Hello world" zero-shot AND voice
+clone (jfk.wav ref) ASR-roundtrip correctly on Metal.
+
+Bench (M1, OMP=8, "Hello world" zero-shot, 6 AR steps):
+
+| Path                  | TSLM prefill | AR loop  | Total   |
+| --------------------- | -----------: | -------: | ------: |
+| legacy                |     ~5 000 ms| 15.3 s   | 48.7 s  |
+| graph cached (CPU)    |    ~4 000 ms |  6.0 s   | 26.2 s  |
+| graph cached (Metal)  |       80 ms  |  5.0 s   | 14.1 s  |
+
+Per-substep Metal (CPU shown for comparison):
+
+| Substep    | CPU cached | Metal     |
+| ---------- | ---------: | --------: |
+| cfm/step   |    625 ms  |   702 ms  |
+| tslm/step  |    180 ms  |    82 ms  |
+| locenc     |    160 ms  |    34 ms  |
+
+`TSLM prefill 5 s → 80 ms` (≈60×) is the dominant Metal win — the
+3-positions × 28-layers prefill is matmul-dense and lights up the
+GPU's bandwidth. CFM is roughly the same on Metal as on CPU because
+the cached graph is already near optimal; the per-call shape (T=11,
+12 layers, n_q=16 GQA on n_kv=2) doesn't have enough independent work
+to shine on the GPU.
+
 ### Still TODO
 
-- Load weights on `c->backend` (Metal-capable). Blocked on dropping
-  the legacy CPU paths entirely — once both per-step graphs are on
-  the backend, `matmul_mv_ggml` is dead.
 - Multi-bucket TSLM Lk (128 / 256 / 512 / 1024) so long-prefill
   inputs (multi-sentence cloning, voice instructions) keep the
   bucketed cache instead of falling back to dynamic. Mirror
   `qwen3_tts.cpp talker_buckets`.
-- Once green on Metal, swap default to `VOXCPM2_USE_GRAPH=1` and
-  remove the legacy path + this env gate.
+- Graph-ify VAE encode + decode (the remaining big legacy
+  paths — VAE decode is still ~8 s of the wall-clock).
+- Once all paths are graph, drop the legacy `matmul_mv_ggml` +
+  CPU-only fallback and flip default to `VOXCPM2_USE_GRAPH=1`.
 
 ---
 

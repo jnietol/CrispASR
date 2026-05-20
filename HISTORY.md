@@ -6,6 +6,58 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-05-20 voxcpm2-tts: load weights on init_best — Metal live (PLAN #96 done)
+
+**Change.** Switched `voxcpm2_init_from_file` to set
+`c->backend = ggml_backend_init_best()` (Metal on Apple Silicon) when
+`params.use_gpu` is true, and `vox_load_weights` now loads onto
+`c->backend` instead of the global CPU backend.
+
+Apple Silicon Metal allocates weight buffers in unified-memory
+"shared" mode (`is_shared = true`), so `tensor->data` stays
+CPU-readable. The remaining legacy `matmul_mv_ggml` paths
+(TSLM/RALM prefill, LocEnc, VAE encode/decode, FSQ, stop predictor)
+keep working against Metal-resident weight pointers without any
+copy. The cached graph paths (LocDiT + TSLM step) run on Metal via
+their existing `ggml_backend_graph_compute(ctx->backend, …)` calls.
+
+Dropped `ggml_flash_attn_ext_set_prec(_, GGML_PREC_F32)` on LocDiT's
+bidirectional flash-attn — Metal's `supports_op` for
+`GGML_OP_FLASH_ATTN_EXT` rejects any op tagged PREC_F32 (chatterbox
+T3 patch — wants CPU bit-identity), so leaving it caused the graph
+compute to abort. The per-stage cosine threshold tolerates the
+resulting F16 simdgroup drift on Metal.
+
+**Validation.** Diff harness `voxcpm2-q4_k.gguf` (CPU path,
+`use_gpu=false`): still 14 pass / 0 fail / 3 skip. Smoke "Hello
+world" zero-shot AND voice-clone (`samples/jfk.wav` ref) both
+ASR-roundtrip to "Hello world." on Metal.
+
+**Bench** (M1, OMP=8, "Hello world" zero-shot, 6 AR steps):
+
+| Path                  | TSLM prefill | AR loop  | Total   |
+| --------------------- | -----------: | -------: | ------: |
+| legacy                |    ~5 000 ms | 15.3 s   | 48.7 s  |
+| graph cached (CPU)    |    ~4 000 ms |  6.0 s   | 26.2 s  |
+| graph cached (Metal)  |       80 ms  |  5.0 s   | 14.1 s  |
+
+The dominant Metal win is TSLM prefill (≈60× on the 3-position ×
+28-layer matmul-dense pass) — and the same legacy `matmul_mv_ggml`
+path benefits, because Metal-resident weights cut the bandwidth
+hit of dequantising Q4_K rows per row. Per-AR-step CFM is roughly
+unchanged (the cached LocDiT graph is already near-optimal at
+T=11 / GQA n_kv=2). Voice cloning AR loop drops similarly to ~5 s
+on Metal.
+
+**Next** (PLAN #96 follow-on): multi-bucket TSLM Lk for
+long-prefill inputs; graph-ify VAE encode + decode (~8 s of total
+wall-clock is still in VAE decode); then drop the legacy
+`matmul_mv_ggml` + CPU-only fallback and flip default to
+`VOXCPM2_USE_GRAPH=1`.
+
+---
+
+
 ## 2026-05-19 voxcpm2-tts: graph caching — LocDiT one-shot + TSLM bucketed (PLAN #96 CPU target met)
 
 **Problem.** The per-call `build_*_graph` + `ggml_gallocr_alloc_graph`
