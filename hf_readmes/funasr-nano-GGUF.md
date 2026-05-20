@@ -44,7 +44,17 @@ Upstream `config.yaml` and `funasr/models/fun_asr_nano/model.py` declare a CTC d
 
 | File | Size | Notes |
 | --- | ---: | --- |
-| `funasr-nano-2512-f16.gguf` | 1.98 GB | F16 reference weights |
+| `funasr-nano-2512.gguf` (alias) | 1.98 GB | symlink/alias of the F16 |
+| `funasr-nano-2512-f16.gguf` | 1.98 GB | F16, full precision reference |
+| `funasr-nano-2512-q8_0.gguf` | 1.27 GB | Q8_0, near-lossless |
+| `funasr-nano-2512-q4_k.gguf` | 897 MB  | **Q4_K — recommended default** |
+
+All three precisions produce byte-identical output on `samples/jfk.wav`:
+> AND SO MY FELLOW AMERICANS ASK NOT WHAT YOUR COUNTRY CAN DO FOR YOU ASK WHAT YOU CAN DO FOR YOUR COUNTRY
+
+(Fun-ASR-Nano outputs upper-case English without punctuation; pipe
+through `--punc-model fullstop-punc` or `fireredpunc` if you need
+proper casing/punctuation.)
 
 ## Quick Start
 
@@ -52,12 +62,14 @@ Upstream `config.yaml` and `funasr/models/fun_asr_nano/model.py` declare a CTC d
 git clone https://github.com/CrispStrobe/CrispASR
 cd CrispASR
 cmake -B build-ninja-compile -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build-ninja-compile --target crispasr-cli
+cmake --build build-ninja-compile --target crispasr
 
-./build-ninja-compile/bin/crispasr \
-    --backend funasr \
-    -m /path/to/funasr-nano-2512-f16.gguf \
-    -f samples/jfk.wav
+# Auto-download (recommended Q4_K)
+./build-ninja-compile/bin/crispasr -m funasr --auto-download -f samples/jfk.wav
+
+# Or pin a specific file
+hf download cstr/funasr-nano-GGUF funasr-nano-2512-q4_k.gguf --local-dir .
+./build-ninja-compile/bin/crispasr -m funasr-nano-2512-q4_k.gguf -f samples/jfk.wav
 ```
 
 ## Licence + attribution

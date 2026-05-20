@@ -69,7 +69,12 @@ Upstream `config.yaml` and `funasr/models/fun_asr_nano/model.py` declare a CTC d
 
 | File | Size | Notes |
 | --- | ---: | --- |
-| `funasr-mlt-nano-2512-f16.gguf` | 1.98 GB | F16 reference weights |
+| `funasr-mlt-nano-2512-f16.gguf` | 1.98 GB | F16, full precision reference |
+| `funasr-mlt-nano-2512-q8_0.gguf` | 1.27 GB | Q8_0, near-lossless |
+| `funasr-mlt-nano-2512-q4_k.gguf` | 897 MB  | **Q4_K — recommended default** |
+
+Mixed-case + punctuation output (mlt-nano's multilingual vocab keeps
+both); no `--punc-model` post-processor needed.
 
 ## Quick Start
 
@@ -77,12 +82,14 @@ Upstream `config.yaml` and `funasr/models/fun_asr_nano/model.py` declare a CTC d
 git clone https://github.com/CrispStrobe/CrispASR
 cd CrispASR
 cmake -B build-ninja-compile -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build-ninja-compile --target crispasr-cli
+cmake --build build-ninja-compile --target crispasr
 
-./build-ninja-compile/bin/crispasr \
-    --backend funasr \
-    -m /path/to/funasr-mlt-nano-2512-f16.gguf \
-    -f samples/jfk.wav
+# Auto-download (recommended Q4_K)
+./build-ninja-compile/bin/crispasr -m fun-asr-mlt-nano --auto-download -f samples/jfk.wav
+
+# Or pin a specific file
+hf download cstr/funasr-mlt-nano-GGUF funasr-mlt-nano-2512-q4_k.gguf --local-dir .
+./build-ninja-compile/bin/crispasr -m funasr-mlt-nano-2512-q4_k.gguf -f samples/jfk.wav
 ```
 
 ## Licence + attribution
