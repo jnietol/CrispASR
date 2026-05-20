@@ -102,10 +102,67 @@ depthwise conv needs fixing.
 
 ---
 
-## 43. Fun-ASR-Nano
+## 43. Fun-ASR-Nano (and Fun-ASR-MLT-Nano)
 
-**BLOCKED:** License unclear. Issue filed at `FunAudioLLM/Fun-ASR#99`.
-No response. HF model card has no license field.
+**License resolved (2026-05-20):** Upstream confirmed in issue #99 —
+code is Apache-2.0, weights are under the **FunASR Model License v1.1**
+(Alibaba): commercial use OK with attribution. Compatible with
+`cstr/funasr-*-GGUF` uploads.
+
+**Recon + converter + reference dumper landed on `funasr-port`** branch
+(commits `8df4e325` + `b6a2f75f`). Both
+`funasr-nano-2512-f16.gguf` and `funasr-mlt-nano-2512-f16.gguf` exist
+at `/Volumes/backups/ai/crispasr-models/funasr-{nano,mlt-nano}-2512/`
+(1.98 GB each, 1261 tensors).
+
+### Critical finding — there is no CTC path in the checkpoint
+
+Upstream config.yaml + `funasr/models/fun_asr_nano/model.py` reference a
+CTC decoder + CTC head; **the published `model.pt` ships only
+`audio_encoder.* + audio_adaptor.* + llm.*`** on BOTH releases. Zero
+CTC weights. Confirmed by directly enumerating the inner state dict on
+both Nano-2512 and MLT-Nano-2512 (1261 tensors, prefixes are
+`audio_adaptor / audio_encoder / llm` only).
+
+The only inference path that can produce upstream's reported WER
+numbers is therefore the **LLM-decoder path**:
+`audio → WavFrontend → SenseVoiceEncoderSmall (70 SANM blocks) →
+audio_adaptor (2 transformer blocks @ 1024-dim) → splice into Qwen3-0.6B
+input embeds at <|startofspeech|>/<|endofspeech|> slot of Chinese ChatML
+prompt → Qwen3 AR decode → text`. Do not try to ship a CTC path; it
+isn't there.
+
+### Remaining work (handover at `handover-prompts/funasr-port-runtime.md`)
+
+- `src/funasr.{h,cpp}` runtime (LLM-decoder path). SANM block goes in
+  `src/core/sanm.h` (anticipated reuse by CosyVoice2-0.5B + FunAudioLLM
+  music models). LFR in `src/core/lfr.h`. Hamming-window knob on
+  `src/core/kaldi_fbank.h`. LLM half reuses `src/qwen3_asr.cpp` patterns.
+- `examples/cli/crispasr_backend_funasr.cpp` adapter + register +
+  model-mgr resolver row.
+- `examples/cli/crispasr_diff_main.cpp` per-backend branch comparing
+  the captured stages from `tools/reference_backends/funasr.py`.
+- End-to-end test on EN (`samples/jfk.wav`) + ZH
+  (`<snapshot>/example/zh.mp3`).
+- README + `docs/architecture.md` + `LEARNINGS.md` entries for the
+  no-CTC trap and the SANM block-0 no-attn-residual gotcha.
+
+### Gotchas captured during recon
+
+- `EncoderLayerSANM.forward` drops the attn-branch residual when
+  `in_size != size` — that's block 0 (in=560, out=512) only.
+- WavFrontend uses **Hamming** window, not the Povey default of
+  `core_kaldi::compute_fbank`. Need a window_type knob.
+- WavFrontend has `upsacle_samples=True` (sic — upstream typo); maps
+  to our existing `int16_scale=true` field.
+- SANM forward: `att_out + fsmn_memory` where `fsmn_memory =
+  fsmn_block(pad(v.T)).T + v` — **FSMN has its own residual to V**
+  before joining the attention output.
+- SinusoidalPositionEncoder uses positions `1..T` (NOT `0..T-1`).
+- `xs_pad *= sqrt(d_model)` (≈22.63) before pos encoding.
+- funasr 1.3.1 has a packaging bug in `fun_asr_nano/model.py` —
+  `from ctc import CTC` should be relative. The ref dumper has a
+  sys.path shim; don't try to upstream-fix.
 
 ---
 
