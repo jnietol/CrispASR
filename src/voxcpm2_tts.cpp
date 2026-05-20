@@ -2139,6 +2139,7 @@ static std::vector<float> wn_reconstruct(const float* weight_g, const float* wei
     return w;
 }
 
+
 // ---------------------------------------------------------------------------
 // Snake1d activation: x + (1/alpha) * sin(alpha * x)^2
 // alpha is a per-channel learnable parameter [C].
@@ -2467,10 +2468,13 @@ static std::vector<float> vae_decode(voxcpm2_context* ctx, const std::vector<std
     }
 
     // --- Layers 2-7: upsample blocks ---
+    const bool bench_vae = vox_env_bool("VOXCPM2_BENCH");
     for (int b = 0; b < n_up_blocks; b++) {
         int layer_idx = b + 2; // layers 2 through 7
         int up = up_rates[b];
         std::string lp = "vae.dec.layer." + std::to_string(layer_idx);
+        double t_block0 = bench_vae ? vox_now_ms() : 0;
+        double t_block_up = 0, t_block_res = 0;
 
         // SR conditioning: scale_embed and bias_embed are [channels, 4]
         // GGUF layout [channels, 4] -> ne[0]=4, ne[1]=channels
@@ -2541,6 +2545,9 @@ static std::vector<float> vae_decode(voxcpm2_context* ctx, const std::vector<std
         Cc = out_ch_b;
         h = std::move(h_up);
 
+        if (bench_vae) {
+            t_block_up = vox_now_ms() - t_block0;
+        }
         if (ctx->verbosity >= 2) {
             float mx = 0;
             for (size_t i = 0; i < (size_t)Cc * Tc; i++) {
@@ -2551,6 +2558,7 @@ static std::vector<float> vae_decode(voxcpm2_context* ctx, const std::vector<std
             fprintf(stderr, "voxcpm2 VAE: block %d upsample(%d): Cc=%d Tc=%d max=%.4f\n", b, up, Cc, Tc, mx);
         }
 
+        double t_res0 = bench_vae ? vox_now_ms() : 0;
         // 3x CausalResidualUnit: .block.{2,3,4} with dilations 1, 3, 9
         for (int r = 0; r < 3; r++) {
             int dil = (r == 0) ? 1 : (r == 1) ? 3 : 9;
@@ -2558,6 +2566,11 @@ static std::vector<float> vae_decode(voxcpm2_context* ctx, const std::vector<std
             std::vector<float> h_res((size_t)Cc * Tc);
             vae_residual_unit(T, rp, h.data(), h_res.data(), Cc, Tc, dil);
             h = std::move(h_res);
+        }
+        if (bench_vae) {
+            t_block_res = vox_now_ms() - t_res0;
+            fprintf(stderr, "voxcpm2[bench]:   vae block %d (up=%d Cc=%d Tc=%d): upsample=%7.1f ms res=%7.1f ms\n", b,
+                    up, Cc, Tc, t_block_up, t_block_res);
         }
     }
 

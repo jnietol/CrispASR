@@ -431,10 +431,38 @@ Validated: long-text clone exercising the 256-bucket
 "built tslm step bucket Lk=128" and "Lk=256" fire in the log. Diff
 harness still 14 pass / 0 fail / 3 skip on `voxcpm2-q4_k.gguf`.
 
+### VAE decode profile (2026-05-20)
+
+`VOXCPM2_BENCH=1` now also dumps per-upsample-block timings inside
+`vae_decode`. M1 OMP=8, "Hello world" zero-shot, 6 AR steps (i.e. 7
+patches × 4 = 28 latent frames):
+
+| Block | up | Cc   | Tc     | Upsample  | Residual |
+| ----- | -: | ---: | -----: | --------: | -------: |
+| 0     | 8  | 1024 |    224 | 2 957 ms  |   498 ms |
+| 1     | 6  |  512 |  1 344 | 1 531 ms  |   695 ms |
+| 2     | 5  |  256 |  6 720 | 1 146 ms  |   594 ms |
+| 3     | 2  |  128 | 13 440 |   418 ms  |   318 ms |
+| 4     | 2  |   64 | 26 880 |   185 ms  |   177 ms |
+| 5     | 2  |   32 | 53 760 |    91 ms  |   123 ms |
+
+Totals: upsample 6 327 ms (72 %), residual 2 405 ms (28 %). The
+dominant cost is `causal_transposed_conv1d` on the deepest channel
+counts (block 0 at Cc=1024 × in_ch=2048). Inner `ic` loop is
+strided (ic-stride T_in across x, ic-stride out_ch×ksize across
+weight) so the compiler can't auto-vectorise. The arithmetic is
+already OMP-parallelised across (oc, ot).
+
 ### Still TODO
 
-- Graph-ify VAE encode + decode (the remaining big legacy
-  paths — VAE decode is still ~8 s of the wall-clock).
+- The real next win is making the transposed conv inner loop
+  contiguous in `ic`. Two paths: (a) lay the reconstructed weight
+  out as `[k, oc, ic]` and transpose x to `[t, ic]` per call so
+  the inner dot product is contiguous + auto-vectorisable; (b)
+  graph-ify the conv layers via `ggml_conv_transpose_1d` so they
+  run on Metal. (a) is small (~50 LOC) and CPU-only; (b) is the
+  Metal-class win and ~500-1000 LOC.
+- Graph-ify the snake1d / residual unit / final-conv tail.
 - Once all paths are graph, drop the legacy `matmul_mv_ggml` +
   CPU-only fallback and flip default to `VOXCPM2_USE_GRAPH=1`.
 
