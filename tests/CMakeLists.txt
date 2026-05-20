@@ -518,6 +518,44 @@ catch_discover_tests(test-issue-89-long-audio-fallback
     PROPERTIES LABELS "unit;long-audio;issue-89"
 )
 
+# ─── test-lcs-chunk-merge — Catch2 unit tests for LCS chunk-merge dedup
+#
+# Ports of NeMo's `longest_common_subsequence_merge` test cases
+# (`nemo/collections/asr/parts/utils/streaming_utils.py`). Pin the
+# algorithm so subsequent refactors keep behavioural parity with the
+# upstream BatchedFrameASRTDT hypothesis stitcher.
+add_executable(test-lcs-chunk-merge
+    test-lcs-chunk-merge.cpp
+)
+target_include_directories(test-lcs-chunk-merge PRIVATE
+    ${PROJECT_SOURCE_DIR}/examples/cli
+)
+target_link_libraries(test-lcs-chunk-merge PRIVATE
+    Catch2::Catch2WithMain
+)
+catch_discover_tests(test-lcs-chunk-merge
+    TEST_SPEC "[lcs]"
+    PROPERTIES LABELS "unit;lcs"
+)
+
+# ─── test-lcs-dedup-driver — Catch2 unit tests for the segment-aware
+# driver that wraps the LCS algorithm with token / word / text book-
+# keeping. Together with test-lcs-chunk-merge this gives end-to-end
+# coverage of the chunk-boundary dedup feature.
+add_executable(test-lcs-dedup-driver
+    test-lcs-dedup-driver.cpp
+)
+target_include_directories(test-lcs-dedup-driver PRIVATE
+    ${PROJECT_SOURCE_DIR}/examples/cli
+)
+target_link_libraries(test-lcs-dedup-driver PRIVATE
+    Catch2::Catch2WithMain
+)
+catch_discover_tests(test-lcs-dedup-driver
+    TEST_SPEC "[lcs-dedup]"
+    PROPERTIES LABELS "unit;lcs;lcs-dedup"
+)
+
 # ─── test - math - consistency — Catch2 unit tests for math constants ────────
 add_executable(test-math-consistency
     test-math-consistency.cpp

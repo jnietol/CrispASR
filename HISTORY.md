@@ -79,6 +79,48 @@ into `-m auto` with the license note printed on first download.
 README adds the row, the feature-matrix column, the
 multilingual-recipe entry.
 
+---
+
+## 2026-05-20 LCS hypothesis stitching for overlap-save chunk boundaries
+
+The cad4c28a overlap-save chunking left a residual class of duplicate
+emissions at chunk boundaries: when the FastConformer + TDT decoder
+emits the same token in both chunk[i-1]'s right-extension and
+chunk[i]'s left-extension, the word-level boundary filter's 200 ms
+tolerance can pass both copies through. The reporter's 300 s
+parakeet-ja run hit this only on intra-chunk TDT quirks, but the
+infrastructure was missing the upstream-equivalent fix.
+
+NeMo's offline long-audio recipe (`BatchedFrameASRTDT` in
+`nemo/collections/asr/parts/utils/streaming_utils.py`) handles this
+with `longest_common_subsequence_merge` — a sub-word LCS over emitted
+token ids, with a leftmost-LCS heuristic and diagonal expansion to
+recover one-token gaps from TDT frame drift.
+
+This change ports that algorithm verbatim into
+`examples/cli/crispasr_lcs_merge.h` and wraps it with a segment-aware
+driver in `crispasr_lcs_dedup.h` that walks the per-slice
+`vector<crispasr_segment>`, drops the duplicate leading tokens from
+`chunk[i]`, peels matching words, and rebuilds `seg.text`. The driver
+fires only when overlap-save was applied (`use_chunk_context`), so
+VAD-derived multi-slice runs (#114 invariant) are untouched.
+
+The port was cross-checked against the upstream Python implementation
+on 8 cases (no overlap, perfect 3-/4-/5-token, subthreshold, leftmost
+preference, blanks-vs-content, partial alignment with gap) and
+matches bit-for-bit. The C++ unit tests (`test-lcs-chunk-merge` +
+`test-lcs-dedup-driver`) cover the algorithm and the driver
+separately — 37 assertions across 18 cases, pure CPU, no model load.
+
+On the issue #89 / #114 reproducer the algorithm doesn't change the
+emitted SRT because the cad4c28a word-level filter already removes
+most cross-chunk duplicates within its 200 ms tolerance window. The
+LCS path serves as defense in depth for wider `--chunk-overlap`
+configurations and for the not-yet-encountered edge case where the
+TDT emission-frame drift exceeds 200 ms.
+
+---
+
 ## 2026-05-20 parakeet-ja long-audio collapse on no-VAD path (issue #89)
 
 `lenhone` reported that parakeet-tdt-0.6b-ja stopped transcribing past

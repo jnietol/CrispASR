@@ -10,6 +10,7 @@
 #include "crispasr_backend.h"
 #include "crispasr_cache.h"
 #include "crispasr_chunk_context_gate.h"
+#include "crispasr_lcs_dedup.h"
 #include "crispasr_long_audio_fallback.h"
 #include "crispasr_mic_cli.h"
 #include "crispasr_popen.h"
@@ -922,6 +923,22 @@ int process_one_input(CrispasrBackend& backend, const std::string& fname_inp, co
         for (size_t i = 0; i < slices.size(); i++)
             process_slice(i, backend);
     }
+
+    // LCS-based dedup across adjacent chunks (issue #89 / #114 follow-up,
+    // matching upstream NeMo's BatchedFrameASRTDT hypothesis stitching).
+    // Only active when the overlap-save context window was added in the
+    // first place — for VAD-derived slices there is no overlap region, so
+    // no duplicates to remove. `delay_tokens` is sized to the chunk
+    // overlap measured in encoder frames; parakeet's frame_dur is 80 ms
+    // and each frame can emit one TDT token, so `chunk_overlap_seconds *
+    // 1000 / 80` is a safe upper bound on how far back in the previous
+    // chunk we need to look.
+    const bool lcs_active = use_chunk_context && per_slice.size() > 1;
+    if (lcs_active) {
+        const int delay_tokens = (int)(params.chunk_overlap_seconds * 1000.0f / 80.0f + 0.5f);
+        crispasr_lcs::apply_lcs_chunk_dedup(per_slice, delay_tokens > 0 ? delay_tokens : 1);
+    }
+
     auto all_segs = merge_segments(std::move(per_slice), slices);
 
     // Optional embedding-based clustering (#107 P3). When the user
