@@ -350,6 +350,22 @@ struct voxcpm2_context {
     ggml_cgraph* locenc_gf = nullptr;
     ggml_gallocr_t locenc_galloc = nullptr;
 
+    // Pre-computed weight-norm-scaled VAE conv tensors. The legacy
+    // wn_reconstruct call rebuilds these (g · v / |v|) every vae_decode
+    // call for ~30 conv layers; caching once per ctx lifetime is the
+    // foundation needed before the full VAE ggml graph (the graph
+    // needs the resolved weights as ggml_tensor*, not std::vector).
+    // Used by the legacy vae_decode path today via vae_wn_get_cached;
+    // the upcoming vae_decode_graph (PLAN #96 follow-on) reads the
+    // same tensors directly into ggml_conv_1d / ggml_conv_transpose_1d.
+    //
+    // Memory layout: legacy wn_reconstruct already emits
+    // `[K, in_ch, out_ch]` for forward conv and
+    // `[K, out_ch_tc, in_ch_tc]` for transposed conv — both match
+    // ggml's kernel ne convention directly, so the cached values can
+    // feed straight into the graph ops with no further reshape.
+    std::map<std::string, std::vector<float>> vae_wn_cache;
+
     // Cached TSLM step graphs (qwen3-style multi-bucket pattern). Each
     // bucket is topology-invariant across n_past because Lk is pinned
     // to bucket_lk and positions is passed as runtime kv_indices — the
@@ -2355,6 +2371,15 @@ static float stop_score(voxcpm2_context* ctx, const float* lm_hidden, ggml_backe
 // Output layout for causal_conv1d: [out_ch, in_ch, k]
 //   → w_out[ki + ic*ksize + oc*in_ch*ksize]
 // ---------------------------------------------------------------------------
+// Lookup or compute the wn-scaled weight for a VAE conv layer keyed on
+// the GGUF prefix (e.g. "vae.dec.layer.2.block.1"). Misses run
+// wn_reconstruct + insert; hits return the cached vector by reference.
+// Lifetime = voxcpm2_context. VAE decode runs sequentially per synth
+// call so no locking needed.
+static const std::vector<float>& vae_wn_get_cached(voxcpm2_context* ctx, const std::string& prefix,
+                                                   const float* weight_g, const float* weight_v, int out_ch, int in_ch,
+                                                   int ksize);
+
 static std::vector<float> wn_reconstruct(const float* weight_g, const float* weight_v, int out_ch, int in_ch,
                                          int ksize) {
     // PyTorch weight_norm (dim=0 for Conv1d): g has shape [out_ch].
@@ -2385,6 +2410,16 @@ static std::vector<float> wn_reconstruct(const float* weight_g, const float* wei
     return w;
 }
 
+static const std::vector<float>& vae_wn_get_cached(voxcpm2_context* ctx, const std::string& prefix,
+                                                   const float* weight_g, const float* weight_v, int out_ch, int in_ch,
+                                                   int ksize) {
+    auto it = ctx->vae_wn_cache.find(prefix);
+    if (it != ctx->vae_wn_cache.end()) {
+        return it->second;
+    }
+    auto inserted = ctx->vae_wn_cache.emplace(prefix, wn_reconstruct(weight_g, weight_v, out_ch, in_ch, ksize));
+    return inserted.first->second;
+}
 
 // ---------------------------------------------------------------------------
 // Snake1d activation: x + (1/alpha) * sin(alpha * x)^2
@@ -2618,8 +2653,9 @@ static int vae_tensor_dim(const std::map<std::string, ggml_tensor*>& tensors, co
 //                                     prefix.3.{weight_g, weight_v, bias}  (1x1 conv)
 //   y = x + 1x1_conv(snake(dilated_conv(snake(x))))
 // ---------------------------------------------------------------------------
-static void vae_residual_unit(const std::map<std::string, ggml_tensor*>& tensors, const std::string& prefix,
-                              const float* x_in, float* x_out, int C, int T, int dilation) {
+static void vae_residual_unit(voxcpm2_context* ctx, const std::string& prefix, const float* x_in, float* x_out, int C,
+                              int T, int dilation) {
+    const auto& tensors = ctx->tensors;
     // snake0 (.0.alpha)
     std::vector<float> h1((size_t)C * T);
     const float* alpha0 = vae_tensor_f32(tensors, prefix + ".0.alpha");
@@ -2638,7 +2674,7 @@ static void vae_residual_unit(const std::map<std::string, ggml_tensor*>& tensors
     const float* b1 = vae_tensor_f32(tensors, prefix + ".1.bias");
     if (g1 && v1) {
         // Depthwise: out_ch=C, in_per_grp=1, groups=C
-        auto w1 = wn_reconstruct(g1, v1, C, 1, k1);
+        const auto& w1 = vae_wn_get_cached(ctx, prefix + ".1", g1, v1, C, 1, k1);
         causal_conv1d(w1.data(), b1, h1.data(), h2.data(), C, C, k1, T, 1, dilation, C);
     } else {
         std::memcpy(h2.data(), h1.data(), (size_t)C * T * sizeof(float));
@@ -2659,7 +2695,7 @@ static void vae_residual_unit(const std::map<std::string, ggml_tensor*>& tensors
     const float* v2 = vae_tensor_f32(tensors, prefix + ".3.weight_v");
     const float* b2 = vae_tensor_f32(tensors, prefix + ".3.bias");
     if (g2 && v2) {
-        auto w2 = wn_reconstruct(g2, v2, C, C, 1);
+        const auto& w2 = vae_wn_get_cached(ctx, prefix + ".3", g2, v2, C, C, 1);
         causal_conv1d(w2.data(), b2, h3.data(), h4.data(), C, C, 1, T, 1, 1, 1);
     } else {
         std::memcpy(h4.data(), h3.data(), (size_t)C * T * sizeof(float));
@@ -2764,7 +2800,7 @@ static std::vector<float> vae_decode(voxcpm2_context* ctx, const std::vector<std
         const float* b0 = vae_tensor_f32(T, "vae.dec.layer.0.bias");
         if (g0 && v0) {
             // Depthwise: groups=feat_dim, in_per_grp=1
-            auto w0 = wn_reconstruct(g0, v0, feat_dim, 1, 7);
+            const auto& w0 = vae_wn_get_cached(ctx, "vae.dec.layer.0", g0, v0, feat_dim, 1, 7);
             std::vector<float> h0((size_t)feat_dim * Tc, 0.0f);
             causal_conv1d(w0.data(), b0, latents.data(), h0.data(), feat_dim, feat_dim, 7, Tc, 1, 1, feat_dim);
             h = std::move(h0);
@@ -2792,7 +2828,7 @@ static std::vector<float> vae_decode(voxcpm2_context* ctx, const std::vector<std
             // Total elements = out_ch regardless of ne[] layout.
             auto it_g1 = T.find("vae.dec.layer.1.weight_g");
             int out_ch1 = it_g1 != T.end() ? (int)ggml_nelements(it_g1->second) : 2048;
-            auto w1 = wn_reconstruct(g1, v1, out_ch1, feat_dim, 1);
+            const auto& w1 = vae_wn_get_cached(ctx, "vae.dec.layer.1", g1, v1, out_ch1, feat_dim, 1);
             std::vector<float> h1((size_t)out_ch1 * Tc, 0.0f);
             causal_conv1d(w1.data(), b1, h.data(), h1.data(), out_ch1, feat_dim, 1, Tc, 1, 1, 1);
             h = std::move(h1);
@@ -2867,7 +2903,7 @@ static std::vector<float> vae_decode(voxcpm2_context* ctx, const std::vector<std
                 // wn_reconstruct(g, v, out_ch=Cc, in_ch=out_ch_b, k)
                 // treats weight_v as [k, in_ch=out_ch_b, out_ch=Cc]
                 // output layout [Cc, out_ch_b, k] = [in_ch, out_ch, k] for causal_transposed_conv1d
-                auto w_up = wn_reconstruct(g_up, v_up, Cc, out_ch_b, ksize_up);
+                const auto& w_up = vae_wn_get_cached(ctx, lp + ".block.1", g_up, v_up, Cc, out_ch_b, ksize_up);
                 causal_transposed_conv1d(w_up.data(), b_up, h.data(), h_up.data(), Cc, out_ch_b, ksize_up, Tc, up);
             } else {
                 // Repeat-interpolate fallback
@@ -2906,7 +2942,7 @@ static std::vector<float> vae_decode(voxcpm2_context* ctx, const std::vector<std
             int dil = (r == 0) ? 1 : (r == 1) ? 3 : 9;
             std::string rp = lp + ".block." + std::to_string(r + 2);
             std::vector<float> h_res((size_t)Cc * Tc);
-            vae_residual_unit(T, rp, h.data(), h_res.data(), Cc, Tc, dil);
+            vae_residual_unit(ctx, rp, h.data(), h_res.data(), Cc, Tc, dil);
             h = std::move(h_res);
         }
         if (bench_vae) {
@@ -2941,7 +2977,7 @@ static std::vector<float> vae_decode(voxcpm2_context* ctx, const std::vector<std
         const float* v9 = vae_tensor_f32(T, "vae.dec.layer.9.weight_v");
         const float* b9 = vae_tensor_f32(T, "vae.dec.layer.9.bias");
         if (g9 && v9) {
-            auto w9 = wn_reconstruct(g9, v9, 1, Cc, 7);
+            const auto& w9 = vae_wn_get_cached(ctx, "vae.dec.layer.9", g9, v9, 1, Cc, 7);
             causal_conv1d(w9.data(), b9, h.data(), pcm.data(), 1, Cc, 7, Tc, 1, 1, 1);
             for (float& s : pcm)
                 s = std::tanh(s);
@@ -3010,17 +3046,18 @@ static void vae_strided_conv1d(const float* weight, const float* bias, const flo
 // One encoder block (3 ResUnits + Snake + strided downsample).
 // Returns the new time length T_out (= (T_in + 2*ceil(s/2) - s%2 - 2*s) / s + 1
 // which simplifies to T_in / s for all the rates we use).
-static int vae_enc_block(const std::map<std::string, ggml_tensor*>& T, int blk_idx, int in_ch, int out_ch, int stride,
-                         const float* x_in, std::vector<float>& x_out, int T_in) {
+static int vae_enc_block(voxcpm2_context* ctx, int blk_idx, int in_ch, int out_ch, int stride, const float* x_in,
+                         std::vector<float>& x_out, int T_in) {
+    const auto& T = ctx->tensors;
     std::string blk = "vae.enc.blk." + std::to_string(blk_idx);
 
     // 3 residual units (depthwise, dilation 1, 3, 9) — reuses vae_residual_unit
     std::vector<float> h0((size_t)in_ch * T_in);
-    vae_residual_unit(T, blk + ".res.0", x_in, h0.data(), in_ch, T_in, 1);
+    vae_residual_unit(ctx, blk + ".res.0", x_in, h0.data(), in_ch, T_in, 1);
     std::vector<float> h1((size_t)in_ch * T_in);
-    vae_residual_unit(T, blk + ".res.1", h0.data(), h1.data(), in_ch, T_in, 3);
+    vae_residual_unit(ctx, blk + ".res.1", h0.data(), h1.data(), in_ch, T_in, 3);
     std::vector<float> h2((size_t)in_ch * T_in);
-    vae_residual_unit(T, blk + ".res.2", h1.data(), h2.data(), in_ch, T_in, 9);
+    vae_residual_unit(ctx, blk + ".res.2", h1.data(), h2.data(), in_ch, T_in, 9);
 
     // Snake1d before the strided downsample
     std::vector<float> h3((size_t)in_ch * T_in);
@@ -3046,7 +3083,7 @@ static int vae_enc_block(const std::map<std::string, ggml_tensor*>& T, int blk_i
     const float* v = vae_tensor_f32(T, blk + ".sub.4.weight_v");
     const float* b = vae_tensor_f32(T, blk + ".sub.4.bias");
     if (g && v) {
-        auto w = wn_reconstruct(g, v, out_ch, in_ch, ksize);
+        const auto& w = vae_wn_get_cached(ctx, blk + ".sub.4", g, v, out_ch, in_ch, ksize);
         vae_strided_conv1d(w.data(), b, h3.data(), x_out.data(), in_ch, out_ch, ksize, T_in, stride, python_pad);
     }
     return T_out;
@@ -3132,7 +3169,7 @@ static std::vector<float> vae_encode_uncached(voxcpm2_context* ctx, const float*
             fprintf(stderr, "voxcpm2: VAE encoder weights missing (vae.enc.conv0.*) — cannot voice-clone\n");
             return {};
         }
-        auto w = wn_reconstruct(g, v, d_model, /*in_ch=*/1, ksize);
+        const auto& w = vae_wn_get_cached(ctx, "vae.enc.conv0", g, v, d_model, /*in_ch=*/1, ksize);
         causal_conv1d(w.data(), b, x.data(), h.data(), d_model, /*in_ch=*/1, ksize, padded_n,
                       /*stride=*/1, /*dilation=*/1, /*groups=*/1);
     }
@@ -3145,7 +3182,7 @@ static std::vector<float> vae_encode_uncached(voxcpm2_context* ctx, const float*
         int stride = (int)hp.vae_enc_rates[b];
         int next_C = cur_C * 2;
         std::vector<float> next;
-        cur_T = vae_enc_block(T, b, cur_C, next_C, stride, cur.data(), next, cur_T);
+        cur_T = vae_enc_block(ctx, b, cur_C, next_C, stride, cur.data(), next, cur_T);
         cur = std::move(next);
         cur_C = next_C;
         if (cur_T <= 0) {
@@ -3164,7 +3201,7 @@ static std::vector<float> vae_encode_uncached(voxcpm2_context* ctx, const float*
             fprintf(stderr, "voxcpm2: VAE encoder weights missing (vae.enc.fc_mu.*) — cannot voice-clone\n");
             return {};
         }
-        auto w = wn_reconstruct(g, v, latent_dim, cur_C, ksize);
+        const auto& w = vae_wn_get_cached(ctx, "vae.enc.fc_mu", g, v, latent_dim, cur_C, ksize);
         causal_conv1d(w.data(), b, cur.data(), mu_out.data(), latent_dim, cur_C, ksize, cur_T,
                       /*stride=*/1, /*dilation=*/1, /*groups=*/1);
     }

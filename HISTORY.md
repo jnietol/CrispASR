@@ -6,6 +6,47 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-05-20 voxcpm2-tts: cache wn_reconstruct across VAE encode/decode calls
+
+**Change.** VAE decode rebuilt every weight-norm-resolved conv tensor
+(`g · v / |v|`) on every call via `wn_reconstruct`. With ~30 conv
+layers per decode and `vae_residual_unit` allocating fresh
+`std::vector<float>` for each, that was ~60-150 ms of pure
+recompute every synth. Added `vae_wn_get_cached(ctx, prefix, …)` that
+keys by the GGUF prefix (e.g. `vae.dec.layer.2.block.1`) and returns
+a reference to the cached vector — populated lazily on first miss,
+reused on subsequent calls within the same context.
+
+Threaded `voxcpm2_context* ctx` through `vae_residual_unit` and
+`vae_enc_block` (the two helpers that didn't have it before) so the
+cache is reachable from every call site. Both VAE encode and decode
+go through it now.
+
+This is also the foundation for the upcoming full VAE ggml graph
+(PLAN #96 remaining item): the graph needs the wn-resolved weights
+as stable buffers, and the cache already produces them in the
+correct ggml conv kernel memory layout
+(`[K, in_ch, out_ch]` for forward conv,
+`[K, out_ch_tc, in_ch_tc]` for transposed conv — both match the
+ggml_conv_1d / ggml_conv_transpose_1d ne convention exactly).
+
+**Validation.** Diff harness `voxcpm2-q4_k.gguf` (CPU path): still
+14 pass / 0 fail / 3 skip. "Hello world" zero-shot ASR-roundtrips
+correctly.
+
+**Bench** (M1, OMP=8, "Hello world" zero-shot, 6 AR steps):
+
+| VAE decode | Before cache | After cache |
+| ---------- | -----------: | ----------: |
+|            |    ~3 875 ms |   ~3 300 ms |
+
+~15 % off VAE decode. Small absolute win on the first synth (one
+miss + one hit); bigger over the server / diff-harness case where
+the same ctx synthesises repeatedly.
+
+---
+
+
 ## 2026-05-20 voxcpm2-tts: LocEnc per-call ggml graph (PLAN #96 follow-on)
 
 **Change.** Added `build_locenc_graph` + cached `get_or_build_locenc_graph`
