@@ -63,6 +63,7 @@
 #include "firered_asr.h"
 #include "voxcpm2_tts.h"
 #include "funasr.h"
+#include "sensevoice.h"
 
 #include "common-crispasr.h"
 
@@ -3519,12 +3520,66 @@ int main(int argc, char** argv) {
             free(buf);
         }
         funasr_free(ctx);
+    } else if (backend_name == "sensevoice") {
+        sensevoice_context_params cp = sensevoice_context_default_params();
+        cp.n_threads = 4;
+        cp.verbosity = 0;
+        sensevoice_context* ctx = sensevoice_init_from_file(model_path.c_str(), cp);
+        if (!ctx) {
+            fprintf(stderr, "failed to load sensevoice model\n");
+            return 4;
+        }
+        std::vector<std::string> stages;
+        stages.push_back("mel_features");
+        stages.push_back("encoder_input");
+        for (int i = 0; i < 70; i++)
+            stages.push_back(std::string("encoder_layer_") + std::to_string(i));
+        stages.push_back("encoder_main_out");
+        stages.push_back("encoder_output");
+        stages.push_back("ctc_logits");
+        stages.push_back("generated_text");
+        for (const auto& stage : stages) {
+            int n_out = 0;
+            float* buf = sensevoice_extract_stage(ctx, samples.data(), (int)samples.size(),
+                                                   /*language*/ "auto", /*use_itn*/ true,
+                                                   stage.c_str(), &n_out);
+            if (!buf || n_out <= 0) {
+                printf("[SKIP] %-22s  sensevoice_extract_stage returned no data\n", stage.c_str());
+                if (buf)
+                    free(buf);
+                n_skip++;
+                continue;
+            }
+            if (stage == "generated_text") {
+                const std::string ref_s = ref.meta("generated_text");
+                if (ref_s.empty()) {
+                    printf("[SKIP] %-22s  (no generated_text in reference)\n", stage.c_str());
+                    n_skip++;
+                } else {
+                    const char* got = (const char*)buf;
+                    const std::string got_s(got, (size_t)n_out);
+                    const bool exact = (got_s == ref_s);
+                    printf("%s %-22s  got=%s  ref=%s\n", exact ? "[PASS]" : "[FAIL]", stage.c_str(),
+                           got_s.c_str(), ref_s.c_str());
+                    if (exact)
+                        n_pass++;
+                    else
+                        n_fail++;
+                }
+            } else {
+                auto rep = ref.compare(stage.c_str(), buf, (size_t)n_out);
+                print_row(stage.c_str(), rep, COS_THRESHOLD);
+                record(rep);
+            }
+            free(buf);
+        }
+        sensevoice_free(ctx);
     } else {
         fprintf(stderr,
                 "crispasr-diff: backend '%s' is not recognised. "
                 "Supported: voxtral, voxtral4b, qwen3, qwen3-tts, qwen3-tts-codec, kokoro, granite, granite-4.1, "
                 "granite-nle, parakeet, canary, cohere, gemma4, mimo-tokenizer, mimo-asr, orpheus, moonshine, "
-                "moonshine-streaming, lid-cld3, glm-asr, firered-asr, voxcpm2-tts, funasr.\n",
+                "moonshine-streaming, lid-cld3, glm-asr, firered-asr, voxcpm2-tts, funasr, sensevoice.\n",
                 backend_name.c_str());
         return 5;
     }

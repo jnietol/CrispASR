@@ -198,6 +198,10 @@ REGISTERED_BACKENDS: Dict[str, str] = {
     # "FunAudioLLM/Fun-ASR-Nano-2512" / "FunAudioLLM/Fun-ASR-MLT-Nano-2512"
     # or a local snapshot. Requires `funasr` 1.3.1+.
     "funasr":     "reference_backends.funasr",
+    # SenseVoiceSmall: multi-task encoder-only ASR (transcript + LID +
+    # emotion + audio-event via CTC head). Same SANM encoder as Fun-ASR
+    # but no LLM half. model_dir = FunAudioLLM/SenseVoiceSmall HF snapshot.
+    "sensevoice": "reference_backends.sensevoice",
     # VoxCPM2 TTS: diffusion AR TTS with 4 transformer sub-networks.
     # model_dir = openbmb/VoxCPM2 HF snapshot. Audio arg = reference WAV
     # for voice cloning (optional). Synth text from VOXCPM2_SYN_TEXT env.

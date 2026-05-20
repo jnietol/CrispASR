@@ -83,6 +83,15 @@ constexpr Entry k_registry[] = {
      "~1.98 GB", nullptr, nullptr,
      "FunASR Model License v1.1 (commercial use OK with attribution; see "
      "https://huggingface.co/FunAudioLLM/Fun-ASR-MLT-Nano-2512/blob/main/LICENSE)"},
+    // FunAudioLLM/SenseVoiceSmall: encoder-only multi-task ASR — same
+    // SANM encoder body as Fun-ASR-Nano but with a CTC head emitting
+    // language + emotion + audio-event tags alongside the transcript.
+    // 15× faster than Whisper-Large per upstream.
+    {"sensevoice", "sensevoice-small-f16.gguf",
+     "https://huggingface.co/cstr/sensevoice-small-GGUF/resolve/main/sensevoice-small-f16.gguf",
+     "~0.47 GB", nullptr, nullptr,
+     "FunASR Model License v1.1 (commercial use OK with attribution; see "
+     "https://huggingface.co/FunAudioLLM/SenseVoiceSmall/blob/main/LICENSE)"},
     {"cohere", "cohere-transcribe-q4_k.gguf",
      "https://huggingface.co/cstr/cohere-transcribe-03-2026-GGUF/resolve/main/cohere-transcribe-q4_k.gguf", "~550 MB", nullptr, nullptr},
     {"wav2vec2", "wav2vec2-xlsr-en-q4_k.gguf",

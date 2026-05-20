@@ -537,6 +537,31 @@ if(GGML_CUDA)
 endif()
 
 # ---------------------------------------------------------------------------
+# SenseVoice — FunAudioLLM/SenseVoiceSmall (encoder-only multi-task ASR:
+#              transcript + LID + emotion + audio-event via a single CTC head,
+#              non-AR, 15× faster than Whisper-Large, 50+ languages)
+# ---------------------------------------------------------------------------
+add_library(sensevoice STATIC
+            sensevoice.h
+            sensevoice.cpp
+            )
+target_include_directories(sensevoice PUBLIC . ../include)
+target_compile_features   (sensevoice PUBLIC cxx_std_17)
+set_target_properties(sensevoice PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_link_libraries     (sensevoice PUBLIC ggml ggml-base Threads::Threads crispasr-core)
+if(NOT MSVC)
+    target_compile_options(sensevoice PRIVATE -O3)
+endif()
+if(GGML_METAL)
+    target_compile_definitions(sensevoice PRIVATE GGML_USE_METAL)
+    target_link_libraries(sensevoice PUBLIC ggml-metal)
+endif()
+if(GGML_CUDA)
+    target_compile_definitions(sensevoice PRIVATE GGML_USE_CUDA)
+    target_link_libraries(sensevoice PUBLIC ggml-cuda)
+endif()
+
+# ---------------------------------------------------------------------------
 # Voxtral — mistralai/Voxtral-Mini-3B-2507 (Whisper encoder + Llama 3 LLM)
 # ---------------------------------------------------------------------------
 add_library(voxtral STATIC
