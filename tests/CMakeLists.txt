@@ -496,6 +496,28 @@ catch_discover_tests(test-issue-114-chunk-context-gate
     PROPERTIES LABELS "unit;chunk-context;issue-114"
 )
 
+# ─── test-issue-89-long-audio-fallback — issue #89 regression guard
+#
+# Pins crispasr_long_audio::should_auto_chunk_long so a future refactor
+# cannot silently restore the a069018f "always full-encode for
+# CAP_UNBOUNDED_INPUT" behaviour. That produced 35 tokens of output on
+# 300 s of audio when the user provided neither --vad nor --chunk-seconds
+# because the FastConformer + TDT decoder collapse past ~30-60 s in a
+# single pass.
+add_executable(test-issue-89-long-audio-fallback
+    test-issue-89-long-audio-fallback.cpp
+)
+target_include_directories(test-issue-89-long-audio-fallback PRIVATE
+    ${PROJECT_SOURCE_DIR}/examples/cli
+)
+target_link_libraries(test-issue-89-long-audio-fallback PRIVATE
+    Catch2::Catch2WithMain
+)
+catch_discover_tests(test-issue-89-long-audio-fallback
+    TEST_SPEC "[issue-89]"
+    PROPERTIES LABELS "unit;long-audio;issue-89"
+)
+
 # ─── test - math - consistency — Catch2 unit tests for math constants ────────
 add_executable(test-math-consistency
     test-math-consistency.cpp

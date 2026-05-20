@@ -10,6 +10,7 @@
 #include "crispasr_backend.h"
 #include "crispasr_cache.h"
 #include "crispasr_chunk_context_gate.h"
+#include "crispasr_long_audio_fallback.h"
 #include "crispasr_mic_cli.h"
 #include "crispasr_popen.h"
 #include "crispasr_vad_cli.h"
@@ -388,7 +389,39 @@ int process_one_input(CrispasrBackend& backend, const std::string& fname_inp, co
     if (!params.chunk_seconds_explicit && (backend.capabilities() & CAP_UNBOUNDED_INPUT)) {
         effective_chunk_seconds = 0;
     }
-    if (!params.no_prints) {
+
+    // Issue #89: CAP_UNBOUNDED_INPUT backends are mathematically able to take
+    // arbitrarily long audio, but in practice the FastConformer encoder + TDT
+    // decoder break down past ~30-60 s in a single pass — per-feature z-norm
+    // stats are computed across the whole input, so a long input shifts the
+    // distribution away from what the model was trained on and the TDT
+    // decoder stops emitting after a few seconds. On the issue #89 reporter's
+    // 300 s YouTube reproducer this collapsed to 35 tokens covering only the
+    // first 4.8 s, with the rest of the audio silently dropped.
+    //
+    // Fallback to fixed chunking when the user provided no VAD and no
+    // explicit --chunk-seconds and the audio is longer than the model's safe
+    // single-pass window. Chunking alone is sufficient (verified: 300 s
+    // audio with `--chunk-seconds 60` produces 7 segments covering the
+    // whole file); we don't need to silently auto-enable a VAD download.
+    // The overlap-save gate in `use_chunk_context` (issue #114) still
+    // applies here, so the chunk boundaries get the ± chunk_overlap_seconds
+    // context they need to span continuous-speech cuts.
+    constexpr int kLongAudioFallbackChunkSeconds = 60;
+    const bool wants_vad = params.vad || !params.vad_model.empty();
+    const bool long_audio_no_vad =
+        crispasr_long_audio::should_auto_chunk_long(effective_chunk_seconds, wants_vad, backend.capabilities(),
+                                                    (int)samples.size(), SR, kLongAudioFallbackChunkSeconds);
+    if (long_audio_no_vad) {
+        effective_chunk_seconds = kLongAudioFallbackChunkSeconds;
+        if (!params.no_prints) {
+            fprintf(stderr,
+                    "crispasr: %s backend on %.1fs audio without --vad or --chunk-seconds — "
+                    "auto-chunking at %d s to keep encoder in its safe window "
+                    "(pass --vad for finer slicing, or --chunk-seconds N to set explicitly)\n",
+                    backend.name(), (double)samples.size() / SR, kLongAudioFallbackChunkSeconds);
+        }
+    } else if (!params.no_prints) {
         if (effective_chunk_seconds == 0 && (int)samples.size() > params.chunk_seconds * SR &&
             (backend.capabilities() & CAP_UNBOUNDED_INPUT)) {
             fprintf(stderr,

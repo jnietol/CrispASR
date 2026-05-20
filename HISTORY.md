@@ -6,6 +6,52 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-05-20 parakeet-ja long-audio collapse on no-VAD path (issue #89)
+
+`lenhone` reported that parakeet-tdt-0.6b-ja stopped transcribing past
+~5 s on a 300 s YouTube clip when invoked without `--vad` and without
+`--chunk-seconds`. Output collapsed to ~35 single-character tokens at
+the very start, with the rest of the audio silently dropped.
+
+**Root cause.** `a069018f fix(#89): always full-encode for
+CAP_UNBOUNDED_INPUT backends` set `effective_chunk_seconds = 0`
+unconditionally for parakeet/canary/wav2vec2/firered-asr/granite-nar
+without an explicit `--chunk-seconds`. That was correct for short
+audio (full-audio encoding gives the cleanest features), but
+catastrophic for long audio: the FastConformer encoder + TDT decoder
+aren't stable in a single pass past ~30-60 s. Per-feature z-norm
+stats drift away from the training distribution, position encodings
+move past the trained range, and the TDT decoder starts emitting
+nothing but blanks. Upstream NeMo uses `FrameBatchASRTDT` /
+`BatchedFrameASRTDT` for long-audio offline inference — chunked with
+overlap-save and LCS hypothesis stitching, not single-pass encoding.
+
+**Fix.** Add a long-audio chunking fallback: when
+`CAP_UNBOUNDED_INPUT && !wants_vad && effective_chunk_seconds == 0 &&
+n_samples > 60 s · SR`, set `effective_chunk_seconds = 60`. Chunk
+boundaries still get the ± `chunk_overlap_seconds` (default 3 s)
+context from `cad4c28a`'s overlap-save logic, gated correctly per
+issue #114 — so the boundary mitigation only fires where it's needed
+(explicit / fallback chunking) and stays off for VAD-derived slices.
+
+The gate lives in `examples/cli/crispasr_long_audio_fallback.h` so
+`tests/test-issue-89-long-audio-fallback.cpp` can pin it as a unit
+test without a model load.
+
+Verified on the reporter's 300 s YouTube clip (Apple M1 Metal):
+- before: 35 segs, last at 00:00:04,880 (audio dropped 4.9 – 300 s)
+- after:  6 chunks → 477 segs, last at 00:04:59,780 (full coverage)
+- `--vad --vad-model firered` (same audio): 774 segs (finer slicing,
+  works as expected — VAD path still bypasses the fallback)
+
+The cad4c28a / #114 overlap-save logic still applies to the
+auto-fallback's chunks (because `effective_chunk_seconds > 0`), so
+the FastConformer's missing context at chunk boundaries gets the
+± 3 s recovery window. VAD-derived runs continue to skip overlap-
+save — silence-bounded slices have no boundary signal to recover.
+
+---
+
 ## 2026-05-20 parakeet-ja kanji → hiragana regression (issue #114)
 
 `exn251` reported that `parakeet-tdt-0.6b-ja` produced visibly worse
