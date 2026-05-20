@@ -226,6 +226,18 @@ endif()
 find_package(Threads REQUIRED)
 target_link_libraries(crispasr PUBLIC ggml Threads::Threads)
 
+# `crispasr_cache.cpp` calls WinHTTP for HF auto-download on Windows. MSVC
+# auto-links winhttp.lib via `#pragma comment(lib, "winhttp.lib")` inside
+# the .cpp, but MinGW / GCC ignore that pragma — so any downstream test or
+# executable that links libcrispasr.a (and therefore pulls in
+# crispasr_cache.cpp.obj) needs winhttp on its link line. Propagate it as
+# PUBLIC here so every consumer transitively picks it up, and individual
+# tests don't have to remember to add it. Mirrors how Threads::Threads
+# already flows through.
+if (WIN32)
+    target_link_libraries(crispasr PUBLIC winhttp)
+endif()
+
 if (CRISPASR_COREML)
     target_link_libraries(crispasr PRIVATE crispasr.coreml)
 endif()
