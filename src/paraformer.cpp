@@ -889,7 +889,8 @@ float* paraformer_extract_stage(paraformer_context* ctx, const float* samples, i
         buf[txt.size()] = '\0';
         if (n_out)
             *n_out = (int)txt.size();
-        return (float*)buf;
+        // cppcheck-suppress invalidPointerCast
+        return (float*)buf; // caller casts back to char* (generated_text path)
     }
 
     std::vector<float> staged;
