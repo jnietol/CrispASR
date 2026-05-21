@@ -6,6 +6,66 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-05-21 fix(#89): parakeet long-audio NeMo-style streamed pipeline
+
+**Outcome.** The issue #89 reporter's 300 s Japanese YouTube clip
+(`o_9dWkRPYC0`, parakeet-tdt-0.6b-ja on Vulkan/AMD) went from 35
+tokens covering 0-5 s → full coverage.  The 60 s case went from 0 chars
+(with the original 60 s auto-chunk) to 294 chars / 99.5 % coverage.
+
+**Root cause.** Three layered problems:
+
+1. Per-feature z-norm drift: the TDT decoder emits blanks when mel
+   statistics computed over >30 s shift from the training distribution.
+2. Decoder cold-start: each independently-chunked slice resets the LSTM
+   predictor to SOS, losing 5-20 s of interior content per chunk.
+3. `crispasr_run.cpp` auto-chunked at 60 s → 30 s before the backend
+   could handle it internally.
+
+**Fix (6 commits).**
+
+| Commit | Change | Impact |
+|--------|--------|--------|
+| `bdc8175` | Reduce auto-chunk 60 → 30 s | Prevents 0-output catastrophe |
+| `1037bcb` | PR #116: VAD slices out of chunk-context path | Fixes VAD + cohere/granite regressions |
+| `9488223` | Chunked-encode + single-decode (PLAN #104 v1) | 93 % coverage without VAD |
+| `300149e` | NeMo-style: global z-norm + chunked encode | Feature-identical to single-pass |
+| `97d2b4f` | Raise threshold to 60 s + env knobs | 99.5 % on 60 s, tuneable |
+
+**Architecture.** Audio ≤60 s: single-pass `parakeet_transcribe_ex` (best
+quality, 99.5 %).  Audio >60 s: `parakeet_transcribe_streamed` — compute
+mel with global z-norm over the full audio, encode in overlapping 8 s
+chunks, concatenate encoder outputs, decode in one TDT pass.  The
+encoder is bidirectional so each 8 s chunk gets independent context; the
+decoder sees a single continuous sequence (no LSTM reset).
+
+**Env knobs:** `CRISPASR_PARAKEET_STREAM_THRESHOLD` (default 60 s),
+`CRISPASR_PARAKEET_STREAM_CHUNK` (default 8 s),
+`CRISPASR_PARAKEET_STREAM_OVERLAP` (default 2 s).
+
+**Benchmark framework.** New `tests/benchmark_asr.py` driver + audio
+corpus in `/mnt/storage/test-audio/` (en/de/ja/zh × 4 durations from
+FLEURS + reporter's audio).  14 pytest unit tests for metric computation
+(`tests/test_benchmark_metrics.py`).
+
+**Files.**
+
+| File | Change |
+|------|--------|
+| `src/parakeet.cpp` | `parakeet_encode_chunked`, `parakeet_transcribe_chunked`, `parakeet_transcribe_streamed`, `parakeet_compute_mel_raw`, `parakeet_apply_znorm` |
+| `src/parakeet.h` | New public API declarations |
+| `examples/cli/crispasr_backend_parakeet.cpp` | Path selection + env knobs, `CAP_INTERNAL_CHUNKING` |
+| `examples/cli/crispasr_backend.h` | `CAP_INTERNAL_CHUNKING` flag |
+| `examples/cli/crispasr_long_audio_fallback.h` | `CAP_INTERNAL_CHUNKING_FLAG` gate |
+| `examples/cli/crispasr_run.cpp` | 30 s auto-chunk default |
+| `tests/benchmark_asr.py` | Multi-backend benchmark driver |
+| `tests/benchmark_metrics.py` | Coverage metric computation |
+| `tests/benchmark_corpus.py` | FLEURS audio corpus builder |
+| `tests/test_benchmark_metrics.py` | 14 pytest unit tests |
+| `tests/run-benchmark.sh` | CTest smoke wrapper |
+
+---
+
 ## 2026-05-21 paraformer: FunASR Paraformer-zh NAR-ASR port
 
 **Outcome.** Ported FunASR Paraformer-zh (220M params, non-autoregressive,

@@ -100,8 +100,7 @@ public:
 
         parakeet_result* r;
         if (stream_threshold_s > 0 && n_samples > stream_threshold_s * 16000) {
-            r = parakeet_transcribe_streamed(ctx_, samples, n_samples, t_offset_cs,
-                                             stream_chunk_s, stream_overlap_s);
+            r = parakeet_transcribe_streamed(ctx_, samples, n_samples, t_offset_cs, stream_chunk_s, stream_overlap_s);
         } else {
             r = parakeet_transcribe_ex(ctx_, samples, n_samples, t_offset_cs);
         }

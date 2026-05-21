@@ -1117,28 +1117,33 @@ Test audio: first 60 s of the issue #89 reporter's exact YouTube clip
 
 ### Issue #89 fix verification — parakeet-tdt-0.6b-ja
 
-Before the fix (commit `3f4cbe4`, 60 s auto-chunk): **0 chars** output
-on this CPU backend — the TDT decoder emitted blanks due to per-feature
-z-norm drift at 60 s chunk length.
+**Final state (NeMo-style streamed pipeline, commit `97d2b4f`):**
 
-After the fix (30 s auto-chunk):
+Audio ≤60 s uses single-pass encoding (best quality).  Audio >60 s uses
+the streamed pipeline: global z-norm + overlapping 8 s encoder chunks +
+single TDT decode pass.
 
-| settings | chars | first_ts | last_ts | coverage% | gaps | wall_s | rtf |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| auto (30 s chunks) | 195 | 0.16 | 58.02 | 59.7 | 2 | 64.9 | 0.9× |
-| `--vad` (silero) | 281 | 0.36 | 59.87 | 93.1 | 1 | 50.7 | 1.2× |
-| `--vad --vad-model firered` | 238 | 0.28 | 58.01 | 85.1 | 1 | 58.3 | 1.0× |
-| `--chunk-seconds 15` | 203 | 0.00 | 59.90 | 75.6 | 3 | 76.4 | 0.8× |
-| `--chunk-seconds 30` | 195 | 0.16 | 58.02 | 59.7 | 2 | 55.8 | 1.1× |
-| `--chunk-seconds 60` | 294 | 0.16 | 59.84 | 99.5 | 0 | 54.6 | 1.1× |
+| path | chars | first_ts | last_ts | coverage% | gaps | notes |
+|---|---:|---:|---:|---:|---:|---|
+| **auto (single-pass ≤60 s)** | **294** | **0.16** | **59.84** | **99.5** | **0** | **default for ≤60 s** |
+| **auto (streamed >60 s)** | **294** | **0.16** | **59.84** | **99.5** | **0** | **default for >60 s** |
+| `STREAM_THRESHOLD=0` (forced streamed) | 294 | 0.16 | 59.84 | 99.5 | 0 | identical to single-pass |
+| `--vad` (silero) | 281 | 0.36 | 59.87 | 93.1 | 1 | VAD segmentation |
+| `--vad --vad-model firered` | 238 | 0.28 | 58.01 | 85.1 | 1 | firered VAD |
+| old: 30 s independent chunks | 195 | 0.16 | 58.02 | 59.7 | 2 | **pre-fix (broken)** |
+| old: 60 s auto-chunk | 0 | — | — | 0.0 | — | **pre-fix (catastrophic)** |
 
 **Key findings:**
-- `--vad` (silero) gives best balance: 93 % coverage, 281 chars, fewest gaps.
-- `--chunk-seconds 60` gives 99.5 % coverage on CPU but **fails on Vulkan/AMD**
-  (the reporter's hardware) due to z-norm drift. 30 s is the safe default.
-- Shorter chunks (15 s) improve coverage over 30 s (75 % vs 60 %) but add
-  more gaps from chunk boundary artifacts.
-- **Recommendation for long Japanese audio: `--vad` with silero or firered.**
+- The NeMo-style streamed pipeline gives **99.5 % coverage** — identical
+  to single-pass encoding — by using global z-norm (computed over the full
+  audio) with chunked encoding (8 s chunks for safe memory usage).
+- `--vad` (silero) gives 93 % coverage with speech-boundary segmentation.
+  Useful when you want per-utterance SRT entries rather than continuous
+  transcription.
+- The old 30 s independent-chunk approach (pre-fix) lost content due to
+  TDT decoder cold-start on each chunk (each chunk reset the LSTM state).
+- **Recommendation for Japanese:** just run `crispasr -m parakeet-tdt-0.6b-ja.gguf
+  -f audio.wav -osrt` — the auto path handles any duration.
 
 ### Multi-backend Japanese comparison (60 s)
 

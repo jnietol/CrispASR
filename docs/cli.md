@@ -132,6 +132,36 @@ per-token `tokens[]` arrays when the backend populates them.
 | `--lcs-min-length N` | Minimum LCS length to act on (default 1; raise to 3-4 on long-silence audio where blank tokens dominate boundaries) |
 | `--parakeet-decoder ctc\|tdt` | Select CTC or TDT decode head for hybrid parakeet models |
 
+### Parakeet long-audio streaming (issue #89)
+
+Parakeet handles long audio internally via a NeMo-inspired streamed
+pipeline.  Audio ≤60 s is processed in a single encoder pass (best
+quality: 99.5 % coverage on the reporter's 60 s Japanese podcast clip).
+Audio >60 s is encoded in overlapping 8 s chunks with global z-norm,
+then decoded in one TDT pass — safe for any length without z-norm drift.
+
+**Env vars for tuning** (e.g. for issue triage on your hardware):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CRISPASR_PARAKEET_STREAM_THRESHOLD` | 60 | Switch from single-pass to streamed at this duration (seconds).  Set 0 = always streamed, 999 = always single-pass |
+| `CRISPASR_PARAKEET_STREAM_CHUNK` | 8 | Encoder chunk size (seconds) for the streamed path |
+| `CRISPASR_PARAKEET_STREAM_OVERLAP` | 2 | Encoder overlap (seconds) between consecutive chunks |
+
+**Example: transcribe a 5-minute Japanese podcast:**
+
+```bash
+# Auto mode — uses single-pass for first 60s, streamed for the rest:
+crispasr -m parakeet-tdt-0.6b-ja.gguf -f podcast.wav -osrt
+
+# Force single-pass even for long audio (may fail on some Vulkan/AMD):
+CRISPASR_PARAKEET_STREAM_THRESHOLD=999 \
+  crispasr -m parakeet-tdt-0.6b-ja.gguf -f podcast.wav -osrt
+
+# With VAD for finest segmentation (93%+ coverage, best subtitles):
+crispasr -m parakeet-tdt-0.6b-ja.gguf -f podcast.wav --vad -osrt
+```
+
 ### How VAD works
 
 Every non-whisper backend uses the Silero VAD model to segment long
@@ -182,16 +212,16 @@ crispasr --backend parakeet -m parakeet.gguf -f long_audio.wav \
   `voxtral`, `voxtral4b`, `qwen3`): use a CTC aligner together with
   `--vad`. Without VAD, leading silence can throw off sentence
   starts, especially for the qwen3 forced aligner.
-- **If parakeet OOMs on very long audio:** cap memory with explicit
-  chunking (`--chunk-seconds 60` or `120` recommended). When chunking
-  is active, each chunk is extended by `--chunk-overlap` seconds
-  (default 3.0) on each side for encoder context, and a NeMo-style
-  sub-word LCS pass (`--lcs-dedup auto`) removes any duplicate token
-  runs that survive the boundary trim. Avoid `--chunk-seconds 30` —
-  benchmarks show it is an anomalous worst case (93% of full quality)
-  while 60/120/180 stay within ±1%. To disable the LCS pass for A/B
-  testing pass `--lcs-dedup off`; to raise the match-length floor on
-  audio with long silence regions pass `--lcs-min-length 3` or `4`.
+- **Long audio (>60 s):** parakeet automatically switches to the
+  NeMo-style streamed pipeline — global z-norm + overlapping 8 s
+  encoder chunks + single TDT decode pass. No manual `--chunk-seconds`
+  needed. Tune with `CRISPASR_PARAKEET_STREAM_THRESHOLD` (default 60),
+  `CRISPASR_PARAKEET_STREAM_CHUNK` (default 8), and
+  `CRISPASR_PARAKEET_STREAM_OVERLAP` (default 2). See the "Parakeet
+  long-audio streaming" section above for details.
+- **If parakeet OOMs on very long audio:** lower the stream chunk size
+  with `CRISPASR_PARAKEET_STREAM_CHUNK=4`. The default 8 s chunks use
+  ~30 MB per chunk for the encoder; 4 s halves that.
 - **Hybrid TDT+CTC models** (e.g. `parakeet-tdt_ctc-0.6b-ja`): pass
   `--parakeet-decoder ctc` to use the CTC head. CTC decode is
   frame-synchronous and avoids TDT emission-frame-shift artifacts

@@ -523,7 +523,7 @@ static std::vector<float> parakeet_compute_mel_impl(parakeet_context* ctx, const
 // Compute mel WITHOUT z-norm — returns raw log-mel in (T, n_mels) layout.
 // Caller accumulates statistics across chunks and normalizes at the end.
 static std::vector<float> parakeet_compute_mel_raw(parakeet_context* ctx, const float* samples, int n_samples,
-                                                    int& T_out) {
+                                                   int& T_out) {
     const auto& hp = ctx->model.hparams;
     const int n_fft = (int)hp.n_fft;
     const int hop = (int)hp.hop_length;
@@ -545,7 +545,7 @@ static std::vector<float> parakeet_compute_mel_raw(parakeet_context* ctx, const 
     p.win_length = win;
     p.n_mels = n_mels;
     p.log_base = core_mel::LogBase::Ln;
-    p.norm = core_mel::Normalization::None;  // <-- NO z-norm
+    p.norm = core_mel::Normalization::None; // <-- NO z-norm
     p.layout = core_mel::Layout::TimeMels;
     p.log_eps = (float)(1.0 / (1 << 24));
     p.center_pad = true;
@@ -1775,7 +1775,7 @@ extern "C" struct parakeet_result* parakeet_decode_frames(struct parakeet_contex
 // ---------------------------------------------------------------------------
 
 static std::vector<float> parakeet_encode_chunked(parakeet_context* ctx, const float* samples, int n_samples,
-                                                   int chunk_seconds, int overlap_seconds, int* out_T_enc_total) {
+                                                  int chunk_seconds, int overlap_seconds, int* out_T_enc_total) {
     const auto& hp = ctx->model.hparams;
     const int SR = 16000;
     const int d_model = (int)hp.d_model;
@@ -1828,8 +1828,8 @@ static std::vector<float> parakeet_encode_chunked(parakeet_context* ctx, const f
         T_enc_total += keep_frames;
 
         if (getenv("PARAKEET_DEBUG"))
-            fprintf(stderr, "parakeet: chunk @%d: %d samples → %d mel → %d enc (skip %d, keep %d)\n", offset,
-                    chunk_len, T_mel, T_enc, skip_frames, keep_frames);
+            fprintf(stderr, "parakeet: chunk @%d: %d samples → %d mel → %d enc (skip %d, keep %d)\n", offset, chunk_len,
+                    T_mel, T_enc, skip_frames, keep_frames);
     }
 
     if (out_T_enc_total)
@@ -1844,8 +1844,8 @@ static std::vector<float> parakeet_encode_chunked(parakeet_context* ctx, const f
 // both the z-norm drift of single-pass encoding on long audio AND the
 // decoder cold-start of independent-chunk decoding.
 extern "C" struct parakeet_result* parakeet_transcribe_chunked(struct parakeet_context* ctx, const float* samples,
-                                                                int n_samples, int64_t t_offset_cs,
-                                                                int chunk_seconds, int overlap_seconds) {
+                                                               int n_samples, int64_t t_offset_cs, int chunk_seconds,
+                                                               int overlap_seconds) {
     if (!ctx || !samples || n_samples <= 0)
         return nullptr;
     if (chunk_seconds <= 0)
@@ -1934,8 +1934,8 @@ extern "C" struct parakeet_result* parakeet_transcribe_chunked(struct parakeet_c
 // ---------------------------------------------------------------------------
 
 extern "C" struct parakeet_result* parakeet_transcribe_streamed(struct parakeet_context* ctx, const float* samples,
-                                                                 int n_samples, int64_t t_offset_cs,
-                                                                 int chunk_seconds, int overlap_seconds) {
+                                                                int n_samples, int64_t t_offset_cs, int chunk_seconds,
+                                                                int overlap_seconds) {
     if (!ctx || !samples || n_samples <= 0)
         return nullptr;
     if (chunk_seconds <= 0)
