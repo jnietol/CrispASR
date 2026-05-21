@@ -138,10 +138,10 @@ struct funasr_hparams {
     uint32_t im_end_id = 151645;
 
     // Adaptor token-budget reduction matches the model.use_low_frame_rate
-    // training flag. With it on, the prompt builder reserves
-    // ((((T_lfr-1)/2+1 -1)/2+1 -1)/2+1 placeholder slots instead of T_lfr —
-    // see fun_asr_nano/model.py:404-409. The C++ runtime mirrors that, and
-    // splices adaptor_out[:fake_token_len] into the slot range.
+    // training flag. Fun-ASR-Nano-2512 sets it to true (23/183 frames on
+    // JFK); Fun-ASR-MLT-Nano-2512 omits it and the upstream default is
+    // false (all 183 frames used). Read from the GGUF KV at load time;
+    // fall back to true for GGUFs that predate the KV.
     bool use_low_frame_rate = true;
 };
 
@@ -351,11 +351,12 @@ static bool funasr_load_model(funasr_model& model, funasr_vocab& vocab, const ch
         hp.ada_ffn = core_gguf::kv_u32(gctx, "funasr.ada_ffn", hp.ada_ffn);
         hp.ada_d_out = core_gguf::kv_u32(gctx, "funasr.ada_d_out", hp.ada_d_out);
         hp.ada_n_layers = core_gguf::kv_u32(gctx, "funasr.ada_n_layers", hp.ada_n_layers);
-        // hp.ada_n_heads: deliberately NOT read from GGUF — see comment on
-        // the hparams struct member. The converter wrote 16 but the upstream
-        // adaptor uses the default 8 heads.
+        // The converter now writes the correct ada_n_heads=8; old GGUFs may
+        // still carry 16 (the original converter bug). Ignore the KV and
+        // keep the struct default of 8 until all published GGUFs are rebuilt.
         hp.ada_ffn_inner = core_gguf::kv_u32(gctx, "funasr.ada_ffn_inner", hp.ada_ffn_inner);
         hp.ada_head_dim = hp.ada_d_out / hp.ada_n_heads;
+        hp.use_low_frame_rate = core_gguf::kv_bool(gctx, "funasr.use_low_frame_rate", hp.use_low_frame_rate);
 
         hp.llm_n_layers = core_gguf::kv_u32(gctx, "funasr.llm.n_layers", hp.llm_n_layers);
         hp.llm_d_model = core_gguf::kv_u32(gctx, "funasr.llm.d_model", hp.llm_d_model);

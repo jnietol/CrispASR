@@ -214,8 +214,22 @@ def main():
     )
     ada_hp = dict(
         ada_d_in=512, ada_ffn=2048, ada_d_out=1024,
-        ada_n_layers=2, ada_n_heads=16, ada_ffn_inner=256,
+        ada_n_layers=2, ada_n_heads=8, ada_ffn_inner=256,
     )
+
+    # Read use_low_frame_rate from config.yaml (audio_adaptor_conf section).
+    # Fun-ASR-Nano-2512 sets it to true; Fun-ASR-MLT-Nano-2512 omits it
+    # (upstream default is false). Controls how many adaptor output frames
+    # are spliced into the LLM prompt — with true only the first
+    # ((T-1)/2+1 …)×3 frames are used; with false all T frames are used.
+    import yaml
+    cfg_path = os.path.join(base, "config.yaml")
+    use_low_frame_rate = False  # upstream default when key is absent
+    if os.path.isfile(cfg_path):
+        with open(cfg_path) as f:
+            cfg = yaml.safe_load(f)
+        ada_conf = cfg.get("audio_adaptor_conf", {})
+        use_low_frame_rate = ada_conf.get("use_low_frame_rate", False)
 
     # ---- Open GGUF writer ----
     short_name = ("Fun-ASR-MLT-Nano-2512" if "MLT" in args.input
@@ -225,6 +239,7 @@ def main():
     writer.add_name(short_name)
     for k, v in {**enc_hp, **ada_hp}.items():
         writer.add_uint32(f"funasr.{k}", int(v))
+    writer.add_bool("funasr.use_low_frame_rate", use_low_frame_rate)
 
     # LLM hyperparameters — match qwen3_asr conventions but under funasr.llm.*
     writer.add_uint32("funasr.llm.n_layers", int(llm_cfg["num_hidden_layers"]))
