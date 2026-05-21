@@ -520,6 +520,53 @@ static std::vector<float> parakeet_compute_mel_impl(parakeet_context* ctx, const
     return mel;
 }
 
+// Compute mel WITHOUT z-norm — returns raw log-mel in (T, n_mels) layout.
+// Caller accumulates statistics across chunks and normalizes at the end.
+static std::vector<float> parakeet_compute_mel_raw(parakeet_context* ctx, const float* samples, int n_samples,
+                                                    int& T_out) {
+    const auto& hp = ctx->model.hparams;
+    const int n_fft = (int)hp.n_fft;
+    const int hop = (int)hp.hop_length;
+    const int win = (int)hp.win_length;
+    const int n_freqs = n_fft / 2 + 1;
+    const int n_mels = (int)hp.n_mels;
+
+    if (!ctx->model.mel_fb || !ctx->model.mel_window)
+        return {};
+
+    std::vector<float> window_raw((size_t)win);
+    ggml_backend_tensor_get(ctx->model.mel_window, window_raw.data(), 0, win * sizeof(float));
+    std::vector<float> mel_fb((size_t)n_mels * n_freqs);
+    ggml_backend_tensor_get(ctx->model.mel_fb, mel_fb.data(), 0, mel_fb.size() * sizeof(float));
+
+    core_mel::Params p;
+    p.n_fft = n_fft;
+    p.hop_length = hop;
+    p.win_length = win;
+    p.n_mels = n_mels;
+    p.log_base = core_mel::LogBase::Ln;
+    p.norm = core_mel::Normalization::None;  // <-- NO z-norm
+    p.layout = core_mel::Layout::TimeMels;
+    p.log_eps = (float)(1.0 / (1 << 24));
+    p.center_pad = true;
+    p.drop_last_frame = true;
+    p.preemph = 0.97f;
+
+    auto mel = core_mel::compute(samples, n_samples, window_raw.data(), win, mel_fb.data(), n_freqs, parakeet_fft_r2c,
+                                 p, T_out);
+    return mel;
+}
+
+// Apply PerFeatureZ normalization to a (T, n_mels) mel buffer in-place,
+// using pre-computed per-band mean and inverse-std.
+static void parakeet_apply_znorm(float* mel, int T, int n_mels, const double* band_mean, const float* band_inv_std) {
+    for (int t = 0; t < T; t++) {
+        for (int m = 0; m < n_mels; m++) {
+            mel[(size_t)t * n_mels + m] = (float)(mel[(size_t)t * n_mels + m] - band_mean[m]) * band_inv_std[m];
+        }
+    }
+}
+
 // ===========================================================================
 // BatchNorm folding (load-time, once)
 //
@@ -1866,6 +1913,104 @@ extern "C" struct parakeet_result* parakeet_transcribe_chunked(struct parakeet_c
     // Actually, parakeet_decode_frames already does decode + word grouping.
     // Let's just call it directly.
     parakeet_result_free(r);
+    return parakeet_decode_frames(ctx, enc_all.data(), T_enc_total, d_model, t_offset_cs);
+}
+
+// ---------------------------------------------------------------------------
+// NeMo-style streamed pipeline: two-pass approach.
+//
+// Pass 1: compute raw mel (no z-norm) for the FULL audio, accumulating
+//   global per-band mean/variance.  Then apply z-norm using the global
+//   statistics.  This gives identical features to single-pass encoding.
+//
+// Pass 2: encode the z-normalized mel in overlapping chunks (the
+//   encoder is bidirectional, so it needs context around each chunk).
+//   Concatenate encoder outputs and decode in one TDT pass.
+//
+// This matches the NeMo convention: z-norm computed over the full
+// utterance, not per-chunk.  The result should be identical to
+// parakeet_transcribe_ex on short audio and close to 100% coverage
+// on long audio.
+// ---------------------------------------------------------------------------
+
+extern "C" struct parakeet_result* parakeet_transcribe_streamed(struct parakeet_context* ctx, const float* samples,
+                                                                 int n_samples, int64_t t_offset_cs,
+                                                                 int chunk_seconds, int overlap_seconds) {
+    if (!ctx || !samples || n_samples <= 0)
+        return nullptr;
+    if (chunk_seconds <= 0)
+        chunk_seconds = 8;
+    if (overlap_seconds < 0)
+        overlap_seconds = 2;
+    if (overlap_seconds >= chunk_seconds)
+        overlap_seconds = chunk_seconds / 4;
+
+    const auto& hp = ctx->model.hparams;
+    const int n_mels = (int)hp.n_mels;
+    const int d_model = (int)hp.d_model;
+    const int hop = (int)hp.hop_length;
+    const int sub = (int)hp.subsampling_factor;
+    const int SR = 16000;
+
+    // ---- Pass 1: compute mel for the FULL audio with global z-norm ----
+    // This is equivalent to what parakeet_transcribe_ex does for mel,
+    // but we keep the full mel buffer for chunked encoding in pass 2.
+    int T_mel = 0;
+    auto mel_full = parakeet_compute_mel_impl(ctx, samples, n_samples, T_mel);
+    if (mel_full.empty() || T_mel <= 0)
+        return nullptr;
+
+    if (getenv("PARAKEET_DEBUG"))
+        fprintf(stderr, "parakeet[streamed]: full mel: %d frames from %d samples\n", T_mel, n_samples);
+
+    // ---- Pass 2: encode mel in overlapping chunks ----
+    // The mel is already globally z-normalized, so we just slice it
+    // into chunks, encode each, and concatenate the encoder outputs.
+    const int chunk_mel_frames = chunk_seconds * SR / hop; // 8s = 800 mel frames
+    const int overlap_mel_frames = overlap_seconds * SR / hop;
+    const int shift_mel_frames = chunk_mel_frames - overlap_mel_frames;
+    const int overlap_enc_frames = overlap_mel_frames / sub;
+
+    std::vector<float> enc_all;
+    int T_enc_total = 0;
+
+    for (int mel_offset = 0; mel_offset < T_mel; mel_offset += shift_mel_frames) {
+        const int chunk_end = std::min(T_mel, mel_offset + chunk_mel_frames);
+        const int chunk_T = chunk_end - mel_offset;
+        if (chunk_T <= 0)
+            break;
+
+        // Encode this mel chunk
+        int T_enc = 0;
+        auto enc = parakeet_encode_mel(ctx, mel_full.data() + (size_t)mel_offset * n_mels, n_mels, chunk_T, &T_enc);
+        if (enc.empty())
+            continue;
+
+        // Skip overlap encoder frames for non-first chunks
+        int skip = 0;
+        if (mel_offset > 0 && T_enc > overlap_enc_frames)
+            skip = overlap_enc_frames;
+
+        const int keep = T_enc - skip;
+        if (keep <= 0)
+            continue;
+
+        enc_all.insert(enc_all.end(), enc.begin() + (size_t)skip * d_model,
+                       enc.begin() + (size_t)(skip + keep) * d_model);
+        T_enc_total += keep;
+
+        if (getenv("PARAKEET_DEBUG"))
+            fprintf(stderr, "parakeet[streamed]: mel chunk @%d: %d mel → %d enc (skip %d, keep %d)\n", mel_offset,
+                    chunk_T, T_enc, skip, keep);
+    }
+
+    if (enc_all.empty() || T_enc_total <= 0)
+        return nullptr;
+
+    if (getenv("PARAKEET_DEBUG"))
+        fprintf(stderr, "parakeet[streamed]: total %d enc frames → single TDT decode\n", T_enc_total);
+
+    // ---- Single TDT decode over concatenated encoder output ----
     return parakeet_decode_frames(ctx, enc_all.data(), T_enc_total, d_model, t_offset_cs);
 }
 
