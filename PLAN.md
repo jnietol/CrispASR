@@ -314,43 +314,101 @@ session each when somebody wants to push the numbers:
    `CRISPASR_QWEN3_ASR_FUSED_QKV`; funasr would mirror with
    `CRISPASR_FUNASR_FUSED_QKV`. Expected savings: 5-10 % on decode.
 
-4. **Two-pass: SenseVoice CTC fast pass → Fun-ASR-Nano LLM rescore.**
+4. **Two-pass: CTC fast pass → Fun-ASR-Nano LLM rescore.**
    RapidAI/RapidSpeech.cpp claims a "CTC fast pass + LLM rescoring" path
-   for FunASR-Nano. The Fun-ASR-Nano architecture itself is purely AR
-   (70-block SANM enc + 2-block Transformer adaptor + Qwen3-0.6B AR
-   decode — no usable CTC head on the adaptor; see `840e36dd` "no-CTC
-   finding"). But **SenseVoice-Small already ships in CrispASR with a
-   CTC head over the same SANM encoder family** (HISTORY 2026-05-20),
-   so the two-pass pattern is achievable cross-backend:
+   for FunASR-Nano. The state of CTC support for Fun-ASR-Nano took a
+   couple of investigative passes to map cleanly; **the situation as
+   of 2026-05-21**:
 
-   - **Pass 1 (fast):** SenseVoice CTC over the same audio → cheap
-     greedy hypothesis + per-frame token probs. Cost is ~5-10× faster
-     than Fun-ASR-Nano LLM decode.
-   - **Pass 2 (rescore):** Fun-ASR-Nano AR decode constrained to a
-     lattice / N-best list built from Pass 1, instead of unconstrained
-     beam. Targets: skip LLM entirely when CTC confidence is high
-     (>0.95 avg per-frame); otherwise use CTC top-K as decode prefix
-     candidates.
+   - **Official upstream `FunAudioLLM/Fun-ASR-Nano-2512/model.pt`** —
+     1880 MB, **1261 tensors, 0 with `ctc` in the name**. Prefix
+     breakdown: `audio_encoder` (914), `llm` (311), `audio_adaptor`
+     (36). Same shape for `Fun-ASR-MLT-Nano-2512/model.pt`
+     (independent binary, also 0 CTC). Verified locally 2026-05-21
+     against the cached HF snapshots; consistent with `840e36dd`
+     "no-CTC finding".
+   - **Official FunASR framework `funasr/models/fun_asr_nano/`** —
+     does ship CTC code. `model.py`'s `FunASRNano.__init__` sets
+     `self.ctc_decoder = None` by default and only builds a CTC
+     head when `ctc_decoder` is present in `kwargs` (i.e. set in
+     the training config). `ctc.py` defines the standard `CTC`
+     module (single Linear `ctc_lo` + `CTCLoss`). Recipes live in
+     `examples/industrial_data_pretraining/fun_asr_nano/`.
+   - **`csukuangfj/funasr-nano-with-ctc`** (sherpa-onnx / k2-fsa
+     maintainer, Apache-2.0) — the only public *trained* CTC head.
+     Recipe in `config.yaml`: `ctc_decoder: Transformer` with
+     `n_layer: 5`, `ffn_dim: 2048`, `encoder_dim: 512`, `llm_dim:
+     512`; encoder/adaptor/LLM frozen, only CTC trained;
+     `effective_save_name_excludes: - llm.` so the saved `model.pt`
+     (599 MB) is encoder + adaptor + CTC head, no LLM.
+   - **`manyeyes/Fun-ASR-Nano-2512-CTC-onnx`** (and `-int8-onnx`),
+     **`Oulasong/Funasr_Nano_MLT_ONNX`**, **`jiyilin123/FunASR-CTC-Nano-INT8-ONNX`**
+     — almost certainly downstream ONNX/int8 conversions of
+     csukuangfj's trained CTC head. manyeyes' description text
+     ("encoder与Fun-ASR-Nano-2512-CTC中的encoder一致") confirms
+     they reuse the upstream frozen encoder, which is csukuangfj's
+     setup.
 
-   Two open questions before writing code:
-   - **Encoder reuse.** SenseVoice ships with its own encoder weights,
-     Fun-ASR-Nano with its (slightly different — adaptor, post-LN). Can
-     one encoder forward feed both heads? Compare tensor shapes /
-     `general.architecture` from the two GGUFs and see whether the
-     SenseVoice encoder output is a drop-in for the Fun-ASR adaptor
-     input. If not, two encoder forwards is still worth it if Pass-1
-     saves the LLM decode.
-   - **Quality bar.** Lattice-rescore approaches in K2/icefall give
-     <0.5 % WER regression in exchange for 2-3× speedup; verify on
-     internal Chinese + English samples before promoting.
+   So upstream released a pure LLM-style ASR by choice — the
+   framework supports CTC as opt-in, but the released checkpoint
+   omits the head. CTC is one trained-from-scratch head away, and
+   csukuangfj has already done that training under Apache-2.0.
 
-   Approach: opt-in flag `CRISPASR_FUNASR_TWOPASS=1` that requires
-   both `funasr-nano-*.gguf` and `sensevoice-small-*.gguf` to be
-   loadable (look up via the model registry); fall back to the
-   single-pass path when either is missing. New `--asr-rescore`
-   CLI flag for explicit selection. Expected savings: 2-4× on
-   high-confidence clips, neutral on hard audio (still pays both
-   passes).
+   ### Two viable two-pass patterns
+
+   | Source for Pass 1 | Encoder forwards | Vocab mapping | Trust |
+   |---|---|---|---|
+   | **csukuangfj's CTC head + upstream encoder/adaptor/LLM** | **one** (shared) | none (CTC head was trained against Qwen3 tokenizer / SANM frame rate; same tokens.txt as upstream) | single-author training, no published WER, but framework-blessed recipe |
+   | **SenseVoice-Small (already in CrispASR)** | two (different encoder weights) | needed (SenseVoice's CTC vocab vs Fun-ASR-Nano's Qwen3 tokenizer differ) | gold — official Alibaba release |
+
+   The first pattern is the cleaner architecture (single encoder
+   forward, no cross-vocab) but inherits csukuangfj's training
+   trust. The second is more conservative but pays an extra
+   encoder pass and a vocab translation step.
+
+   ### Phase A — measurement only (no code)
+
+   Before writing any C++:
+
+   - Tensor-list csukuangfj's `model.pt` to confirm his encoder
+     weights are byte-identical to upstream's (they should be —
+     he loaded them with `freeze: true`). Same shape, same dtype,
+     same values modulo precision conversion.
+   - Run csukuangfj's CTC head + upstream's encoder+adaptor on a
+     small Chinese + English benchmark set we have ground-truth
+     transcripts for. Measure CER/WER vs upstream's pure-LLM
+     path; the framework's CTC training was auxiliary
+     (`detach_ctc_decoder: true`, `ctc_weight: 1.0` as one of
+     several losses), so CTC quality won't match the LLM head —
+     we just need it within ~3-5% relative for rescore to be a
+     net win.
+   - If quality is within bounds, write up the result in
+     LEARNINGS.md and proceed to Phase B.
+
+   ### Phase B — implementation
+
+   - Grow `models/convert-funasr-to-gguf.py` to (optionally) pick
+     up `ctc_decoder.*` tensors from a separate "with-ctc"
+     checkpoint, written as `funasr-nano-with-ctc-q4_k.gguf` or
+     similar. Auto-download from `cstr/funasr-nano-with-ctc-GGUF`
+     (we'd mirror csukuangfj's weights under our HF account, with
+     attribution).
+   - Opt-in flag `CRISPASR_FUNASR_TWOPASS=1` that requires the
+     companion `with-ctc` GGUF to be loadable; fall back to the
+     single-pass path when it's missing. New `--asr-rescore` CLI
+     flag for explicit selection.
+   - Wire one encoder forward, fork into CTC head + LLM head.
+     Pass 1: greedy CTC → per-frame token probs. Pass 2: skip
+     LLM if avg per-frame confidence >0.95; otherwise use CTC
+     top-K hypothesis as decode-prefix candidates for the LLM.
+     Expected savings: 2-4× on high-confidence clips, neutral on
+     hard audio (still pays both heads but only one encoder).
+
+   ### Fallback (only if Phase A's quality measurement fails)
+
+   Use SenseVoice-Small as the fast pass. Pays two encoder
+   forwards and a vocab translation, but inherits gold-source
+   trust. Same opt-in flag, different model lookup.
 
 None of these affect correctness — they're pure throughput pickings.
 
