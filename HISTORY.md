@@ -6,6 +6,44 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-05-21 paraformer: FunASR Paraformer-zh NAR-ASR port
+
+**Outcome.** Ported FunASR Paraformer-zh (220M params, non-autoregressive,
+Mandarin Chinese + English) as a new `--backend paraformer`. Character-level
+tokenizer (8404 vocab), single-pass decode via CIF (continuous integrate-and-fire)
+predictor. F16 GGUF (421 MB) produces byte-identical transcripts vs Python on the
+Chinese test audio (66 characters) and recognizable English output on JFK.
+
+**Architecture:** 50 SANM encoder blocks (reusing `core_sanm::build_block()`)
+→ CIF predictor (Conv1d + sigmoid → accumulation) → 16 NAR decoder blocks
+(FFN → FSMN → cross-attn, note the unusual order) → decoders3 post block
+→ output_layer → argmax.
+
+**Three bugs in initial WIP port:**
+1. Decoder block operation order: had FSMN → cross-attn → FFN but upstream
+   does FFN → FSMN → cross-attn. Norms (norm1/2/3) were applied to wrong
+   sub-layers.
+2. FFN internal LayerNorm: was w1→LN→ReLU→w2, upstream is w1→ReLU→LN→w2.
+   Post block (decoders3) also had a spurious residual connection.
+3. CIF encoder-output transposition: used `enc_out[d*T+t]` instead of
+   `enc_out[t*D+d]`. The ggml tensor already stores row-major (T,D), so
+   no transpose was needed. Same bug in acoustic_embeds → decoder path.
+
+**Diff harness.** Reference backend (`tools/reference_backends/paraformer.py`)
+captures 73 stages. `paraformer_extract_stage()` implemented for all stages.
+generated_text matches byte-for-byte.
+
+### Files
+
+| File | Change |
+|------|--------|
+| `models/convert-paraformer-to-gguf.py` | New: converter (model.pt → 956-tensor GGUF) |
+| `src/paraformer.{h,cpp}` | New: ~850 LOC runtime |
+| `examples/cli/crispasr_backend_paraformer.cpp` | New: CLI adapter |
+| `tools/reference_backends/paraformer.py` | New: 73-stage reference backend |
+
+---
+
 ## 2026-05-21 sensevoice: Q4_K + Q8_0 quants + fix crispasr-quantize `.w` suffix gate
 
 **Outcome.** Published Q4_K (129 MB) + Q8_0 (240 MB) alongside the
