@@ -27,6 +27,7 @@ int              crispasr_session_set_target_language(CrispasrSession* s, const 
 int              crispasr_session_set_punctuation(CrispasrSession* s, int enable);
 int              crispasr_session_set_translate(CrispasrSession* s, int enable);
 int              crispasr_session_set_temperature(CrispasrSession* s, float temperature, unsigned long long seed);
+int              crispasr_session_set_tts_seed(CrispasrSession* s, unsigned long long seed);
 int              crispasr_session_set_max_new_tokens(CrispasrSession* s, int max_new_tokens);
 int              crispasr_session_set_frequency_penalty(CrispasrSession* s, float penalty);
 int              crispasr_session_detect_language(CrispasrSession* s, const float* pcm, int n_samples,
@@ -254,6 +255,18 @@ func (s *CrispasrSession) SetTemperature(temperature float32, seed uint64) error
 	// rc == -2 means no backend in this session honours it — soft no-op.
 	if rc != 0 && rc != -2 {
 		return errors.New("crispasr_session_set_temperature failed")
+	}
+	return nil
+}
+
+// SetTTSSeed sets the seed on TTS session backends that support runtime
+// reseeding (chatterbox, vibevoice, qwen3-tts, orpheus). Other backends
+// silently no-op.
+func (s *CrispasrSession) SetTTSSeed(seed uint64) error {
+	rc := C.crispasr_session_set_tts_seed(s.handle, C.ulonglong(seed))
+	// rc == -2 means no backend in this session honours it — soft no-op.
+	if rc != 0 && rc != -2 {
+		return errors.New("crispasr_session_set_tts_seed failed")
 	}
 	return nil
 }

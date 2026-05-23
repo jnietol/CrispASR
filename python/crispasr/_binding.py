@@ -1474,6 +1474,20 @@ class Session:
         if rc not in (0, -2):
             raise RuntimeError(f"set_temperature failed (rc={rc})")
 
+    def set_tts_seed(self, seed: int) -> None:
+        """Reseed TTS backends that support runtime seed control.
+
+        This is a soft no-op for sessions whose loaded backend does not
+        expose a reseed hook.
+        """
+        if not hasattr(self._lib, "crispasr_session_set_tts_seed"):
+            raise RuntimeError("session-state API not present in this libcrispasr build")
+        self._lib.crispasr_session_set_tts_seed.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
+        self._lib.crispasr_session_set_tts_seed.restype = ctypes.c_int
+        rc = self._lib.crispasr_session_set_tts_seed(self._handle, int(seed))
+        if rc not in (0, -2):
+            raise RuntimeError(f"set_tts_seed failed (rc={rc})")
+
     def set_max_new_tokens(self, max_new_tokens: int) -> None:
         """Set a generated-token cap for autoregressive session backends.
 

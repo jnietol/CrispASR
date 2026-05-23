@@ -469,6 +469,7 @@ extern "C" {
         temperature: c_float,
         seed: u64,
     ) -> c_int;
+    pub fn crispasr_session_set_tts_seed(s: *mut CrispasrSession, seed: u64) -> c_int;
     pub fn crispasr_session_set_max_new_tokens(
         s: *mut CrispasrSession,
         max_new_tokens: c_int,

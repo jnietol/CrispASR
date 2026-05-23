@@ -830,6 +830,17 @@ impl Session {
         Ok(())
     }
 
+    /// Set the RNG seed for sampling-capable TTS backends that expose a
+    /// session-level seed override (chatterbox, vibevoice, qwen3-tts,
+    /// orpheus). Other backends silently no-op.
+    pub fn set_tts_seed(&self, seed: u64) -> Result<(), String> {
+        let rc = unsafe { crispasr_sys::crispasr_session_set_tts_seed(self.handle, seed) };
+        if rc != 0 && rc != -2 {
+            return Err(format!("set_tts_seed failed (rc={})", rc));
+        }
+        Ok(())
+    }
+
     /// Set a generated-token cap for autoregressive session backends.
     /// Pass `<= 0` to clear the override and use the backend default.
     pub fn set_max_new_tokens(&self, max_new_tokens: i32) -> Result<(), String> {

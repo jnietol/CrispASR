@@ -4654,6 +4654,40 @@ CA_EXPORT int crispasr_session_set_temperature(crispasr_session* s, float temper
     return touched > 0 ? 0 : -2;
 }
 
+// Set the seed for sampling-capable TTS backends. This currently
+// covers chatterbox, vibevoice, qwen3-tts, and orpheus. Other
+// backends silently no-op (rc=-2).
+CA_EXPORT int crispasr_session_set_tts_seed(crispasr_session* s, uint64_t seed) {
+    if (!s)
+        return -1;
+    int touched = 0;
+#ifdef CA_HAVE_CHATTERBOX
+    if (s->chatterbox_ctx) {
+        chatterbox_set_seed((chatterbox_context*)s->chatterbox_ctx, (uint32_t)seed);
+        touched++;
+    }
+#endif
+#ifdef CA_HAVE_VIBEVOICE
+    if (s->vibevoice_ctx) {
+        vibevoice_set_seed((vibevoice_context*)s->vibevoice_ctx, (uint32_t)seed);
+        touched++;
+    }
+#endif
+#ifdef CA_HAVE_QWEN3_TTS
+    if (s->qwen3_tts_ctx) {
+        qwen3_tts_set_seed((qwen3_tts_context*)s->qwen3_tts_ctx, seed);
+        touched++;
+    }
+#endif
+#ifdef CA_HAVE_ORPHEUS
+    if (s->orpheus_ctx) {
+        orpheus_set_seed((orpheus_context*)s->orpheus_ctx, seed);
+        touched++;
+    }
+#endif
+    return touched > 0 ? 0 : -2;
+}
+
 // ─────────────────────────────────────────────────────────────────
 // CrispASR 0.6.1 parity additions — TTS sampling knobs reachable at
 // runtime so the CrisperWeaver Synthesize screen can drive them

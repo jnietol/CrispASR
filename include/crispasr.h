@@ -570,6 +570,7 @@ CRISPASR_API void crispasr_params_set_temperature(struct whisper_full_params* p,
 
 // Unified session decode controls for autoregressive / LLM-style backends.
 // max_new_tokens <= 0 clears the cap override; frequency_penalty <= 0 disables it.
+CRISPASR_API int crispasr_session_set_tts_seed(struct crispasr_session* s, uint64_t seed);
 CRISPASR_API int crispasr_session_set_max_new_tokens(struct crispasr_session* s, int n);
 CRISPASR_API int crispasr_session_set_frequency_penalty(struct crispasr_session* s, float penalty);
 

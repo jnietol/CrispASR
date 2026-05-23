@@ -44,6 +44,7 @@ test-all-backends.py passes 18/18 transcribe + 51/54 feature tests (3 stream ski
 | **LOW** | [#95 IndexTTS Chinese TN binary alternative](#95-indextts-15-chinese-tn--binary-alternative-to-the-python-wetext-hook) | survey only | Python `INDEXTTS_TEXT_NORMALIZER` hook shipped 2026-05-19. Hand-roll (#95a) is the right next step *when* a user reports a digit/date prompt that breaks; OpenFST vendoring (#95b) only after #95a grows past ~5 cases. |
 | **LOW** | [#97 More Parakeet variants](#97-more-parakeet-variants) | Small per-variant | Converter-only for TDT / TDT+CTC variants (v2, tdt-1.1b, tdt_ctc-{110m,1.1b}); RNNT / realtime-EOU / unified-en deferred (need new decoder code or arch survey). |
 | **MEDIUM** | [#98 Hotwords / contextual biasing](#98-hotwords--contextual-biasing) | Phased | Two-feature path covers ~9/14 backends: (a) generic CTC-WS phrase-boost trie wired into the CTC path (parakeet-ctc, parakeet-tdt, fc-ctc, omniasr); (b) `--hotwords` → LLM prompt-prefix helper (funasr, granite-plus, voxtral, qwen3-asr). |
+| **MEDIUM** | [#105 WhisperX word alignment models](#105-whisperx-word-alignment-models-wav2vec2-ctc-zoo) | Phased | WhisperX ships a language-keyed wav2vec2 CTC aligner zoo. CrispASR currently covers canary/qwen3 CTC aligners only; add a generic wav2vec2-aligner family + registry aliases for the common HF/torchaudio defaults. |
 
 **Recently completed** (full write-ups in HISTORY.md): **#111 TTS `--seed` parity → HISTORY 2026-05-23** (qwen3-tts, chatterbox, vibevoice realtime/base all show same-seed reproducibility and different-seed divergence on the local backup models; qwen3 env precedence fixed so CLI/request seed wins; IndexTTS stays effectively deterministic on the tested prompt/reference). **#99 funasr MLT-Nano hallucination fix → HISTORY 2026-05-21** (root cause: `use_low_frame_rate` hardcoded true in C++, but MLT-Nano's upstream config omits it (default false) — only 23/183 adaptor frames were spliced into the LLM prompt, truncating 87% of audio context; fix: converter reads the flag from config.yaml into a GGUF KV, runtime reads it at load time; also fixed `ada_n_heads` 16→8 in converter; GGUFs re-uploaded to `cstr/funasr-{nano,mlt-nano}-GGUF`). **SenseVoiceSmall → HISTORY 2026-05-20** (encoder-only multi-task ASR: transcript + LID + emotion + audio-event in one CTC pass; 50+ langs; 9.8-21.8× realtime on M1 Metal; reuses the SANM block helper from the funasr port unchanged; `cstr/sensevoice-small-GGUF` 0.47 GB F16, wired into `-m auto`). **Fun-ASR-Nano + MLT-Nano → HISTORY 2026-05-20** (full LLM-decoder runtime — 70-block SANM encoder + 2-block Transformer adaptor + Qwen3-0.6B AR decode; 77/77 PASS byte-identical on Chinese + English diffs; ~9× realtime on M1 Metal with FA-default-on; both GGUFs at `cstr/funasr-{nano,mlt-nano}-GGUF`). **#57 chatterbox native voice clone → §82** (six-commit sprint shipping all four upstream cond extractors — VoiceEncoder LSTM, S3Tokenizer V2, CAMPPlus, 24 kHz Matcha mel — plus a Kaiser-windowed sinc resampler and atomic 5-cond install in `chatterbox_set_voice_from_wav`'s `.wav` branch; `--voice ref_24k.wav` produces real cloned speech without any python). **#69 + #72 + #73 cap-honesty + KV/layer offload knobs → §79** (14-commit session shipping `CRISPASR_KV_QUANT_K/_V` + `KV_ON_CPU` on 14 backends, `N_GPU_LAYERS` on 10 backends, gemma4/mimo GPU-residency 2.2x / 22 % faster, plus cap-honesty cleanup on parakeet/glm-asr/qwen3/gemma4/omniasr). **vibevoice #69a follow-up → §79b** (mode-aware `tts_lm.layers.` / `lm.layers.` prefix predicate). #78 Chatterbox vocoder → §78. #11 WebSocket server → §76, #63 Feature matrix parity → §72, #59 binding parity → §73, gemma4 #49 + Docker #31 → §74, tests + KV Q8_0 + cleanup → §75. Earlier: #5→§63, #16→§55, #51→§56, #51b→§60, #53→§63, #54→§61, #55→§54, #56→§63, #60d→§64.
 
@@ -3796,3 +3797,63 @@ without `--vad`.
 
 Immediate — issue #89 is open and the current fix is a partial
 mitigation (prevents 0-output catastrophe but doesn't match NeMo quality).
+
+---
+
+## 105. WhisperX word alignment models — wav2vec2 CTC zoo
+
+WhisperX does word alignment as a post-process: ASR text first, then a
+language-keyed wav2vec2/CTC aligner refines timestamps at the word
+level. The shipped defaults include:
+
+- Torchaudio bundles: `WAV2VEC2_ASR_BASE_960H` (`en`),
+  `VOXPOPULI_ASR_BASE_10K_FR` (`fr`),
+  `VOXPOPULI_ASR_BASE_10K_DE` (`de`),
+  `VOXPOPULI_ASR_BASE_10K_ES` (`es`),
+  `VOXPOPULI_ASR_BASE_10K_IT` (`it`)
+- Hugging Face checkpoints:
+  `jonatasgrosman/wav2vec2-large-xlsr-53-japanese`,
+  `jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn`,
+  `jonatasgrosman/wav2vec2-large-xlsr-53-dutch`,
+  `Yehor/wav2vec2-xls-r-300m-uk-with-small-lm`,
+  `jonatasgrosman/wav2vec2-large-xlsr-53-portuguese`,
+  `jonatasgrosman/wav2vec2-large-xlsr-53-arabic`,
+  `comodoro/wav2vec2-xls-r-300m-cs-250`
+
+CrispASR already has the alignment runtime surface, but only two CTC
+aligner families are wired into `-am`:
+
+- `canary-ctc-aligner.gguf`
+- `qwen3-forced-aligner.gguf`
+
+That means we can support WhisperX-style alignment in principle, but not
+all of its language models are wired yet. The path splits into two cases:
+
+- Torchaudio bundle models need a direct runtime path or explicit
+  converter support.
+- Hugging Face wav2vec2 checkpoints are the easy case: add a generic
+  wav2vec2-aligner family, register the common language aliases, and
+  reuse the existing CTC alignment plumbing.
+
+### Implementation plan
+
+1. Add a generic `wav2vec2-aligner` family in the aligner registry and
+   C-ABI path so `-am` can dispatch beyond canary/qwen3.
+2. Add aliases for WhisperX's common languages: `en`, `fr`, `de`,
+   `es`, `it`, `ja`, `zh`, `nl`, `uk`, `pt`, `ar`, `cs`.
+3. Decide per model whether it lands as a native GGUF aligner or as a
+   converter-backed checkpoint, depending on whether the upstream source
+   is a torchaudio bundle or a HF checkpoint.
+4. Benchmark the new aligners against `canary-ctc-aligner.gguf` on the
+   same mixed clean/noisy alignment set we already use for word
+   timestamps.
+5. Document which WhisperX aligner models are supported natively, which
+   ones need conversion, and which ones are intentionally skipped.
+
+### Trigger
+
+- A user wants WhisperX-style word alignment parity in CrispASR.
+- A backend needs better language coverage than the current canary/qwen3
+  aligners provide.
+- We want to close the gap between `whisperX.load_align_model(...)` and
+  CrispASR's current `-am` model surface.

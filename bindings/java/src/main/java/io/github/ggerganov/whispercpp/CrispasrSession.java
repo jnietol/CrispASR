@@ -48,6 +48,7 @@ public final class CrispasrSession implements AutoCloseable {
         int     crispasr_session_set_punctuation(Pointer session, int enable);
         int     crispasr_session_set_translate(Pointer session, int enable);
         int     crispasr_session_set_temperature(Pointer session, float temperature, long seed);
+        int     crispasr_session_set_tts_seed(Pointer session, long seed);
         int     crispasr_session_set_max_new_tokens(Pointer session, int maxNewTokens);
         int     crispasr_session_set_frequency_penalty(Pointer session, float penalty);
         int     crispasr_session_detect_language(Pointer session, float[] pcm, int n_samples,
@@ -204,6 +205,12 @@ public final class CrispasrSession implements AutoCloseable {
     public void setTemperature(float temperature, long seed) {
         int rc = Lib.INSTANCE.crispasr_session_set_temperature(handle, temperature, seed);
         if (rc != 0 && rc != -2) throw new IllegalStateException("set_temperature failed (rc=" + rc + ")");
+    }
+
+    /** Reseed TTS backends that support runtime seed control (soft no-op otherwise). */
+    public void setTtsSeed(long seed) {
+        int rc = Lib.INSTANCE.crispasr_session_set_tts_seed(handle, seed);
+        if (rc != 0 && rc != -2) throw new IllegalStateException("set_tts_seed failed (rc=" + rc + ")");
     }
 
     /** Generated-token cap for autoregressive session backends. Pass <= 0 to clear. */
