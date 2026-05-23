@@ -1145,6 +1145,53 @@ single TDT decode pass.
 - **Recommendation for Japanese:** just run `crispasr -m parakeet-tdt-0.6b-ja.gguf
   -f audio.wav -osrt` — the auto path handles any duration.
 
+### Robustness validation — 2026-05-23
+
+Full sweep on the reporter's 60 s clip (commit `0c24178e`, CPU-only).
+Streamed pipeline output is **byte-identical to single-pass** across
+every chunk/overlap combination tested — the global z-norm makes chunk
+boundaries transparent to the TDT decoder.
+
+**Chunk-size sweep** (streamed, overlap=2 s):
+
+| chunk | chars | coverage% | gaps | identical to single-pass? |
+|---|---:|---:|---:|---|
+| 4 s | 294 | 99.5 | 0 | yes |
+| 6 s | 294 | 99.5 | 0 | yes |
+| 8 s (default) | 294 | 99.5 | 0 | yes |
+| 12 s | 294 | 99.5 | 0 | yes |
+| 16 s | 294 | 99.5 | 0 | yes |
+| 20 s | 294 | 99.5 | 0 | yes |
+| 30 s | 294 | 99.5 | 0 | yes |
+
+**Overlap sweep** (streamed, chunk=8 s):
+
+| overlap | chars | coverage% | gaps | identical? |
+|---|---:|---:|---:|---|
+| 0 s | 294 | 99.5 | 0 | yes |
+| 1 s | 294 | 99.5 | 0 | yes |
+| 2 s (default) | 294 | 99.5 | 0 | yes |
+| 3 s | 294 | 99.5 | 0 | yes |
+| 4 s | 294 | 99.5 | 0 | yes |
+
+**300 s Japanese audio** (streamed, default 8 s chunks):
+- 655 chars, **98.6 % coverage**, 0 gaps, first=0.00 last=295.84
+- Before fix (30 s independent chunks): 636 chars starting at 58 s
+
+**VAD comparison** (60 s):
+
+| mode | chars | coverage% | gaps |
+|---|---:|---:|---:|
+| auto (streamed) | 294 | 99.5 | 0 |
+| `--vad` silero | 281 | 93.1 | 1 |
+| `--vad --vad-model firered` | 238 | 85.1 | 1 |
+
+VAD produces fewer characters because it segments on speech boundaries
+and transcribes each segment independently. The auto/streamed path
+transcribes the full audio continuously and achieves higher coverage.
+Use VAD when you need per-utterance SRT entries; use auto when you want
+maximum transcription completeness.
+
 ### Multi-backend Japanese comparison (60 s)
 
 All backends on the same 60 s Japanese clip. "chars" counts non-space
@@ -1153,26 +1200,18 @@ space-delimited tokens, which undercounts for CJK).
 
 | backend | settings | chars | coverage% | gaps | wall_s | rtf |
 |---|---|---:|---:|---:|---:|---:|
+| **parakeet-tdt-0.6b-ja** | **auto (streamed)** | **294** | **99.5** | **0** | **~60** | **~1.0×** |
 | cohere-transcribe | `--vad` | 296 | 96.8 | 0 | 169.0 | 0.4× |
-| parakeet-tdt-0.6b-ja | `--vad` | 281 | 93.1 | 1 | 50.7 | 1.2× |
-| parakeet-tdt-0.6b-ja | chunk-60 | 294 | 99.5 | 0 | 54.6 | 1.1× |
+| parakeet-tdt-0.6b-ja | `--vad` silero | 281 | 93.1 | 1 | 50.7 | 1.2× |
 | cohere-transcribe | auto | 242 | 87.4 | 1 | 199.2 | 0.3× |
 | parakeet-tdt-0.6b-ja | `--vad` firered | 238 | 85.1 | 1 | 58.3 | 1.0× |
-| parakeet-tdt-0.6b-ja | chunk-15 | 203 | 75.6 | 3 | 76.4 | 0.8× |
-| parakeet-tdt-0.6b-ja | auto (30 s) | 195 | 59.7 | 2 | 64.9 | 0.9× |
 
 **Quality ranking for 60 s Japanese:**
-1. **Cohere + VAD** — best coverage (96.8 %), zero gaps, proper kanji, but
-   slowest (0.4× RT on CPU).
-2. **Parakeet + VAD silero** — 93 % coverage, 3.3× faster than cohere.
-3. **Parakeet chunk-60** — 99.5 % coverage on CPU, but not safe on all
-   hardware (z-norm drift on Vulkan/AMD, issue #89).
-
-### 300 s Japanese audio
-
-Parakeet-tdt-0.6b-ja on the full 5-minute clip (auto = 30 s chunks):
-- **11 slices**, 3491 chars, full 0-300 s coverage
-- Before fix: 636 chars starting at 58 s (first 58 s completely lost)
+1. **Parakeet auto (streamed)** — 99.5 % coverage, zero gaps, ~1× RT.
+   The NeMo-style pipeline makes this the clear winner.
+2. **Cohere + VAD** — 96.8 %, zero gaps, but 3× slower.
+3. **Parakeet + VAD silero** — 93.1 %, 1 gap. Useful for per-utterance
+   subtitle segmentation.
 
 ### Benchmark framework
 
