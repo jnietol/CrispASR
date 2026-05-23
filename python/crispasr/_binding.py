@@ -1731,6 +1731,38 @@ class Session:
         return out_buf.value.decode("utf-8"), float(out_prob.value)
 
     # ------------------------------------------------------------------
+    # Text translation (PLAN #59 binding parity).
+    # ------------------------------------------------------------------
+
+    def translate_text(self, text: str, src_lang: str, tgt_lang: str,
+                       max_tokens: int = 512) -> str:
+        """Translate text between languages using the loaded translation
+        model (m2m100 or similar).  Returns the translated string.
+
+        Requires a backend that supports text translation (currently
+        only ``m2m100``).  Raises :class:`RuntimeError` on failure.
+        """
+        fn = "crispasr_session_translate_text"
+        if not hasattr(self._lib, fn):
+            raise RuntimeError("translate_text not present in this libcrispasr build")
+        func = getattr(self._lib, fn)
+        func.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p,
+                         ctypes.c_char_p, ctypes.c_int]
+        func.restype = ctypes.c_char_p
+        result = func(self._handle, text.encode("utf-8"),
+                      src_lang.encode("utf-8"), tgt_lang.encode("utf-8"),
+                      int(max_tokens))
+        if not result:
+            raise RuntimeError("translate_text returned null — check model and language pair")
+        out = result.decode("utf-8")
+        # Free the malloc'd string
+        free_fn = "crispasr_session_translate_text_free"
+        if hasattr(self._lib, free_fn):
+            getattr(self._lib, free_fn).argtypes = [ctypes.c_char_p]
+            getattr(self._lib, free_fn)(result)
+        return out
+
+    # ------------------------------------------------------------------
     # Streaming API (PLAN #62a — Python wrapper for crispasr_stream_*).
     # ------------------------------------------------------------------
 
@@ -2336,3 +2368,151 @@ class PyannoteCache:
 
     def __exit__(self, *exc):
         self.close()
+
+
+# ======================================================================
+# Standalone utilities (no Session / model load required)
+# ======================================================================
+
+@dataclass
+class VadSpan:
+    """One speech span from standalone VAD."""
+    start: float  # seconds
+    end: float    # seconds
+
+
+def vad_segments(
+    pcm: "np.ndarray",
+    model_path: str,
+    *,
+    sample_rate: int = 16000,
+    threshold: float = 0.5,
+    min_speech_ms: int = 250,
+    min_silence_ms: int = 100,
+    n_threads: int = 4,
+    lib_path: Optional[str] = None,
+) -> List[VadSpan]:
+    """Run standalone VAD on raw PCM without a full ASR session.
+
+    Returns a list of :class:`VadSpan` with start/end in seconds.
+
+    Args:
+        pcm: 16 kHz mono float32 PCM array.
+        model_path: path to a Silero/FireRed VAD GGUF.
+        threshold: speech probability threshold (0-1, default 0.5).
+        min_speech_ms: minimum speech duration to keep (ms).
+        min_silence_ms: minimum silence to split on (ms).
+    """
+    lib = ctypes.CDLL(lib_path or _find_lib())
+    fn = lib.crispasr_vad_segments
+    fn.argtypes = [
+        ctypes.c_char_p, ctypes.POINTER(ctypes.c_float), ctypes.c_int,
+        ctypes.c_int, ctypes.c_float, ctypes.c_int, ctypes.c_int,
+        ctypes.c_int, ctypes.c_bool, ctypes.POINTER(ctypes.POINTER(ctypes.c_float)),
+    ]
+    fn.restype = ctypes.c_int
+
+    pcm_arr = np.ascontiguousarray(pcm, dtype=np.float32)
+    out_spans = ctypes.POINTER(ctypes.c_float)()
+    n = fn(
+        model_path.encode("utf-8"),
+        pcm_arr.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+        int(pcm_arr.size), sample_rate, threshold,
+        min_speech_ms, min_silence_ms, n_threads, False,
+        ctypes.byref(out_spans),
+    )
+    if n < 0:
+        raise RuntimeError(f"crispasr_vad_segments failed (rc={n})")
+    spans = []
+    for i in range(n):
+        spans.append(VadSpan(start=float(out_spans[2 * i]),
+                             end=float(out_spans[2 * i + 1])))
+    if n > 0:
+        lib.free(out_spans)
+    return spans
+
+
+def text_detect_language(
+    text: str,
+    model_path: str,
+    *,
+    n_threads: int = 4,
+    lib_path: Optional[str] = None,
+) -> tuple:
+    """Detect the language of a text string using a text-LID model.
+
+    Returns ``(lang_code, confidence)`` where ``lang_code`` is an
+    ISO 639-1/3 code and ``confidence`` is in [0, 1].
+
+    Args:
+        text: UTF-8 text to classify.
+        model_path: path to a text-LID GGUF (GlotLID, LID-176, etc.).
+    """
+    lib = ctypes.CDLL(lib_path or _find_lib())
+    fn = lib.crispasr_text_detect_language
+    fn.argtypes = [
+        ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int32,
+        ctypes.c_char_p, ctypes.c_int32, ctypes.POINTER(ctypes.c_float),
+    ]
+    fn.restype = ctypes.c_int
+
+    out_label = ctypes.create_string_buffer(32)
+    out_conf = ctypes.c_float(0.0)
+    rc = fn(text.encode("utf-8"), model_path.encode("utf-8"), n_threads,
+            out_label, 32, ctypes.byref(out_conf))
+    if rc != 0:
+        raise RuntimeError(f"text_detect_language failed (rc={rc})")
+    return out_label.value.decode("utf-8"), float(out_conf.value)
+
+
+def enhance_audio_rnnoise(
+    pcm: "np.ndarray",
+    *,
+    lib_path: Optional[str] = None,
+) -> "np.ndarray":
+    """Apply RNNoise audio denoising to raw 48 kHz mono PCM.
+
+    Returns a float32 array of the same length with noise reduced.
+    Note: RNNoise operates at 48 kHz internally. If your audio is
+    16 kHz, resample to 48 kHz first, denoise, then resample back.
+    """
+    lib = ctypes.CDLL(lib_path or _find_lib())
+    fn = lib.crispasr_enhance_audio_rnnoise
+    fn.argtypes = [
+        ctypes.POINTER(ctypes.c_float), ctypes.c_int32,
+        ctypes.POINTER(ctypes.c_float), ctypes.c_int32,
+    ]
+    fn.restype = ctypes.c_int
+
+    pcm_arr = np.ascontiguousarray(pcm, dtype=np.float32)
+    out = np.zeros_like(pcm_arr)
+    rc = fn(
+        pcm_arr.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+        int(pcm_arr.size),
+        out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+        int(out.size),
+    )
+    if rc != 0:
+        raise RuntimeError(f"enhance_audio_rnnoise failed (rc={rc})")
+    return out
+
+
+def detect_backend_from_gguf(
+    gguf_path: str,
+    *,
+    lib_path: Optional[str] = None,
+) -> str:
+    """Detect which CrispASR backend a GGUF file belongs to.
+
+    Returns the backend name (e.g. "parakeet", "cohere", "whisper").
+    """
+    lib = ctypes.CDLL(lib_path or _find_lib())
+    fn = lib.crispasr_detect_backend_from_gguf
+    fn.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
+    fn.restype = ctypes.c_int
+
+    out = ctypes.create_string_buffer(64)
+    rc = fn(gguf_path.encode("utf-8"), out, 64)
+    if rc != 0:
+        raise RuntimeError(f"detect_backend_from_gguf failed (rc={rc})")
+    return out.value.decode("utf-8")
