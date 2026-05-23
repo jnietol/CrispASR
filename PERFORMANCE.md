@@ -1213,6 +1213,25 @@ space-delimited tokens, which undercounts for CJK).
 3. **Parakeet + VAD silero** — 93.1 %, 1 gap. Useful for per-utterance
    subtitle segmentation.
 
+### Cross-backend CAP_INTERNAL_CHUNKING — 2026-05-23
+
+The 30 s auto-chunk fallback affected all `CAP_UNBOUNDED_INPUT` backends
+that use PerFeatureZ mel normalization, not just parakeet.  Adding
+`CAP_INTERNAL_CHUNKING` to canary and fastconformer-ctc (commit
+`1dd247a7`) lets them skip the auto-chunk and process full audio in a
+single encoder pass.
+
+| backend | audio | coverage (old 30 s chunks) | coverage (new, single-pass) |
+|---|---|---:|---:|
+| parakeet-tdt 0.6b JA | 60 s JA | 59.7 % | **99.5 %** |
+| parakeet-ctc 1.1b | 60 s EN | 74.6 % | **98.5 %** |
+| canary-1b-v2 Q4_K | 60 s EN | broken (empty) | **96.8 %** |
+
+**Not affected** (different normalization or architecture):
+wav2vec2 / hubert / data2vec (GlobalClipMax, no PerFeatureZ drift);
+firered-asr (PerFeatureZ but inline AED — needs separate investigation);
+granite-nar (different architecture).
+
 ### Benchmark framework
 
 Results collected with `tests/benchmark_asr.py`:

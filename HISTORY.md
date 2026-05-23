@@ -124,6 +124,7 @@ tokens covering 0-5 s → full coverage.  The 60 s case went from 0 chars
 | `9488223` | Chunked-encode + single-decode (PLAN #104 v1) | 93 % coverage without VAD |
 | `300149e` | NeMo-style: global z-norm + chunked encode | Feature-identical to single-pass |
 | `97d2b4f` | Raise threshold to 60 s + env knobs | 99.5 % on 60 s, tuneable |
+| `1dd247a7` | `CAP_INTERNAL_CHUNKING` for canary + fastconformer-ctc | 74.6 → 98.5 % (CTC), broken → 96.8 % (canary) |
 
 **Architecture.** Audio ≤60 s: single-pass `parakeet_transcribe_ex` (best
 quality, 99.5 %).  Audio >60 s: `parakeet_transcribe_streamed` — compute
