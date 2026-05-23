@@ -37,7 +37,7 @@ test-all-backends.py passes 18/18 transcribe + 51/54 feature tests (3 stream ski
 | **PARKED** | [#9 Parakeet TDT GPU](#9-parakeet-tdt-decoder-gpu) | Medium | Encoder 85%+ of time; LSTM+joint <0.7s; sequential steps limit GPU benefit |
 | **BLOCKED** | [#42 VibeVoice-ASR 7B](#42-vibevoice-asr-7b) | High | Needs ≥16 GB RAM |
 | **BLOCKED** | [#43 Fun-ASR-Nano](#43-fun-asr-nano) | Medium | License unclear |
-| **MEDIUM** | [#80 nano-cohere-transcribe-inspired tweaks](#80-nano-cohere-transcribe-inspired-perf--chunking-tweaks) | Small | 80c done; 80b energy chunker in progress; 80a parked (measurement: <1 % of wall on Metal); 80d/80e TODO |
+| **MEDIUM** | [#80 nano-cohere-transcribe-inspired tweaks](#80-nano-cohere-transcribe-inspired-perf--chunking-tweaks) | Small | 80a parked (<1 % of wall on Metal); **80b DONE** (energy chunker live in cohere.cpp); **80c DONE**; 80d/80e TODO |
 | **DEFERRED** | [#81 Nemotron-Speech-Streaming-EN-0.6B](#81-nemotron-speech-streaming-en-06b--first-cache-aware-streaming-native-asr) | M-L | NVOML license, ~60–75 % reuse from parakeet/canary; the new bit is cache-aware FastConformer streaming. Wait for `--stream-json` (issue #84) to settle + a second user request (only mention so far is issue #85) before starting. |
 | **MEDIUM** | [#86 Per-backend flash-attention wiring](#86-per-backend-flash-attention-wiring-crisperweaver-driven) | 2–3 days | Plumbing shipped 0.6.2; kernel-level wiring per backend is the remaining work. Whisper done; orpheus/chatterbox-T3 are the next-best pickings. |
 | **LOW** | [#87 `gpu_backend` runtime selector](#87-gpu_backend-runtime-selector-multi-backend-ggml-build) | ~1 week | Needs ggml-side multi-backend dispatch to land first. CrisperWeaver UI placeholder ready when the C-side is. |
@@ -47,7 +47,7 @@ test-all-backends.py passes 18/18 transcribe + 51/54 feature tests (3 stream ski
 | **LOW** | [#106 TEN-VAD](#106-ten-vad--low-latency-cross-platform-vad) | Small | Technically feasible VAD backend: C-compatible, 16 kHz / 10-16 ms frames, prebuilt libs + ONNX path. License is the gate: Apache 2.0 plus extra no-compete / own-app-only conditions from Agora. |
 | **MEDIUM** | [#105 WhisperX word alignment models](#105-whisperx-word-alignment-models-wav2vec2-ctc-zoo) | Phased | WhisperX ships a language-keyed wav2vec2 CTC aligner zoo. CrispASR currently covers canary/qwen3 CTC aligners only; add a generic wav2vec2-aligner family + registry aliases for the common HF/torchaudio defaults. |
 
-**Recently completed** (full write-ups in HISTORY.md): **#111 TTS `--seed` parity → HISTORY 2026-05-23** (qwen3-tts, chatterbox, vibevoice realtime/base all show same-seed reproducibility and different-seed divergence on the local backup models; qwen3 env precedence fixed so CLI/request seed wins; IndexTTS stays effectively deterministic on the tested prompt/reference). **#99 funasr MLT-Nano hallucination fix → HISTORY 2026-05-21** (root cause: `use_low_frame_rate` hardcoded true in C++, but MLT-Nano's upstream config omits it (default false) — only 23/183 adaptor frames were spliced into the LLM prompt, truncating 87% of audio context; fix: converter reads the flag from config.yaml into a GGUF KV, runtime reads it at load time; also fixed `ada_n_heads` 16→8 in converter; GGUFs re-uploaded to `cstr/funasr-{nano,mlt-nano}-GGUF`). **SenseVoiceSmall → HISTORY 2026-05-20** (encoder-only multi-task ASR: transcript + LID + emotion + audio-event in one CTC pass; 50+ langs; 9.8-21.8× realtime on M1 Metal; reuses the SANM block helper from the funasr port unchanged; `cstr/sensevoice-small-GGUF` 0.47 GB F16, wired into `-m auto`). **Fun-ASR-Nano + MLT-Nano → HISTORY 2026-05-20** (full LLM-decoder runtime — 70-block SANM encoder + 2-block Transformer adaptor + Qwen3-0.6B AR decode; 77/77 PASS byte-identical on Chinese + English diffs; ~9× realtime on M1 Metal with FA-default-on; both GGUFs at `cstr/funasr-{nano,mlt-nano}-GGUF`). **#57 chatterbox native voice clone → §82** (six-commit sprint shipping all four upstream cond extractors — VoiceEncoder LSTM, S3Tokenizer V2, CAMPPlus, 24 kHz Matcha mel — plus a Kaiser-windowed sinc resampler and atomic 5-cond install in `chatterbox_set_voice_from_wav`'s `.wav` branch; `--voice ref_24k.wav` produces real cloned speech without any python). **#69 + #72 + #73 cap-honesty + KV/layer offload knobs → §79** (14-commit session shipping `CRISPASR_KV_QUANT_K/_V` + `KV_ON_CPU` on 14 backends, `N_GPU_LAYERS` on 10 backends, gemma4/mimo GPU-residency 2.2x / 22 % faster, plus cap-honesty cleanup on parakeet/glm-asr/qwen3/gemma4/omniasr). **vibevoice #69a follow-up → §79b** (mode-aware `tts_lm.layers.` / `lm.layers.` prefix predicate). #78 Chatterbox vocoder → §78. #11 WebSocket server → §76, #63 Feature matrix parity → §72, #59 binding parity → §73, gemma4 #49 + Docker #31 → §74, tests + KV Q8_0 + cleanup → §75. Earlier: #5→§63, #16→§55, #51→§56, #51b→§60, #53→§63, #54→§61, #55→§54, #56→§63, #60d→§64.
+**Recently completed** (full write-ups in HISTORY.md): **#90 Session beam_size all backends → HISTORY 2026-05-23** (qwen3-asr, granite, voxtral wired via `core_beam_decode::run_with_probs`; commit `0c24178e`). **#74 Feature-matrix uplift round 2 → HISTORY 2026-05-23** (74a chatterbox lang routing, 74b cap regression tests, 74c qwen3-tts base voice-cloning cap, 74d matrix regen; commit `b848152a`). **#111 TTS `--seed` parity → HISTORY 2026-05-23** (qwen3-tts, chatterbox, vibevoice realtime/base all show same-seed reproducibility and different-seed divergence on the local backup models; qwen3 env precedence fixed so CLI/request seed wins; IndexTTS stays effectively deterministic on the tested prompt/reference). **#99 funasr MLT-Nano hallucination fix → HISTORY 2026-05-21** (root cause: `use_low_frame_rate` hardcoded true in C++, but MLT-Nano's upstream config omits it (default false) — only 23/183 adaptor frames were spliced into the LLM prompt, truncating 87% of audio context; fix: converter reads the flag from config.yaml into a GGUF KV, runtime reads it at load time; also fixed `ada_n_heads` 16→8 in converter; GGUFs re-uploaded to `cstr/funasr-{nano,mlt-nano}-GGUF`). **SenseVoiceSmall → HISTORY 2026-05-20** (encoder-only multi-task ASR: transcript + LID + emotion + audio-event in one CTC pass; 50+ langs; 9.8-21.8× realtime on M1 Metal; reuses the SANM block helper from the funasr port unchanged; `cstr/sensevoice-small-GGUF` 0.47 GB F16, wired into `-m auto`). **Fun-ASR-Nano + MLT-Nano → HISTORY 2026-05-20** (full LLM-decoder runtime — 70-block SANM encoder + 2-block Transformer adaptor + Qwen3-0.6B AR decode; 77/77 PASS byte-identical on Chinese + English diffs; ~9× realtime on M1 Metal with FA-default-on; both GGUFs at `cstr/funasr-{nano,mlt-nano}-GGUF`). **#57 chatterbox native voice clone → §82** (six-commit sprint shipping all four upstream cond extractors — VoiceEncoder LSTM, S3Tokenizer V2, CAMPPlus, 24 kHz Matcha mel — plus a Kaiser-windowed sinc resampler and atomic 5-cond install in `chatterbox_set_voice_from_wav`'s `.wav` branch; `--voice ref_24k.wav` produces real cloned speech without any python). **#69 + #72 + #73 cap-honesty + KV/layer offload knobs → §79** (14-commit session shipping `CRISPASR_KV_QUANT_K/_V` + `KV_ON_CPU` on 14 backends, `N_GPU_LAYERS` on 10 backends, gemma4/mimo GPU-residency 2.2x / 22 % faster, plus cap-honesty cleanup on parakeet/glm-asr/qwen3/gemma4/omniasr). **vibevoice #69a follow-up → §79b** (mode-aware `tts_lm.layers.` / `lm.layers.` prefix predicate). #78 Chatterbox vocoder → §78. #11 WebSocket server → §76, #63 Feature matrix parity → §72, #59 binding parity → §73, gemma4 #49 + Docker #31 → §74, tests + KV Q8_0 + cleanup → §75. Earlier: #5→§63, #16→§55, #51→§56, #51b→§60, #53→§63, #54→§61, #55→§54, #56→§63, #60d→§64.
 
 **Open follow-ups from §79 — we want all of these:**
 - **#73 cohere long-form rerun.** flash_attn_ext is shipped on canary + cohere (commit 193a736). JFK (~11 s) numbers: canary q8_0/q4_0 -17 % under flash (win), but cohere q8_0/q4_0 is +11 % under flash vs cast-on-read on the same workload. F16 is a tie on both. Before promoting flash as cohere's recommended path, validate on a multi-minute clip — if the crossover is workload-dependent the docs need to recommend cast-on-read for short audio and flash for long. Until then PERFORMANCE.md notes flash as available-but-regresses-on-JFK for cohere.
@@ -2487,29 +2487,11 @@ and the F16 `ggml_set_rows` path may be needed anyway. Cohere already
 has the `gf_decode_1` field declared (line 502) for that future
 change.
 
-### 80b. Energy-minimum chunk boundaries (in progress)
+### 80b. Energy-minimum chunk boundaries — DONE
 
-Cohere's long-form path at `src/cohere.cpp:1834-1901` cuts at exactly
-`30 * sample_rate` samples — which slices mid-word. Port the
-`_find_split_point_energy` helper from nano-cohere `chunk.py:61-80`:
-within the last `boundary_context_seconds` (default 5 s) of each 30 s
-window, scan in `min_energy_window_samples` (default 1600 = 100 ms)
-non-overlapping slices and pick the lowest-RMS one as the cut point.
-
-**Files:**
-* `src/core/audio_chunking.h` — new header. Two functions:
-  `audio_chunking::find_energy_min_split(span, search_start,
-  search_end, win_samples) -> int` and
-  `audio_chunking::split_at_energy_minima(span, sample_rate,
-  max_chunk_s, search_window_s, win_samples) -> std::vector<std::pair<
-  size_t,size_t>>` returning [begin,end) sample ranges.
-* `src/cohere.cpp:1834-1901` — replace the fixed-step loop with a
-  call to `split_at_energy_minima`; iterate the returned ranges.
-
-**Acceptance:** JFK transcript byte-identical (single-chunk path
-unaffected); 60 s synthetic clip's chunk boundary lands within a
-quiet sub-window (verifiable by inspecting the cut-time printed by
-`COHERE_VLOG`).
+`src/core/audio_chunking.h` — two functions: `find_energy_min_split` and
+`split_at_energy_minima`. Wired into `src/cohere.cpp` (replaces fixed
+`30 * sample_rate` cut). JFK single-chunk path unaffected.
 
 ### 80c. CRISPASR_VERBOSE env override for cohere CLI (DONE this session)
 
@@ -2939,24 +2921,17 @@ May 2026:
     plus the unified `crispasr_session_set_beam_size` are
     exported.
 
-**Still gapped** — three backend families need new C surface on
-their high-level transcribe API before the session wrapper can
-plumb `s->beam_size` through. Each is more substantial than the
-"add a runtime setter" pattern above because the beam-decode
-path doesn't live in the backend library; the CLI wraps it
-externally:
+**DONE (2026-05-23, commit `0c24178e`).** All three remaining backend families wired:
 
-| Backend | What's needed |
+| Backend | Approach |
 |---|---|
-| granite / granite-4.1 / granite-4.1-plus / granite-4.1-nar | The granite library exposes `granite_speech_transcribe(ctx, samples, n_samples)` — no beam, no params struct, just text. The CLI wrapper at `crispasr_backend_granite.cpp` runs its OWN beam decode via `core_beam_decode::run_with_probs(ctx_, logits, replay, cfg)` after pulling logits out of granite. Wiring beam search into the session API needs either: (a) move the `core_beam_decode` call into the granite library + new public `granite_speech_transcribe_with_beam(ctx, samples, n_samples, beam_size)`, or (b) expose granite's logits + replay buffer publicly so the session dispatcher can run `core_beam_decode` itself. Option (a) is cleaner — ~3-4 hours per granite variant. |
-| voxtral / voxtral4b | Beam search via internal `voxtral_decode_beam` (not exposed). Same options: (a) public `voxtral_transcribe_with_params(ctx, samples, n_samples, voxtral_decode_params{beam_size, ...})` or (b) expose internal beam decoder. |
-| qwen3-asr | Same shape — internal beam, no public surface. |
+| qwen3-asr | Beam branch in `crispasr_c_api.cpp` session path: replay via `qwen3_asr_embed_tokens` + `qwen3_asr_run_llm_kv`; `kv_reset` after beam search. |
+| granite / granite-4.1 / granite-4.1-plus / granite-4.1-nar | Same pattern: `granite_speech_embed_tokens` + `granite_speech_run_llm_kv`; `kv_reset` after beam. |
+| voxtral | `run_voxtral_family` gained a `beam_size` param; decode-piece logic factored into a shared `decode_piece` lambda (U+2581→space detokenisation) used by both beam and greedy paths. |
 
-Each needs ~3-4 hours of careful per-backend work (read beam
-path, decide a/b, write the new surface, wire from
-`transcribe_single`, add a Catch2 smoke test). Total estimate
-~1-1.5 days for the remaining three families. Each is
-independent — can ship one at a time.
+`voxtral4b` uses a streaming path, not `run_voxtral_family` — not in scope for this item.
+
+`s->beam_size == 1` (default) keeps the existing greedy path bit-identical; no regression.
 
 ---
 

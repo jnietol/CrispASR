@@ -730,6 +730,24 @@ catch_discover_tests(test-core-decode
     PROPERTIES LABELS "unit"
 )
 
+# ─── test-audio-chunking — Catch2 unit tests for audio_chunking::find_energy_min_split
+#
+# Covers the energy-minimum detection helper directly: quiet window selection,
+# tie-breaking, search range, degenerate spans.  Complements test_chunk_context
+# which tests the higher-level split_at_energy_minima wrapper.
+# Pure CPU, no model load, sub-millisecond.
+add_executable(test-audio-chunking test-audio-chunking.cpp)
+target_include_directories(test-audio-chunking PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(test-audio-chunking PRIVATE
+    Catch2::Catch2WithMain
+)
+catch_discover_tests(test-audio-chunking
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit;chunking"
+)
+
 # ─── test_slice_timestamps — Catch2 unit tests for crispasr_fixed_chunk_slices
 # t0_cs / t1_cs timestamp math.  Pins the invariant that PR #96 depends on:
 # each slice's t0_cs = start_sample / SR * 100, with no gaps between adjacent

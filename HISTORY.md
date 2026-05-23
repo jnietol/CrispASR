@@ -6,6 +6,55 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-05-23 Session beam_size wired for all remaining backends (PLAN #90 complete)
+
+**Commit:** `0c24178e`
+
+`crispasr_session_set_beam_size` now threads through every session backend.
+Three remaining backend families were wired using `core_beam_decode::run_with_probs`
+alongside the existing greedy path (unchanged when `beam_size == 1`):
+
+| Backend | Replay lambda | KV reset |
+|---|---|---|
+| qwen3-asr | `qwen3_asr_embed_tokens` + `qwen3_asr_run_llm_kv` | `qwen3_asr_kv_reset` |
+| granite / granite-4.1 / granite-4.1-plus / granite-4.1-nar | `granite_speech_embed_tokens` + `granite_speech_run_llm_kv` | `granite_speech_kv_reset` |
+| voxtral | `run_voxtral_family` gained a `beam_size` parameter; a shared `decode_piece` lambda handles U+2581→space detokenisation for both paths | `ops.kv_reset(ctx)` |
+
+`voxtral4b` (streaming path) is not in scope. Implementation is in
+`src/crispasr_c_api.cpp`. The `#include "core/beam_decode.h"` is the only new dependency.
+
+---
+
+## 2026-05-23 PLAN #74: feature-matrix uplift round 2 (commit `b848152a`)
+
+Four items completed in one session:
+
+**74a — chatterbox language routing** (already in commit `c88306fa`):
+`-l de` with `--backend chatterbox` auto-routes to `kartoffelbox-turbo`;
+`-l ar` routes to `lahgtna-chatterbox`. Only fires when `-m auto` is active.
+
+**74b — capability regression gate** (`tests/test_backend_caps.py`, new):
+`TestCapabilityJSON` runs `crispasr --list-backends-json` and asserts:
+- known translate backends declare `translate`
+- known src-tgt backends declare `src-tgt-language`
+- known voice-cloning backends declare `voice-cloning`
+- preset-speaker backends (`qwen3-tts-customvoice`, `voicedesign`, `vibevoice`) do NOT declare `voice-cloning`
+- whisper does NOT declare `src-tgt-language` (uses `-l` for target, not `-sl/-tl`)
+
+`TestTranslateLive` is a live smoke-test (whisper-tiny on `samples/jfk.wav`) that auto-skips when the model is absent. 6/6 tests pass.
+
+**74c — `CAP_VOICE_CLONING` for qwen3-tts base variants**:
+`Qwen3TtsBackend` gained an `is_base_` constructor flag. The two base aliases
+(`qwen3-tts`, `qwen3-tts-1.7b-base`) dispatch to a new `crispasr_make_qwen3_tts_base_backend()`
+factory that sets `is_base_=true` and includes `CAP_VOICE_CLONING` in `capabilities()`.
+The customvoice/voicedesign aliases keep the original factory (`is_base_=false`).
+
+**74d — feature matrix regenerated** (`docs/feature-matrix.md` + `.html`):
+`python tools/gen-feature-matrix.py` — 52 backends × 19 caps. `qwen3-tts`
+and `qwen3-tts-1.7b-base` now show ✓ in the Voice cloning column.
+
+---
+
 ## 2026-05-23 tts: `--seed` parity across sampled TTS backends
 
 **Outcome.** Routed the CLI/server `--seed` knob through the TTS paths
