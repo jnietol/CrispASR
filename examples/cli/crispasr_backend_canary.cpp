@@ -30,9 +30,14 @@ public:
     const char* name() const override { return "canary"; }
 
     uint32_t capabilities() const override {
+        // CAP_INTERNAL_CHUNKING: same FastConformer encoder as parakeet —
+        // the 30 s auto-chunk causes z-norm drift and content loss.  Let
+        // the backend handle full audio in a single encoder pass (safe up
+        // to ~60 s; for longer audio, parakeet_transcribe_streamed-style
+        // chunking can be added later if needed).  Issue #89 follow-up.
         return CAP_TIMESTAMPS_NATIVE | CAP_TIMESTAMPS_CTC | CAP_WORD_TIMESTAMPS | CAP_TOKEN_CONFIDENCE | CAP_TRANSLATE |
                CAP_SRC_TGT_LANGUAGE | CAP_PUNCTUATION_TOGGLE | CAP_FLASH_ATTN | CAP_TEMPERATURE | CAP_DIARIZE |
-               CAP_PARALLEL_PROCESSORS | CAP_AUTO_DOWNLOAD | CAP_UNBOUNDED_INPUT;
+               CAP_PARALLEL_PROCESSORS | CAP_AUTO_DOWNLOAD | CAP_UNBOUNDED_INPUT | CAP_INTERNAL_CHUNKING;
     }
 
     bool init(const whisper_params& p) override {

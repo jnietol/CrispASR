@@ -41,8 +41,14 @@ public:
         // friends) are English-only greedy-CTC models with no native
         // timestamp or punctuation control. Word-level timestamps via the
         // CTC aligner second pass (-am) work when requested.
+        // CAP_INTERNAL_CHUNKING: skip crispasr_run.cpp's 30 s auto-chunk
+        // fallback.  FastConformer-CTC is a single-forward-pass encoder with
+        // CTC decode — the 30 s auto-chunk causes 25 % content loss because
+        // the encoder's per-chunk z-norm differs from the global z-norm the
+        // model was trained on.  Verified: single-pass on 60 s EN goes from
+        // 74.6 % to 98.5 % coverage (issue #89 follow-up).
         return CAP_TIMESTAMPS_CTC | CAP_PARALLEL_PROCESSORS | CAP_AUTO_DOWNLOAD | CAP_TOKEN_CONFIDENCE | CAP_DIARIZE |
-               CAP_UNBOUNDED_INPUT;
+               CAP_UNBOUNDED_INPUT | CAP_INTERNAL_CHUNKING;
     }
 
     bool init(const whisper_params& p) override {
