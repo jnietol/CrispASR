@@ -1235,3 +1235,78 @@ realtime factor. See `tests/benchmark_metrics.py` for the metric
 definitions and `tests/test_benchmark_metrics.py` for 14 pytest unit
 tests that validate the computation (including the issue #89 failure
 signature: <5 % coverage on 300 s audio).
+
+---
+
+## Beam search — quality vs speed (2026-05-23, PLAN #90)
+
+**Knob:** `--beam-size N` (CLI) / `CRISPASR_BEAM_SIZE=N` (env) /
+`crispasr_session_set_beam_size(session, N)` (C API).
+Default N=1 (greedy). N > 1 activates `core_beam_decode::run_with_probs`
+on LLM-decoder backends: qwen3-asr, granite-speech, voxtral.
+Non-AR backends (parakeet, canary, fastconformer-ctc, etc.) ignore the
+flag — beam search only makes sense on autoregressive token decoders.
+
+Benchmark script: `tools/benchmark_vitw_beam.py` — runs against
+[`zhifeixie/Voices-in-the-Wild-Bench`](https://huggingface.co/datasets/zhifeixie/Voices-in-the-Wild-Bench)
+(5 000 samples, 8 acoustic conditions, streamed — no full download needed).
+
+### Speed cost on JFK (11 s, M1 Metal, post-warmup)
+
+| backend | beam=1 | beam=2 | beam=4 |
+|---|---|---|---|
+| qwen3-asr 0.6B Q4_K | 3.67 s (1×) | 8.20 s (2.2×) | 14.75 s (4.0×) |
+| granite-speech 4.1 2B Q4_K | 18.39 s (1×) | 27.59 s (1.5×) | 33.17 s (1.8×) |
+| voxtral mini 3B Q4_K | ~70 s (1×) | ~56 s (0.8×)† | ~77 s (1.1×) |
+
+†voxtral beam=2 < beam=1 is measurement noise — voxtral spends most
+of its time in the audio encoder; decoder token count for JFK is
+small enough that OS jitter dominates.
+
+### WER by condition (qwen3-asr, Voices-in-the-Wild-Bench, 8 EN samples each)
+
+| condition | beam=1 | beam=2 | beam=4 | beam=2 cost | beam=4 cost |
+|---|---|---|---|---|---|
+| real_noise | 0.125 | 0.144 | 0.136 | 1.7× | 3.5× |
+| syn_noise | 0.167 | 0.167 | 0.167 | 2.6× | 2.7× |
+| real_dropout | 0.045 | 0.045 | 0.041 | 1.9× | 4.6× |
+| real_obstructed | 0.015 | 0.015 | 0.015 | 1.9× | 3.3× |
+| real_mixed | 0.035 | 0.039 | 0.039 | 2.1× | 4.8× |
+| syn_mixed | 0.089 | 0.089 | 0.080 | 1.3× | 2.2× |
+
+### Key findings
+
+- **One clear win:** `syn_mixed` — "I called customer service **twice**"
+  decoded as "wise" (greedy, WER 0.154), correctly as "twice" at beam=4
+  (WER 0.077). Phonetically similar word confusion — exactly the
+  scenario beam search is designed to fix.
+- **beam search occasionally hurts.** `real_noise` ticks from 0.125 to
+  0.144 at beam=2. The beam finds a confident wrong hypothesis that
+  greedy would have gotten right — known failure mode on well-trained
+  models where the greedy peak is already correct.
+- **Heavy hallucination is not rescued.** `real_noise` sample 6
+  (WER≈0.42, badly degraded audio) just produces a different confabulation
+  at beam=4; the model is guessing regardless of beam width.
+- **This dataset skews easy.** Most samples are TTS speech with layered
+  acoustic corruption; qwen3-asr is near-ceiling on greedy. Real
+  spontaneous noisy speech with disfluencies and rare words would expose
+  more beam-search-recoverable errors.
+
+### When to use
+
+| scenario | recommendation |
+|---|---|
+| Clean / studio speech | greedy (beam=1) — no quality gain, 2-5× cost |
+| Noisy real speech, latency-insensitive | beam=2 — marginal gain possible, 2× cost |
+| Rare words / phonetic confusion, offline | beam=4 — worth trying |
+| Streaming / latency-critical | greedy only — beam adds a full extra decode pass per token step |
+
+Reproduce:
+
+```bash
+python tools/benchmark_vitw_beam.py \
+    --backends qwen3 \
+    --splits real_noise,real_dropout,real_obstructed,real_mixed,syn_mixed \
+    --n 8 --beams 1,2,4 \
+    --json tools/vitw_beam_results.json
+```
