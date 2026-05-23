@@ -46,6 +46,13 @@ jobs:
           name: crispasr-linux-x86_64
           path: release/crispasr-linux-x86_64.tar.gz
 
+      - name: Attach crispasr-linux-x86_64.tar.gz to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: release/crispasr-linux-x86_64.tar.gz
+          fail_on_unmatched_files: false
+
   # ── Linux x86_64 CLI — AVX-512 + VNNI variant ────────────────────────────────
   # Default build-linux ships AVX-2 only. On CPUs with AVX-512 + VPDPBUSD
   # (Tiger Lake / Ice Lake / Sapphire Rapids client / Zen 4+) ggml's
@@ -87,6 +94,13 @@ jobs:
         with:
           name: crispasr-linux-x86_64-avx512
           path: release/crispasr-linux-x86_64-avx512.tar.gz
+
+      - name: Attach crispasr-linux-x86_64-avx512.tar.gz to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: release/crispasr-linux-x86_64-avx512.tar.gz
+          fail_on_unmatched_files: false
 
   # ── Linux x86_64 CLI — CUDA variant ─────────────────────────────────────────
   # Static CLI binary linked with CUDA 12.8. Useful for Kaggle / Colab /
@@ -141,6 +155,13 @@ jobs:
           name: crispasr-linux-x86_64-cuda
           path: release/crispasr-linux-x86_64-cuda.tar.gz
 
+      - name: Attach crispasr-linux-x86_64-cuda.tar.gz to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: release/crispasr-linux-x86_64-cuda.tar.gz
+          fail_on_unmatched_files: false
+
   # ── Linux ARM64 CLI binaries ─────────────────────────────────────────────────
   # Mirror of build-linux on GitHub's ubuntu-24.04-arm runner. NEON is the
   # native SIMD path on aarch64, so OpenBLAS adds little — keep it on (same
@@ -173,6 +194,13 @@ jobs:
         with:
           name: crispasr-linux-arm64
           path: release/crispasr-linux-arm64.tar.gz
+
+      - name: Attach crispasr-linux-arm64.tar.gz to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: release/crispasr-linux-arm64.tar.gz
+          fail_on_unmatched_files: false
 
   build-python-linux:
     runs-on: ubuntu-latest
@@ -239,6 +267,13 @@ jobs:
           name: crispasr-python-linux-x86_64
           path: release/crispasr-python-linux-x86_64.tar.gz
 
+      - name: Attach crispasr-python-linux-x86_64.tar.gz to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: release/crispasr-python-linux-x86_64.tar.gz
+          fail_on_unmatched_files: false
+
   # ── Python binding (Linux ARM64) ─────────────────────────────────────────────
   # Mirror of build-python-linux on aarch64 — bundles libwhisper.so +
   # ggml backend libs + libcrispasr_helpers.so + $ORIGIN RPATH so the
@@ -302,6 +337,13 @@ jobs:
           name: crispasr-python-linux-arm64
           path: release/crispasr-python-linux-arm64.tar.gz
 
+      - name: Attach crispasr-python-linux-arm64.tar.gz to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: release/crispasr-python-linux-arm64.tar.gz
+          fail_on_unmatched_files: false
+
   build-macos:
     runs-on: macos-latest
     steps:
@@ -326,6 +368,13 @@ jobs:
         with:
           name: crispasr-macos
           path: release/crispasr-macos.tar.gz
+
+      - name: Attach crispasr-macos.tar.gz to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: release/crispasr-macos.tar.gz
+          fail_on_unmatched_files: false
 
   # ── Shared-library bundle for macOS arm64 (Metal) ────────────────────────────
   #
@@ -394,6 +443,13 @@ jobs:
           name: libcrispasr-macos-arm64
           path: release/libcrispasr-macos-arm64.tar.gz
 
+      - name: Attach libcrispasr-macos-arm64.tar.gz to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: release/libcrispasr-macos-arm64.tar.gz
+          fail_on_unmatched_files: false
+
   # ── Linux x86_64 shared libs + headers (CPU baseline) ────────────────────────
   # Mirror of build-libs-macos-arm64 for Linux: ship libcrispasr.so + ggml
   # backend libs + headers so downstream FFI consumers (Rust crispasr-sys,
@@ -456,6 +512,13 @@ jobs:
           name: libcrispasr-linux-x86_64
           path: release/libcrispasr-linux-x86_64.tar.gz
 
+      - name: Attach libcrispasr-linux-x86_64.tar.gz to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: release/libcrispasr-linux-x86_64.tar.gz
+          fail_on_unmatched_files: false
+
   # ── Linux x86_64 shared libs — AVX-512 + VNNI variant ────────────────────────
   # Companion to build-linux-x86_64-avx512 but for the shared-lib tarball
   # downstream consumers (crispasr-sys / Dart / wrapper bindings) pull
@@ -511,6 +574,13 @@ jobs:
         with:
           name: libcrispasr-linux-x86_64-avx512
           path: release/libcrispasr-linux-x86_64-avx512.tar.gz
+
+      - name: Attach libcrispasr-linux-x86_64-avx512.tar.gz to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: release/libcrispasr-linux-x86_64-avx512.tar.gz
+          fail_on_unmatched_files: false
 
   # ── Linux ARM64 shared libs + headers (CPU baseline) ─────────────────────────
   # Mirror of build-libs-linux-x86_64 on the ubuntu-24.04-arm runner.
@@ -572,6 +642,13 @@ jobs:
           name: libcrispasr-linux-arm64
           path: release/libcrispasr-linux-arm64.tar.gz
 
+      - name: Attach libcrispasr-linux-arm64.tar.gz to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: release/libcrispasr-linux-arm64.tar.gz
+          fail_on_unmatched_files: false
+
   # ── Windows x86_64 shared libs + headers (CPU baseline) ──────────────────────
   # Windows tarball includes BOTH the runtime DLLs (under bin/) and the MSVC
   # import .lib files (under src/Release/ — this matches what
@@ -629,6 +706,13 @@ jobs:
         with:
           name: libcrispasr-windows-x86_64
           path: release/libcrispasr-windows-x86_64.tar.gz
+
+      - name: Attach libcrispasr-windows-x86_64.tar.gz to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: release/libcrispasr-windows-x86_64.tar.gz
+          fail_on_unmatched_files: false
 
   # ── Windows x86_64 shared libs + headers (Vulkan) ────────────────────────────
   # Same layout as build-libs-windows-x86_64 but with GGML_VULKAN=ON so the
@@ -715,6 +799,13 @@ jobs:
           name: libcrispasr-windows-x86_64-vulkan
           path: release/libcrispasr-windows-x86_64-vulkan.tar.gz
 
+      - name: Attach libcrispasr-windows-x86_64-vulkan.tar.gz to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: release/libcrispasr-windows-x86_64-vulkan.tar.gz
+          fail_on_unmatched_files: false
+
   # ── Linux x86_64 shared libs + headers (CUDA) ────────────────────────────────
   # CUDA 12.8 toolkit (sm_75…sm_120 incl. RTX 50xx Blackwell). Bundles
   # libggml-cuda.so alongside the standard libs/headers. Consumers must
@@ -789,6 +880,13 @@ jobs:
         with:
           name: libcrispasr-linux-x86_64-cuda
           path: release/libcrispasr-linux-x86_64-cuda.tar.gz
+
+      - name: Attach libcrispasr-linux-x86_64-cuda.tar.gz to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: release/libcrispasr-linux-x86_64-cuda.tar.gz
+          fail_on_unmatched_files: false
 
   # ── Windows x86_64 shared libs + headers (CUDA) ──────────────────────────────
   # CUDA 12.8 toolkit (Blackwell-aware). Unlike the Linux CUDA tarball,
@@ -875,6 +973,13 @@ jobs:
           name: libcrispasr-windows-x86_64-cuda
           path: release/libcrispasr-windows-x86_64-cuda.tar.gz
 
+      - name: Attach libcrispasr-windows-x86_64-cuda.tar.gz to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: release/libcrispasr-windows-x86_64-cuda.tar.gz
+          fail_on_unmatched_files: false
+
   # ── Windows x86_64 shared libs + headers (CPU legacy SSE4.2) ─────────────────
   # For dev hosts on pre-Haswell CPUs (Sandy/Ivy Bridge i5/i7-3xxx, AMD
   # pre-Excavator). Same layout as build-libs-windows-x86_64 but built
@@ -928,6 +1033,13 @@ jobs:
           name: libcrispasr-windows-x86_64-cpu-legacy
           path: release/libcrispasr-windows-x86_64-cpu-legacy.tar.gz
 
+      - name: Attach libcrispasr-windows-x86_64-cpu-legacy.tar.gz to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: release/libcrispasr-windows-x86_64-cpu-legacy.tar.gz
+          fail_on_unmatched_files: false
+
   # ── Windows CPU (AVX2 — Haswell/2013+ baseline) ──────────────────────────────
   build-windows-cpu:
     runs-on: windows-latest
@@ -957,6 +1069,13 @@ jobs:
         with:
           name: crispasr-windows-x86_64-cpu
           path: release/crispasr-windows-x86_64-cpu.zip
+
+      - name: Attach crispasr-windows-x86_64-cpu.zip to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: release/crispasr-windows-x86_64-cpu.zip
+          fail_on_unmatched_files: false
 
   # ── Windows CPU legacy (SSE4.2 — Sandy Bridge/2011+, no AVX2/FMA/F16C) ───────
   # For CPUs that predate Haswell: Ivy Bridge (i5-3xxx, i7-3xxx), Sandy Bridge,
@@ -991,6 +1110,13 @@ jobs:
         with:
           name: crispasr-windows-x86_64-cpu-legacy
           path: release/crispasr-windows-x86_64-cpu-legacy.zip
+
+      - name: Attach crispasr-windows-x86_64-cpu-legacy.zip to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: release/crispasr-windows-x86_64-cpu-legacy.zip
+          fail_on_unmatched_files: false
 
   # ── Windows CUDA (dynamic, requires NVIDIA driver on target machine) ─────────
   build-windows-cuda:
@@ -1046,6 +1172,13 @@ jobs:
           name: crispasr-windows-x86_64-cuda
           path: release/crispasr-windows-x86_64-cuda.zip
 
+      - name: Attach crispasr-windows-x86_64-cuda.zip to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: release/crispasr-windows-x86_64-cuda.zip
+          fail_on_unmatched_files: false
+
   # ── Windows Vulkan (dynamic, works on NVIDIA/AMD/Intel with a Vulkan driver) ─
   build-windows-vulkan:
     runs-on: windows-latest
@@ -1092,6 +1225,13 @@ jobs:
         with:
           name: crispasr-windows-x86_64-vulkan
           path: release/crispasr-windows-x86_64-vulkan.zip
+
+      - name: Attach crispasr-windows-x86_64-vulkan.zip to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: release/crispasr-windows-x86_64-vulkan.zip
+          fail_on_unmatched_files: false
 
   # `if: always() && !cancelled()` together with no-skipped-needs lets
   # publish run when SOME builds failed but the rest produced artifacts —
@@ -1170,6 +1310,22 @@ jobs:
           name: crispasr-android-arm64-v8a
           path: release/crispasr-android-arm64-v8a.tar.gz
 
+      - name: Attach crispasr-android-arm64-v8a.tar.gz to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: release/crispasr-android-arm64-v8a.tar.gz
+          fail_on_unmatched_files: false
+
+  # ── Publish (safety net) ──────────────────────────────────────────────────────
+  # Each build job now uploads its artifact directly to the release via
+  # softprops/action-gh-release as soon as it finishes — binaries appear
+  # incrementally rather than waiting for all 21 jobs to complete.
+  #
+  # This publish job is a safety-net fallback: it downloads all artifacts
+  # and re-uploads any that the per-job steps might have missed (e.g. due
+  # to transient permission issues). softprops won't clobber files that
+  # already exist on the release.
   publish:
     needs: [build-linux, build-linux-x86_64-avx512, build-linux-x86_64-cuda, build-linux-arm64, build-python-linux, build-python-linux-arm64, build-macos, build-libs-macos-arm64, build-libs-linux-x86_64, build-libs-linux-x86_64-avx512, build-libs-linux-arm64, build-libs-linux-x86_64-cuda, build-libs-windows-x86_64, build-libs-windows-x86_64-vulkan, build-libs-windows-x86_64-cuda, build-libs-windows-x86_64-cpu-legacy, build-windows-cpu, build-windows-cpu-legacy, build-windows-cuda, build-windows-vulkan, build-android-arm64]
     if: always() && !cancelled()
