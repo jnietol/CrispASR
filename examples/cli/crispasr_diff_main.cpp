@@ -1116,8 +1116,19 @@ int main(int argc, char** argv) {
 
         // ---- t3_cond_emb + t3_prefill_emb (deterministic, compare before stochastic T3) ----
         {
+            // Prefer the syn_text recorded in the ref archive's metadata
+            // (`crispasr.ref.chatterbox_syn_text`) — that's the text the
+            // python ref was generated from, so the embedding shapes match.
+            // Fall back to the env var, then the legacy "Hello world." default.
+            std::string syn_text_buf;
             const char* syn_text = std::getenv("CHATTERBOX_SYN_TEXT");
-            if (!syn_text)
+            if (!syn_text || !*syn_text) {
+                syn_text_buf = ref.meta("chatterbox_syn_text");
+                if (!syn_text_buf.empty()) {
+                    syn_text = syn_text_buf.c_str();
+                }
+            }
+            if (!syn_text || !*syn_text)
                 syn_text = "Hello world.";
             int pT = 0, pD = 0, pCondT = 0;
             float* pemb = chatterbox_dump_t3_prefill_emb(ctx, syn_text, &pT, &pD, &pCondT);
