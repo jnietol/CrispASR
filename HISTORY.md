@@ -52,17 +52,19 @@ Patch: `ggml/src/ggml-backend.cpp` keeps a mutation log of every
 the originals at the end of compute so the user's graph is left
 exactly as they built it. `MUST RE-APPLY` after ggml bumps.
 
-**Root cause #2 — `unet_input` needs to live on the consuming backend
-under GPU residency, regardless of #1.** Even with the dangling-pointer
-bug fixed, the sched-copy-on-every-call path still produced wrong
-output (`rms ~16` vs ref 5.1) for unet_input specifically. The
-kernel reads correct bytes (verified by inline `ggml_backend_tensor_get`
-right before im2col dispatch), but downstream compute diverges in
-a way that depends on whether unet_input lives on Metal directly or
-on CPU+sched-copy. We did not chase the second bug to its kernel-
-level cause; it is sidestepped by placing unet_input on the consuming
-backend (`ggml_backend_sched_set_tensor_backend(sched, unet_input,
-c->backend)` in `cfm_euler_solve::run_denoiser`).
+**Root cause #2 — `unet_input` divergence: NOT FIXED, only sidestepped.**
+Even with the dangling-pointer bug patched and the sched copy
+correctly delivering the user's bytes to `MTL0#unet_input#0` on
+every call (verified by inline `ggml_backend_tensor_get` right
+before im2col dispatch — kernel reads CORRECT input bytes),
+downstream compute still produces `rms ~16` instead of the
+expected ~5.1. The cause was not traced; it is sidestepped by
+placing `unet_input` on the consuming Metal backend via
+`ggml_backend_sched_set_tensor_backend(sched, unet_input, c->backend)`
+in `cfm_euler_solve::run_denoiser`. The handover at
+`handover-prompts/issue83-r9-followup-5-unet-input-routing.md`
+collects everything we know about Bug #2 and what's been ruled
+out, for a follow-up agent to chase to root cause.
 
 Bisect findings on which inputs to pin:
 
@@ -93,8 +95,22 @@ minimal correct fix.
 
 `s3gen_mel cos_min=0.999976` matches the production weight-residency
 split (0.999980); the residual ~1e-2 max_abs is FP16/F32 round-off.
-The GPU-residency path is now correct AND ~30% faster than the
-CPU-residency split on M1.
+The GPU-residency path is now correct AND ~22% faster than the
+CPU-residency split on M1 (median 34 s vs 43.7 s on the smoke run,
+3-run wall clock).
+
+**Verification that both fix halves are necessary:** ran with each
+half disabled in isolation:
+
+| Configuration | smoke rms | result |
+| - | - | - |
+| neither fix | 13.938 | broken (pre-fix baseline) |
+| ggml mutation log only | 16.154 | broken |
+| app-side pin of `unet_input` only | 14.640 | broken |
+| both | **5.143** | works ✓ |
+
+So both bugs are real and independent. Bug #1 fix is upstream-quality;
+Bug #2 fix is a workaround pending follow-up #5.
 
 **Lessons replacing R9 follow-up #3's 2''':**
 

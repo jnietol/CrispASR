@@ -6545,7 +6545,7 @@ allocator produces for this graph — out of scope for a normal
 chatterbox session. Until then: `CRISPASR_S3GEN_UNET_GPU_RESIDENCY`
 remains an investigation-only knob, not a user-facing option.
 
-### Round 9 follow-up #4 (2026-05-24, late) — root cause: sched-internal CPU→GPU copy of inputs fails silently
+### Round 9 follow-up #4 (2026-05-24, late) — TWO bugs in tandem; one fixed, one worked-around
 
 R9 follow-up #3's "address-dependent Metal kernel bug" conclusion
 was wrong. The actual root cause is much simpler and tractable.
@@ -6684,10 +6684,27 @@ shaders.
 ggml-side issue that affects any user code which calls
 `ggml_backend_sched_alloc_graph + graph_compute` twice on the same
 gf — the second call silently loses input copies. Filed at
-`tools/upstream-prs/10`. The Part B "pin unet_input only" issue
-needs more investigation to characterise upstream (we couldn't pin
-down the downstream divergence point), so it remains an
-application-side workaround for now.
+`tools/upstream-prs/10`.
+
+**Bug B is still open** — the workaround (pinning `unet_input` to
+the consuming backend) is shipping in production, but the underlying
+divergence between "input on CPU + sched-copies to Metal" and "input
+directly on Metal" when downstream kernels see the same input bytes
+is not understood. Handover at
+`handover-prompts/issue83-r9-followup-5-unet-input-routing.md`
+collects every diagnostic we ran, every hypothesis we ruled out, and
+the structural shape of the bug (the kernel reads correct bytes but
+produces wrong output that compounds through CFM). A real fix needs
+either an upstream-quality root-cause patch or a confident
+"workaround is the right answer because X" explanation.
+
+**Lesson 7. "Pinning fixes it" is not a root cause.** When a
+backend-pin diagnostic resolves a correctness issue, you've found
+A fix, not necessarily THE fix. The instinct to ship and move on is
+strong; resist it. Sidestepping a bug you can't characterise leaves
+the same trap loaded for the next graph topology that triggers it.
+Carve out time to chase Bug B-class symptoms to root cause even
+after a workaround makes the harness green.
 
 `tools/compare_probe_dumps.py` + `tools/inspect_im2col_dump.py`
 are the diagnostic scripts.
