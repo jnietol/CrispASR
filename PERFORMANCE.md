@@ -1375,6 +1375,80 @@ definitions and `tests/test_benchmark_metrics.py` for 14 pytest unit
 tests that validate the computation (including the issue #89 failure
 signature: <5 % coverage on 300 s audio).
 
+### Multi-backend long-form Japanese — 120 s sweep (2026-05-24, issue #89 follow-up)
+
+Test audio: first **120 s** of the issue #89 reporter's exact YouTube
+clip (`o_9dWkRPYC0`, fresh `yt-dlp` Opus→WAV extract, the file lenhone
+actually reports against — md5 `d1f2ef…`, *not* the cached MP3-derived
+copy). Apple M1 Metal, default flags unless noted.
+
+Speech runs out around 01:37; the remaining ~22 s is short pause +
+follow-on talking. All "covers full speech" rows below land around
+01:37 → 02:00.
+
+| backend | mode | segments | first → last ts | coverage | notes |
+|---|---|---:|---|---|---|
+| **parakeet-tdt-0.6b-ja** (default, streamed TDT) | full | 12 | 0:00 → 1:37.84 | full speech | post-fix `33f9a162` |
+| **parakeet-tdt-0.6b-ja** + `--vad` | full | 14 | 0:00 → 1:58.39 | full speech | cleaner per-utterance |
+| **parakeet-tdt-0.6b-ja** + `--parakeet-decoder ctc` (hybrid CTC head) | full | 12 | 0:00 → 1:37.84 | full speech | byte-identical to streamed-TDT — confirms encoder is fine |
+| **parakeet-tdt-0.6b-ja** + `STREAM_THRESHOLD=999` (forced single-pass) | full | many | 0:00 → ~14 s then kana-by-kana fragmentation | **broken** | the issue #89 bug; reproduces the lenhone complaint |
+| **sensevoice-small** (CTC, multilingual) | `--vad` | 13 | 0:00 → 2:00 | full speech | accurate, minor JA glitches (`スピーク**ジャ**プネス**ナチャパ**`); 19.8× RT |
+| **voxtral-mini-3b** (LLM AR, multilingual) | default chunking | partial | 0:00 → 0:27 then 1:47 → 2:00 | **drops 0:27 → 1:47 (~80 s)** | LLM decoder loses a middle chunk |
+| **cohere-transcribe** (Conformer, multilingual) | default chunking | 4 | 0:00 → 1:53 | **sparse with multi-tens-of-seconds gaps** | only ~0:00, 0:50, 1:18, 1:48 anchors |
+| **canary-1b-v2** (NeMo multilingual seq2seq) | default | broken | n/a | hallucinates `"I am not aware of anything"` in English | needs proper language-prompt wiring; out of scope here |
+
+**Best on this 120 s clip:** parakeet-tdt-0.6b-ja (post-fix, streamed
+TDT) and sensevoice-small are tied — both produce full speech coverage
+with sentence-level segmentation. Parakeet via the CTC head produces
+*byte-identical* output to streamed-TDT, which confirms the encoder
+isn't the problem: only TDT-decoded-over-the-full-utterance is.
+
+**The new finding (voxtral, cohere):** these aren't parakeet-specific
+failures. voxtral and cohere both drop the middle of a 120 s clip on
+this audio, with different symptoms:
+
+- **voxtral-mini-3b**: LLM decoder loses one middle chunk entirely
+  (segments span 0:00 → 0:27, then skip to 1:47 → 2:00). The chunker
+  hands the AR decoder its middle window, the decoder either runs to
+  max_new_tokens before catching up to the audio or skips ahead via
+  prompt conditioning that misfires on this clip. Not investigated
+  deeply yet; this is an open follow-up — see PLAN #114.
+- **cohere-transcribe**: at the default chunk size, the energy chunker
+  hands the encoder a small number of long slices and the Conformer
+  encoder hits a similar long-bidirectional-attention-amplifies-noise
+  regime as parakeet single-pass on lenhone's audio. Only ~4 segments
+  emitted across 120 s, with gaps of tens of seconds between them.
+
+**Upstream behaviour for the same long-form failure:**
+
+- **NeMo parakeet / canary**: stock `model.transcribe()` does single-
+  pass over the full utterance (verified locally — NeMo's own
+  `transcribe()` produces 47 chars and stops at ~20 s on the same
+  lenhone WAV, *exactly* matching our pre-fix single-pass). For long
+  audio NeMo ships `nemo.collections.asr.parts.utils.streaming_utils.
+  BatchedFrameASRTDT` / `FrameBatchChunkedCTC` and
+  `nemo.collections.asr.parts.utils.transcribe_utils.
+  get_buffered_pred_feat_rnnt`, plus the
+  `examples/asr/asr_chunked_inference/rnnt/speech_to_text_buffered_
+  infer_rnnt.py` reference script. Our `parakeet_transcribe_streamed`
+  is the same shape: global-z-norm + chunked encode + single TDT
+  decode, with overlap-skip on chunk boundaries. The difference is
+  ours is now the default; upstream `transcribe()` is not.
+- **Mistral voxtral**: the reference HuggingFace integration chunks at
+  ~30 s with overlap; the long-form failure we see at 120 s is partly
+  an artefact of how our energy-chunker hands the slices to the LLM
+  decoder (not upstream-identical chunking).
+- **Cohere Transcribe**: the released model is intended for
+  ≤ a few minutes per call; the hosted product does server-side VAD +
+  chunking, the released weights do not.
+
+**Implication.** The "default fine on a single transcribe() call over
+the whole file" affordance is fragile across this whole class of
+models. Going forward we should probably treat *every* `CAP_UNBOUNDED
+_INPUT` backend the way we now treat parakeet: ship a chunked /
+streamed default that the user doesn't have to opt into. See PLAN
+#114 for the open architectural question and the per-backend ladder.
+
 ---
 
 ## Beam search — quality vs speed (2026-05-23, PLAN #90)

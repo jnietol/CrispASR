@@ -46,6 +46,7 @@ test-all-backends.py passes 18/18 transcribe + 51/54 feature tests (3 stream ski
 | **DONE** | [#98 Hotwords / contextual biasing](#98-hotwords--contextual-biasing) | Phased | **Phase A+B DONE.** CTC-WS Aho-Corasick trie wired into parakeet CTC + TDT; LLM prompt injection for qwen3-asr + voxtral. `--hotwords` / `--hotwords-file` / `--hotwords-boost` CLI. 13+4 tests. Phase C deferred. → HISTORY 2026-05-23. |
 | **DONE** | [#110 Global diarization timeline](#110-global-diarization-timeline) | Medium | Sherpa/ecapa now runs once on the full audio (not per-slice). `CrispasrSherpaCache` mirrors the pyannote global-cache pattern. Segments split at speaker-turn boundaries via word-level overlap scoring. 13+8 tests. → HISTORY 2026-05-23. |
 | **LOW** | [#106 TEN-VAD](#106-ten-vad--low-latency-cross-platform-vad) | Small | Technically feasible VAD backend: C-compatible, 16 kHz / 10-16 ms frames, prebuilt libs + ONNX path. License is the gate: Apache 2.0 plus extra no-compete / own-app-only conditions from Agora. |
+| **MEDIUM** | [#114 Long-form transcribe — chunking-default ladder for voxtral / cohere / canary](#114-long-form-transcribe--make-chunkingstreamed-the-default-for-all-asr-backends-issue-89-follow-up) | Medium | 2026-05-24 multi-backend 120 s sweep on lenhone's audio: voxtral drops ~80 s in the middle, cohere only emits ~4 segments across 120 s with tens-of-seconds gaps, canary hallucinates English. Parakeet was loudest because lenhone hit it, not because the others are safe. Open architectural question: VAD-default everywhere vs parakeet-style streamed-encode trick per backend vs LLM-decoder chunking + LCS dedup. See PERFORMANCE.md "Multi-backend long-form Japanese — 120 s sweep" for the numbers. |
 | **DONE** | [#105 WhisperX word alignment models](#105-whisperx-word-alignment-models-wav2vec2-ctc-zoo) | Phased | **DONE 2026-05-23.** All 10 WhisperX common languages (fr/es/it/ja/zh/nl/uk/pt/ar/cs) converted, uploaded to `cstr/*-GGUF`, registry aliases wired. Only benchmarking + docs remain. |
 
 **Recently completed** (full write-ups in HISTORY.md): **#110 Global diarization timeline → HISTORY 2026-05-23** (sherpa/ecapa runs once on full audio; `CrispasrSherpaCache` mirrors pyannote pattern; segment splitting at speaker turns; 21 tests). **#98 Hotwords A+B → HISTORY 2026-05-23** (CTC-WS Aho-Corasick trie for parakeet CTC/TDT; LLM prompt injection for qwen3-asr/voxtral; `--hotwords` CLI; 17 tests). **Paraformer-zh NAR-ASR → HISTORY 2026-05-21** (220M params, single-pass NAR decode; F16/Q4_K/Q8_0 at `cstr/paraformer-zh-GGUF`; byte-identical on Chinese + English; 4 integration tests). **#86 Flash-attn → DONE** (all backends already wired via core helpers). **#90 Session beam_size all backends → HISTORY 2026-05-23** (qwen3-asr, granite, voxtral wired via `core_beam_decode::run_with_probs`; commit `0c24178e`). **#74 Feature-matrix uplift round 2 → HISTORY 2026-05-23** (74a chatterbox lang routing, 74b cap regression tests, 74c qwen3-tts base voice-cloning cap, 74d matrix regen; commit `b848152a`). **#111 TTS `--seed` parity → HISTORY 2026-05-23** (qwen3-tts, chatterbox, vibevoice realtime/base all show same-seed reproducibility and different-seed divergence on the local backup models; qwen3 env precedence fixed so CLI/request seed wins; IndexTTS stays effectively deterministic on the tested prompt/reference). **#99 funasr MLT-Nano hallucination fix → HISTORY 2026-05-21** (root cause: `use_low_frame_rate` hardcoded true in C++, but MLT-Nano's upstream config omits it (default false) — only 23/183 adaptor frames were spliced into the LLM prompt, truncating 87% of audio context; fix: converter reads the flag from config.yaml into a GGUF KV, runtime reads it at load time; also fixed `ada_n_heads` 16→8 in converter; GGUFs re-uploaded to `cstr/funasr-{nano,mlt-nano}-GGUF`). **SenseVoiceSmall → HISTORY 2026-05-20** (encoder-only multi-task ASR: transcript + LID + emotion + audio-event in one CTC pass; 50+ langs; 9.8-21.8× realtime on M1 Metal; reuses the SANM block helper from the funasr port unchanged; `cstr/sensevoice-small-GGUF` 0.47 GB F16, wired into `-m auto`). **Fun-ASR-Nano + MLT-Nano → HISTORY 2026-05-20** (full LLM-decoder runtime — 70-block SANM encoder + 2-block Transformer adaptor + Qwen3-0.6B AR decode; 77/77 PASS byte-identical on Chinese + English diffs; ~9× realtime on M1 Metal with FA-default-on; both GGUFs at `cstr/funasr-{nano,mlt-nano}-GGUF`). **#57 chatterbox native voice clone → §82** (six-commit sprint shipping all four upstream cond extractors — VoiceEncoder LSTM, S3Tokenizer V2, CAMPPlus, 24 kHz Matcha mel — plus a Kaiser-windowed sinc resampler and atomic 5-cond install in `chatterbox_set_voice_from_wav`'s `.wav` branch; `--voice ref_24k.wav` produces real cloned speech without any python). **#69 + #72 + #73 cap-honesty + KV/layer offload knobs → §79** (14-commit session shipping `CRISPASR_KV_QUANT_K/_V` + `KV_ON_CPU` on 14 backends, `N_GPU_LAYERS` on 10 backends, gemma4/mimo GPU-residency 2.2x / 22 % faster, plus cap-honesty cleanup on parakeet/glm-asr/qwen3/gemma4/omniasr). **vibevoice #69a follow-up → §79b** (mode-aware `tts_lm.layers.` / `lm.layers.` prefix predicate). #78 Chatterbox vocoder → §78. #11 WebSocket server → §76, #63 Feature matrix parity → §72, #59 binding parity → §73, gemma4 #49 + Docker #31 → §74, tests + KV Q8_0 + cleanup → §75. Earlier: #5→§63, #16→§55, #51→§56, #51b→§60, #53→§63, #54→§61, #55→§54, #56→§63, #60d→§64.
@@ -3864,3 +3865,121 @@ Main caveat:
 - The license review confirms the additional no-compete / own-app-only
   conditions are acceptable for our distribution model, or we confine it
   to an internal-only path.
+
+---
+
+## 114. Long-form transcribe — make chunking/streamed the default for all ASR backends (issue #89 follow-up)
+
+The 120 s multi-backend sweep on lenhone's fresh `yt-dlp` extract of
+the issue #89 YouTube clip (see PERFORMANCE.md "Multi-backend long-
+form Japanese — 120 s sweep") shows the parakeet-TDT long-form failure
+is not unique to parakeet. **voxtral-mini-3b and cohere-transcribe
+both drop content on the same 120 s file**, with different symptoms:
+
+- **voxtral-mini-3b** (LLM AR, multilingual): output covers 0:00 →
+  0:27 then jumps to 1:47 → 2:00. ~80 s of audio in the middle is
+  silently dropped. Looks like the energy chunker hands the AR decoder
+  a middle window the prompt-conditioning misfires on.
+- **cohere-transcribe** (Conformer, multilingual): only ~4 segments
+  across 120 s, with tens-of-seconds gaps between them. Cohere's
+  Conformer hits a similar long-bidirectional-attention regime as
+  parakeet single-pass.
+- **canary-1b-v2** (NeMo multilingual seq2seq): hallucinates English
+  `"I am not aware of anything"` in a loop. Different bug — likely
+  missing language-prompt wiring — but the headline is "default
+  transcribe doesn't survive this kind of audio either."
+
+Parakeet was the loudest because lenhone happened to hit it, not
+because the other backends are safe. Treating long-form as "the
+caller wraps with --vad or --chunk-seconds N" is a footgun: most
+users don't, and the failure modes are silent (no error, just missing
+text).
+
+### What upstream does
+
+Same model, same long file, same problem upstream:
+
+- **NeMo parakeet / canary** — stock `model.transcribe()` does single-
+  pass. Verified locally: NeMo's own `transcribe()` produces 47 chars
+  and stops at ~20 s on lenhone's exact WAV, byte-equivalent
+  behaviour to our pre-fix single-pass. For long audio NeMo ships a
+  separate chunked-frame inference path:
+  `nemo.collections.asr.parts.utils.streaming_utils.
+  BatchedFrameASRTDT` / `BatchedFrameASRRNNT` /
+  `FrameBatchChunkedCTC` plus
+  `transcribe_utils.get_buffered_pred_feat_rnnt`, and an example at
+  `examples/asr/asr_chunked_inference/rnnt/
+  speech_to_text_buffered_infer_rnnt.py`. The user must invoke this
+  path explicitly. Our `parakeet_transcribe_streamed` (now the
+  default via commit `33f9a162`) is the same shape.
+- **Mistral voxtral** — reference HuggingFace integration chunks at
+  ~30 s with overlap. Our energy chunker hands the LLM differently-
+  shaped slices.
+- **Cohere Transcribe** — released weights aren't meant for long
+  audio; Cohere's hosted product does server-side VAD + chunking. We
+  ship the released weights, so the burden of "make it work on long
+  files" is on us.
+
+### Options on the table
+
+1. **VAD-default for everyone**. Make `--vad` (silero) the default for
+   any input longer than the auto-fallback threshold across all ASR
+   backends. Cheap and uniform; the existing VAD-stitch path in
+   `crispasr_run.cpp` already handles this end-to-end. Trade-off:
+   slightly lower coverage on continuous speech (93 % vs 99 % on the
+   60 s clip per the existing benchmark) and per-utterance SRT entries
+   instead of paragraph-level. **Reversible per-call** with
+   `--chunk-seconds 0`.
+2. **Parakeet-style streamed-encode trick per backend**. Apply the
+   global-z-norm + chunked-encode + concatenate + single-decode trick
+   to canary / cohere / fastconformer-ctc. Works for backends where
+   the encoder is the unstable component and per-feature z-norm is
+   computed globally. Already done for parakeet; canary and
+   fastconformer-ctc declare `CAP_INTERNAL_CHUNKING` but currently
+   route through their own paths — they would need an
+   `XXX_transcribe_streamed` per-backend implementation.
+3. **LLM-decoder chunking with overlap** for voxtral / qwen3-asr /
+   granite-speech. Different fix: feed the AR decoder ≤30 s slices
+   with overlap and LCS-merge the outputs. We already have
+   `crispasr_lcs::merge_overlapping_hypotheses` from PLAN #80c —
+   wire it on as a default for LLM ASR backends.
+4. **Backend-specific defaults** instead of one global default.
+   parakeet → option 2, voxtral → option 3, cohere → option 1 (VAD)
+   since the released weights aren't well-suited to long inputs at
+   all. Most flexible but more code surface to keep aligned.
+
+### What to do first
+
+1. Reproduce the voxtral mid-drop on a second long-form clip (German,
+   English) to confirm it isn't audio-specific. Same for cohere.
+2. Implement option 3 (LLM-decoder chunking + LCS dedup) for voxtral
+   as a smoke test; if that cleanly fixes the 120 s clip, generalise
+   to qwen3-asr and granite-speech.
+3. Decide between option 1 (VAD default) and option 4 (per-backend
+   defaults) for cohere. Probably option 1 — cohere's open weights
+   were not trained for this duration regime.
+4. Update CrispASR docs and `CAP_*` table to make the long-form story
+   per backend explicit, not implicit.
+
+### Trigger
+
+- We see this fail on other audio (likely, just hasn't been reported).
+- A user asks why voxtral or cohere drops the middle of their file.
+- We want to give a single confident answer to "is CrispASR safe to
+  point at a 10-minute file on `crispasr -m auto -f file.wav`?" —
+  currently the answer is "for parakeet yes, for voxtral / cohere
+  maybe."
+
+### Files (tentative)
+
+- `examples/cli/crispasr_backend_voxtral.cpp` — chunked + LCS path
+- `examples/cli/crispasr_backend_cohere.cpp` — VAD-default toggle (or
+  similar)
+- `examples/cli/crispasr_run.cpp` — auto-chunking gate refactored to
+  per-backend ladder
+- `tests/test-issue-89-long-audio-fallback.cpp` — extend with voxtral
+  and cohere assertions
+- `tests/benchmark_asr.py` — multi-backend long-form scoring against
+  the same 120 s / 300 s / 600 s fixtures
+- `PERFORMANCE.md` — multi-backend long-form table per duration
+  bucket
