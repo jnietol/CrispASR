@@ -1710,12 +1710,36 @@ static ggml_cgraph* build_graph_unet1d(chatterbox_s3gen_context* c, int T_mel) {
     // point (62) for the diff-bisect.
     const bool preserve_intermediates = std::getenv("CRISPASR_S3GEN_UNET_PRESERVE_INTERMEDIATES") != nullptr;
     const bool mark_output_all = dump_unet;  // every dump point
-    const bool mark_output_blocks = preserve_intermediates;  // block outputs only
+    // PLAN #83 r9 sub-bisect (May 2026 session): the 17 extra marks DUMP_UNET adds
+    // on top of PRESERVE_INTERMEDIATES tip smoke into NaN. Split everything into
+    // 5 groups gated independently to find the minimum trigger set.
+    const bool mark_db_resnet = mark_output_all || std::getenv("CRISPASR_S3GEN_UNET_MARK_DB_RESNET") != nullptr;
+    const bool mark_db_tb     = mark_output_all || std::getenv("CRISPASR_S3GEN_UNET_MARK_DB_TB")     != nullptr;
+    const bool mark_mb_resnet = mark_output_all || std::getenv("CRISPASR_S3GEN_UNET_MARK_MB_RESNET") != nullptr;
+    const bool mark_db_out    = mark_output_all || preserve_intermediates ||
+                                std::getenv("CRISPASR_S3GEN_UNET_MARK_DB_OUT") != nullptr;
+    const bool mark_mb_out    = mark_output_all || preserve_intermediates ||
+                                std::getenv("CRISPASR_S3GEN_UNET_MARK_MB_OUT") != nullptr;
+    // PLAN #83 r9 sub-bisect: how many / which of the 12 mb_*_out marks tips
+    // into NaN when combined with MARK_DB_RESNET. MAX takes priority over INDEX.
+    int mb_out_max = -1;
+    int mb_out_index = -1;
+    if (const char* env = std::getenv("CRISPASR_S3GEN_UNET_MARK_MB_OUT_MAX")) {
+        mb_out_max = std::atoi(env);
+    }
+    if (const char* env = std::getenv("CRISPASR_S3GEN_UNET_MARK_MB_OUT_INDEX")) {
+        mb_out_index = std::atoi(env);
+    }
+    auto should_mark_mb_out = [&](int i) -> bool {
+        if (mb_out_max >= 0) return i < mb_out_max;
+        if (mb_out_index >= 0) return i == mb_out_index;
+        return mark_mb_out;
+    };
     ggml_tensor* hidden = nullptr;
     {
         x = causal_resnet_block(ctx0, x, t_emb, c, "s3.fd.db.0.0", mask);
         ggml_set_name(x, "dump_db_resnet");
-        if (mark_output_all) ggml_set_output(x);
+        if (mark_db_resnet) ggml_set_output(x);
         // 4 transformer blocks
         ggml_tensor* xt = ggml_cont(ctx0, ggml_transpose(ctx0, x));
         for (int j = 0; j < 4; j++) {
@@ -1725,7 +1749,7 @@ static ggml_cgraph* build_graph_unet1d(chatterbox_s3gen_context* c, int T_mel) {
             char dump_name[32];
             std::snprintf(dump_name, sizeof(dump_name), "dump_db_tb_%d", j);
             ggml_set_name(x, dump_name);
-            if (mark_output_all) ggml_set_output(x);
+            if (mark_db_tb) ggml_set_output(x);
         }
         hidden = x; // save for skip connection
         // Downsample: CausalConv1d(k=3) — halves T
@@ -1734,7 +1758,7 @@ static ggml_cgraph* build_graph_unet1d(chatterbox_s3gen_context* c, int T_mel) {
         if (ds_w)
             x = causal_conv1d(ctx0, x, ds_w, ds_b);
         ggml_set_name(x, "dump_db_out");
-        if (mark_output_all || mark_output_blocks) ggml_set_output(x);
+        if (mark_db_out) ggml_set_output(x);
         // Note: the Python code uses Downsample1D which actually halves T
         // For CausalConv1d with stride=1, T stays the same
         // The actual downsample uses mask[:, :, ::2] to halve
@@ -1749,7 +1773,7 @@ static ggml_cgraph* build_graph_unet1d(chatterbox_s3gen_context* c, int T_mel) {
         char dump_resnet[32];
         std::snprintf(dump_resnet, sizeof(dump_resnet), "dump_mb_%d_resnet", i);
         ggml_set_name(x, dump_resnet);
-        if (mark_output_all) ggml_set_output(x);
+        if (mark_mb_resnet) ggml_set_output(x);
 
         for (int j = 0; j < 4; j++) {
             char tb_prefix[48];
@@ -1759,7 +1783,7 @@ static ggml_cgraph* build_graph_unet1d(chatterbox_s3gen_context* c, int T_mel) {
         char dump_block[32];
         std::snprintf(dump_block, sizeof(dump_block), "dump_mb_%d_out", i);
         ggml_set_name(x, dump_block);
-        if (mark_output_all || mark_output_blocks) ggml_set_output(x);
+        if (should_mark_mb_out(i)) ggml_set_output(x);
     }
 
     // ---- Up blocks (1 block) ----
