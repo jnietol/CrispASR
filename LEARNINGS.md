@@ -6971,4 +6971,50 @@ Knobs added this session:
   the residual conv (the 1×1×1 im2col edge case). Confirmed
   irrelevant to Bug B.
 
+**Conclusive host-vs-GPU divergence proof.** Extended IM2COL_DBG
+to read channels 0/80/160/240 (noise/mu/spk/cond) instead of just
+channel 0. In Bug B mode with `CRISPASR_IM2COL_DBG=1`:
+
+```
+dbg 0 (step 0 cond):    noise=1.9269 mu=0.24 spk=0.17 cond=-6.75
+dbg 1 (step 0 uncond):  noise=1.9269 mu=0.00 spk=0.00 cond=0.00
+dbg 2 (step 1 cond):    noise=1.8502 mu=0.24 spk=0.17 cond=-6.75
+dbg 3 (step 1 uncond):  noise=1.8502 mu=0.00 spk=0.00 cond=0.00
+```
+
+All four host_get readbacks return the EXACTLY CORRECT bytes —
+mu/spk/cond are zero in uncond passes, populated in cond. Same data
+ptr `0x121120000`, same Metal buffer offset 0, same shared-mode
+buffer across all four dispatches.
+
+Yet the compute output is still wrong in Bug B (rms=16.245). So
+the GPU's view of `MTL0#unet_input#0` in the second `graph_compute`
+(uncond) differs from what host_get returns at the SAME byte offset
+of the SAME shared-storage Metal buffer.
+
+Already tested and ruled out for fixing this divergence:
+`FORCE_DMB`, `FORCE_BLIT_COPY`, `FORCE_BARRIER`, varying
+`METAL_N_CB`, `GGML_METAL_CONCURRENCY_DISABLE=1`,
+`GGML_METAL_FUSION_DISABLE=1`, `GGML_METAL_GRAPH_OPTIMIZE=0`,
+`GGML_METAL_SHARED_BUFFERS_DISABLE=1` (private-storage buffers),
+`CRISPASR_S3GEN_RC_AS_MUL_MAT=1`.
+
+This is now an extremely well-characterized but genuinely
+intractable Metal/M1 bug. The cond pass works correctly; the
+uncond pass doesn't, on identical-shape graphs with identical
+sched alloc plans and identical host-visible buffer bytes.
+
+Likely next steps (none cheap):
+
+- Capture an Xcode GPU frame trace of the cond and uncond passes
+  side by side; compare buffer state inspection at dispatch time.
+- File a minimal reproducer with Apple (chatterbox sched + sched
+  tensor_copy + repeated CPU memcpy on a shared-storage Metal
+  buffer + back-to-back `commandBufferWithUnretainedReferences`).
+- Switch the sched layer's INPUT-flagged `ggml_backend_tensor_copy`
+  path to issue a Metal compute kernel (not a memcpy) for the
+  CPU→Metal copy step on shared-storage buffers. This would route
+  through a known-working Metal command pipeline rather than a
+  raw host write.
+
 **Bug B remains open.** Workaround is still shipping.
