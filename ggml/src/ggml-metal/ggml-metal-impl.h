@@ -524,6 +524,39 @@ typedef struct {
     int16_t  r3;
 } ggml_metal_kargs_mul_mv_q4_K_q8_K;
 
+// CrispASR patch (#83 r9): kargs for Q8_0 input quantize + Q8_0×Q8_0 matmul.
+// Pre-step kernel_quantize_q8_0_f32 packs F32 input into block_q8_0 format
+// matching CPU's quantize_row_q8_0_ref output (32-elem blocks, F16 scale).
+// Main kernel kernel_mul_mv_q8_0_q8_0 mirrors ggml_vec_dot_q8_0_q8_0_generic
+// bit-for-bit. Used when an op carries GGML_PREC_F32 — chatterbox S3Gen UNet
+// uses Q8_0 weights × F32 input, the GPU mul_mv_ext path drifts ~1e-3 vs
+// CPU (compound F32 accumulator/round-down loss across 396 mul_mats x 10
+// CFM steps) so we mirror the CPU integer-dot path exactly.
+typedef struct {
+    int32_t  ne00;     // hidden dim (must be % 32 == 0)
+    int32_t  ne01;     // num input rows = ne11 of the parent matmul
+    int32_t  ne02;
+    uint64_t nb01;     // input row stride (bytes), src
+    uint64_t nb02;
+    uint64_t nb03;
+    int32_t  num_blocks_per_row; // ne00 / 32
+} ggml_metal_kargs_quantize_q8_0;
+
+typedef struct {
+    int32_t  ne00;     // K dim (hidden)
+    int32_t  ne01;     // M dim (output rows)
+    int32_t  ne02;
+    uint64_t nb01;     // weight row stride (bytes), src0
+    uint64_t nb02;
+    uint64_t nb03;
+    int32_t  ne11;     // N dim (input cols / output cols)
+    int32_t  ne12;
+    int32_t  ne0;      // dst stride along M
+    int32_t  ne1;      // dst stride along N (== ne11)
+    int16_t  r2;
+    int16_t  r3;
+} ggml_metal_kargs_mul_mv_q8_0_q8_0;
+
 typedef struct {
     int32_t  ne02;
     int32_t  ne10;

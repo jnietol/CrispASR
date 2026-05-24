@@ -8569,6 +8569,130 @@ kernel void kernel_mul_mv_q4_K_q8_K(
     dst_f32[(uint64_t)batch * args.ne0 * args.ne1 + (uint64_t)col * args.ne0 + row] = sumf;
 }
 
+// CrispASR patch (#83 r9): F32 → Q8_0 input quantize, mirrors CPU's
+// quantize_row_q8_0_ref bit-for-bit (32-elem block, F16 scale, round-to-nearest
+// int8 quants). Pre-step for kernel_mul_mv_q8_0_q8_0 below.
+//
+// One block (32 elements) per simdgroup; one element per thread (QK8_0 == SIMD).
+// dispatch grid: (num_blocks_per_row, ne01_input_rows, ne02 * ne03_batches).
+// dispatch threads: 32 per group.
+//
+// dst layout: stride = num_blocks_per_row * sizeof(block_q8_0) per
+// (col, batch) tuple, contiguous along block_idx.
+[[host_name("kernel_quantize_q8_0_f32")]]
+kernel void kernel_quantize_q8_0_f32(
+        constant ggml_metal_kargs_quantize_q8_0 & args,
+        device const char * src,
+        device       char * dst,
+        uint3   tgpig [[threadgroup_position_in_grid]],
+        ushort  tiisg [[thread_index_in_simdgroup]]) {
+    constexpr int QK = 32;
+
+    const uint block_idx = tgpig.x;
+    const uint col       = tgpig.y;
+    const uint batch     = tgpig.z;
+
+    // Source pointer: F32 input at column `col`, batch, block `block_idx`.
+    const uint64_t src_off = batch * args.nb03 + col * args.nb01 + (uint64_t)block_idx * QK * sizeof(float);
+    device const float * x = (device const float *)(src + src_off);
+
+    // One element per thread (QK == 32 == SIMD width).
+    const float my_x  = x[tiisg];
+    float       my_a  = fabs(my_x);
+
+    // simd-reduce: amax via tree shuffle_xor.
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        const float oa = simd_shuffle_xor(my_a, offset);
+        if (oa > my_a) my_a = oa;
+    }
+    const float amax = simd_broadcast(my_a, 0);
+
+    // Mirror CPU quantize_row_q8_0 (ARM NEON path on M1):
+    //   d  = amax / 127     (F32; stored as F16 for the block scale)
+    //   id = 1 / d          (F32; uses ORIGINAL F32 d, not the F16 round-trip!)
+    //   qs[j] = vcvtnq_s32_f32(x[j] * id)  → round-to-nearest, ties to even
+    // ARM NEON's vcvtnq_s32_f32 (and x86's roundps with ROUND_NEAREST) both
+    // use banker's rounding. The CPU vec_dot_q8_0_q8_0_generic dot is what
+    // computes the result; what matters is that we match the ARCH-SPECIFIC
+    // quantize that runs on the M1 CPU path — not the _ref roundf variant.
+    const float d  = amax / 127.0f;
+    const float id = (d != 0.0f) ? (1.0f / d) : 0.0f;
+
+    // Output block pointer.
+    const uint64_t out_blocks_per_col = (uint64_t)args.num_blocks_per_row;
+    const uint64_t out_off =
+        (((uint64_t)batch * args.ne01 + col) * out_blocks_per_col + block_idx) * sizeof(block_q8_0);
+    device block_q8_0 * out = (device block_q8_0 *)(dst + out_off);
+
+    if (tiisg == 0) {
+        out->d = (half)d;
+    }
+
+    // rint() rounds to nearest integer using current rounding mode; under
+    // default IEEE round-to-nearest-even, this matches vcvtnq_s32_f32.
+    const float scaled = my_x * id;
+    out->qs[tiisg] = (int8_t)rint(scaled);
+}
+
+// CrispASR patch (#83 r9): Q8_0 × Q8_0 mat-vec multiply, F32 output.
+//
+// Mirrors ggml_vec_dot_q8_0_q8_0_generic (ggml-cpu/quants.c:400) exactly:
+// per 32-elem block, int8 × int8 → int32 accumulator, then multiply by
+// (x.d_f32 * y.d_f32) and accumulate into F32 sumf. Pure scalar integer
+// arithmetic per output element; no simdgroup matmul. Slow vs the legacy
+// F32-input kernel but bit-identical to CPU.
+//
+// dispatch grid: (ceil(ne01/TG), ne11, ne02*ne03).
+// dispatch threads: 32 per group. row = tgpig.x*32 + tiitg.
+[[host_name("kernel_mul_mv_q8_0_q8_0")]]
+kernel void kernel_mul_mv_q8_0_q8_0(
+        constant ggml_metal_kargs_mul_mv_q8_0_q8_0 & args,
+        device const char * src0,    // Q8_0 weights
+        device const char * src1,    // Q8_0 input (pre-quantised)
+        device       char * dst,     // F32 output
+        uint3   tgpig [[threadgroup_position_in_grid]],
+        ushort  tiitg [[thread_index_in_threadgroup]]) {
+    constexpr int QK = 32;
+    constexpr int TPG = 32;
+
+    const uint row   = tgpig.x * TPG + tiitg;
+    const uint col   = tgpig.y;
+    const uint batch = tgpig.z;
+
+    if ((int)row >= args.ne01) {
+        return;
+    }
+
+    const int nb = args.ne00 / QK;
+
+    const uint i12 = batch % args.ne12;
+    const uint i13 = batch / args.ne12;
+
+    device const block_q8_0 * x = (device const block_q8_0 *)
+        (src0 + (uint64_t)row * args.nb01
+              + (uint64_t)(i12 / args.r2) * args.nb02
+              + (uint64_t)(i13 / args.r3) * args.nb03);
+
+    device const block_q8_0 * y = (device const block_q8_0 *)
+        (src1 + ((uint64_t)batch * args.ne11 + col) * (uint64_t)nb * sizeof(block_q8_0));
+
+    float sumf = 0.0f;
+
+    for (int i = 0; i < nb; ++i) {
+        int sumi = 0;
+        device const int8_t * xq = x[i].qs;
+        device const int8_t * yq = y[i].qs;
+        for (int j = 0; j < QK; ++j) {
+            sumi += (int)xq[j] * (int)yq[j];
+        }
+        sumf += (float)sumi * ((float)x[i].d * (float)y[i].d);
+    }
+
+    // Output position: dst is F32, layout (ne0, ne1, batch).
+    device float * dst_f32 = (device float *)dst;
+    dst_f32[(uint64_t)batch * args.ne0 * args.ne1 + (uint64_t)col * args.ne0 + row] = sumf;
+}
+
 template<int nr0, typename args_t>
 void kernel_mul_mv_q5_K_f32_impl(
         args_t args,
