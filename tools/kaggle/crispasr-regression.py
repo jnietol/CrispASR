@@ -863,11 +863,23 @@ for r in RESULTS_DATA:
     print(f"  {flag} {r['backend']:30s} {r['elapsed_s']:6.1f}s  {r.get('error', '')}")
 
 if MODE == "rebake" and UPLOAD:
-    if any(not r.get("ok") for r in RESULTS_DATA):
+    successful = [r["backend"] for r in RESULTS_DATA if r.get("ok")]
+    failed = [r["backend"] for r in RESULTS_DATA if not r.get("ok")]
+    if not successful:
         raise SystemExit(
-            "rebake had failures; refusing to upload. Inspect failures, "
-            "fix, re-run rebake with the same workspace until all backends "
-            "pass, then re-run with UPLOAD=1.")
+            "rebake produced zero successful refs; nothing to upload.")
+    # Partial upload is safe by construction: failed entries don't
+    # write to REBAKE_STAGE, so upload_folder() only ships what
+    # actually succeeded. The previous all-or-nothing gate (raise
+    # SystemExit on any failure) was too strict — it blocked v11+v12
+    # from publishing 9 successful ref archives because 14 known-
+    # broken backends (missing pip deps + manifest gaps) also "failed".
+    # The fixtures repo is additive: a successful subset can land
+    # while the broken backends get fixed in follow-up commits.
+    if failed:
+        print(f"\nNOTE: {len(failed)} backend(s) failed; uploading only the "
+              f"{len(successful)} that succeeded. Failed: "
+              f"{', '.join(failed)}", flush=True)
     from huggingface_hub import HfApi
     api = HfApi()
     print(f"\nUploading {REBAKE_STAGE}/ → cstr/crispasr-regression-fixtures")
@@ -878,8 +890,9 @@ if MODE == "rebake" and UPLOAD:
         repo_id="cstr/crispasr-regression-fixtures",
         repo_type="model",
         folder_path=str(REBAKE_STAGE),
-        commit_message=f"rebake {len(RESULTS_DATA)} backend(s) — "
-                       f"crispasr ref {CRISPASR_REF}",
+        commit_message=f"rebake {len(successful)}/{len(RESULTS_DATA)} "
+                       f"backend(s) — crispasr ref {CRISPASR_REF} — "
+                       f"ok: {', '.join(successful)}",
     )
     print(f"\nNew fixtures commit: {commit_info.oid}")
     print(f"  → bump manifest.json's fixtures.revision to {commit_info.oid}")
