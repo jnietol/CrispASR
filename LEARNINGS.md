@@ -2714,51 +2714,46 @@ matches Python bit-for-bit and defends against future fine-tunes
 that drift α further toward zero. Three sites in
 `chatterbox_s3gen.cpp` (rb-snake1, rb-snake2, srb-snake1, srb-snake2).
 
-### Residual cumulative drift — fp accumulation order, not algorithmic
+### Residual cumulative drift — diff harness fed source_stft transposed
 
-After both fixes, `hift_pcm(ref_mel)` still sits at cos_min ≈ 0.89
-even though every individual stage between mel and conv_post passes
-the cos_mean ≥ 0.95 threshold. Per-row dump of `voc_ups_2` shows the
-drift is concentrated in a small cluster of time-steps (T ≈ 2900 of
-4801, mapping back to mel-index 24-25 of 40) with cos as low as 0.16,
-amplified across stages by Snake's `1/α` factor at channels with the
-smallest trained `α` (e.g. `s3.v.rb.1.a1.0.alpha` has elements at
-0.016 and 0.022). This is fp accumulation-order divergence between
-ggml's conv1d/convtranspose1d kernels and torch's; it does NOT
-affect intelligibility (ASR roundtrip on long prompts transcribes
-verbatim). Reaching cos_min = 1.0 here would require pinning ggml's
-reduction order to torch's — high cost, low audible payoff.
+The `hift_pcm(ref_mel) cos = 0.879` regression and all the per-stage
+drift (`voc_rb_0` cos_min ≈ 0.94, `voc_ups_2` cos_min ≈ −0.13,
+`voc_conv_post` cos_min ≈ 0.65) traced to a **layout mismatch in the
+diff harness's external `source_stft` feed**, not anything in the
+runtime vocoder.
 
-#### Re-investigation 2026-05-25 — same conclusion, more evidence
+- The python reference dump writes
+  `s_stft.permute(1, 0).contiguous()` → bytes are `(T, C=18)`
+  row-major (`data[t*18+c]`).
+- The C++ vocoder allocates
+  `s_stft = ggml_new_tensor_2d(ctx, F32, T_src, 18)` with `ne[0] =
+  T_src` as the fast axis, so it expects `(C, T_fast)` row-major
+  (`data[c*T_src+t]`) — matches the internally-generated layout at
+  `src_stft[f*T_src+frame] = re` in `chatterbox_s3gen.cpp`.
+- The harness was `memcpy`'ing `ref.get_f32("hift_source_stft")`
+  directly into the C++ tensor without transposing. C++'s
+  `source_downs[0]` was therefore reading channels and time swapped
+  — Conv1d with `in_channels=18` ate ~12 241 time slices as
+  channels, producing structured garbage that compounded through
+  the resblock chain into the visible cos drift.
 
-Re-checked from scratch in case there's a fixable structural bug
-behind the residual drift:
+Fix is a single transpose in `crispasr_diff_main.cpp` when binding
+`ref_source_stft`. After: all 7 vocoder stages pass at
+`cos_min = 1.000000` and `hift_pcm(ref_mel)` matches the python
+reference to `max_abs = 2.85e-05` (essentially fp32 ULP). The
+runtime TTS path was never wrong — it generates `source_stft`
+internally in the correct layout, so audio quality is unchanged.
 
-- `CRISPASR_S3GEN_VOCODER_CPU=1` gives **identical** `hift_pcm(ref_mel)
-  cos = 0.879` to the default Metal path, so it isn't fp16 matmul
-  accumulation on the GPU.
-- `voc_conv_pre` and `voc_ups_0` are bit-identical (`cos = 1.0,
-  max_abs ≤ 5e-6`). The drift starts at `voc_rb_0` — the first
-  stage that runs Snake + dilated conv + source-resblock fusion.
-- Probing `voc_rb_0` at T=0 c=0..4: C++ = `[-0.45, -0.04, 0.08,
-  -0.05, 0.83]` vs python `[-0.40, 0.07, 0.06, -0.02, 0.82]` — per-
-  element diff is ~10 % even at T=0, well above any single-resblock
-  fp32 precision drift.
-- α values for stage 0 rb 0 are in `[0.58, 1.33]` (no near-zero
-  channels), so the "small-α amplification" story doesn't apply at
-  stage 0 — yet drift is already present here. The amplification at
-  later stages is real, but the *first* drift source is independent
-  of small α.
-- The drift is dominated by `voc_conv_post`'s magnitude channels
-  (`[:9]`) since iSTFT runs `exp(magnitude)`, blowing up any small
-  log-domain error into a large linear-domain error. `hift_pcm
-  (ref_conv_post)` PASSES at `cos = 1.0000`, confirming the iSTFT
-  itself is exact — the bottleneck is purely the C++ → conv_post
-  forward.
-
-Conclusion remains: this is non-fixable in C++ without rewriting
-the conv1d / im2col / matmul reduction order to match torch's exact
-SIMD partitioning. Live with the documented limitation.
+The prior two investigations (May 2026 original write-up + the
+2026-05-25 addendum) misdiagnosed this as fp accumulation-order
+divergence. The "10 % per-element diff at T=0" was real, but it
+was caused by `source_downs[0]` reading transposed bytes, not by
+ggml's reduction tree. Lesson: when a per-stage diff jumps from
+`cos = 1.0` (input) to `cos ≈ 0.94` (one Conv1d later) on inputs
+that should be bit-equivalent, suspect a layout/feed bug before
+suspecting precision. The handover's Hypothesis C ("a structural
+bug we missed") was right; it just lived in the harness's input
+binding, not the resblock chain.
 
 ## Chatterbox voice cloning — bake to GGUF, load via `--voice` (May 2026)
 

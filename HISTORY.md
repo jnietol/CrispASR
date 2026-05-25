@@ -6,6 +6,26 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-05-25 chatterbox hift_pcm(ref_mel) — diff harness layout bug, not vocoder drift
+
+`crispasr-diff chatterbox` had been reporting `[FAIL] hift_pcm(ref_mel) cos=0.879` since the May 2026 parity pass. Two prior investigations (May 8, May 25 addendum) concluded "fp accumulation-order divergence between ggml and torch, not fixable without rewriting ggml reduction order". Both were wrong — the bug was in the harness's input binding.
+
+The python reference dumps `hift_source_stft` via `s_stft.permute(1, 0).contiguous()`, producing bytes in `(T=12241, C=18)` row-major (`data[t*18+c]`). The C++ vocoder allocates `s_stft = ggml_new_tensor_2d(ctx, F32, T_src, 18)` with `ne[0] = T_src` as the fast axis, so it expects `(C, T_fast)` row-major (`data[c*T_src+t]`) — the layout it uses for the internally-generated case at `src_stft[f*T_src+frame] = re`. The harness was `memcpy`'ing the gguf bytes directly into the C++ tensor without transposing, so `source_downs[0]` was reading channels and time swapped.
+
+Single transpose loop in `crispasr_diff_main.cpp` when binding `ref_source_stft` fixes it. Before / after on JFK 11 s @ 16 kHz:
+
+| stage | before | after |
+| --- | --- | --- |
+| `voc_rb_0` | cos_min 0.937 | cos_min 1.000000 |
+| `voc_rb_1` | cos_min 0.609 | cos_min 1.000000 |
+| `voc_ups_2` | cos_min −0.133 | cos_min 1.000000 |
+| `voc_conv_post` | cos_min 0.653 | cos_min 1.000000 |
+| `hift_pcm(ref_mel)` | cos 0.879 FAIL | cos 1.000000 PASS (max_abs 2.85e-05) |
+
+Runtime TTS is unaffected — production synthesis generates `source_stft` internally in the correct layout. The diff harness was the only consumer of the external feed.
+
+Root-cause hunt was structured around the handover at `handover-prompts/chatterbox-hift-ref-mel-drift.md`. Built a standalone torch ground-truth probe (`~/code/chatterbox-hift-stash/probe_stage0.py`) that loaded `voc_ups_0` + `hift_source_stft` from the ref archive and ran stage 0 in torch using the F32 weights from the s3gen GGUF; matched the reference `voc_rb_0` to 7 digits. Comparing torch ground truth's intermediates (`voc_si_0`, `voc_rb_input_0`, `voc_rb0k0_snake1_d0`) against C++ at T=0 c=0..4 then localised the drift to source fusion, not the main resblock. Tracing `s_stft` allocation vs gguf byte layout surfaced the transpose mismatch. Updated `LEARNINGS.md` "Chatterbox HiFT vocoder parity nits" to replace the (wrong) "non-fixable fp drift" section with the correct diagnosis + fix.
+
 ## 2026-05-25 CI cleanup — build.yml trim, test #148 rename, GG_BUILD_NO_AVX512 knob
 
 Three small CI fixes landing together — each pre-existing latent failure that surfaced once the issue #89 push cadence let `build.yml` run to completion for the first time in 30+ commits.

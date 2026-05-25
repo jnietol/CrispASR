@@ -1290,11 +1290,25 @@ int main(int argc, char** argv) {
 
                     const float* ref_source_stft = nullptr;
                     int T_src = 0;
+                    std::vector<float> ref_source_stft_buf;
                     auto ref_source_pair = ref.get_f32("hift_source_stft");
                     auto ref_source_shape = ref.shape("hift_source_stft");
                     if (ref_source_pair.first && ref_source_shape.size() >= 2 && (int)ref_source_shape[0] == 18) {
-                        ref_source_stft = ref_source_pair.first;
+                        // The gguf bytes were dumped with permute(1, 0).contiguous() so are
+                        // (T, C=18) row-major (data[t*18+c]). The C++ vocoder allocates
+                        // s_stft as ggml_new_tensor_2d(ctx, F32, T_src, 18) and treats ne[0]
+                        // as the fast axis, expecting (C, T_fast) row-major (data[c*T_src+t]).
+                        // Transpose before passing in or source_downs[0] reads garbage.
                         T_src = (int)ref_source_shape[1];
+                        const int C_src = 18;
+                        ref_source_stft_buf.resize((size_t)T_src * (size_t)C_src);
+                        for (int c = 0; c < C_src; ++c) {
+                            for (int t = 0; t < T_src; ++t) {
+                                ref_source_stft_buf[(size_t)c * T_src + t] =
+                                    ref_source_pair.first[(size_t)t * C_src + c];
+                            }
+                        }
+                        ref_source_stft = ref_source_stft_buf.data();
                     }
 
                     if (ref_source_stft && T_src > 0) {
