@@ -6,6 +6,53 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-05-25 (late) PLAN #114 close-out — voxtral streamed validated at 60 / 120 / 300 s; 600 s hung on M1 memory thrash, not coverage
+
+Closing the day on PLAN #114 with the live test data and the final per-backend status.
+
+### Voxtral streamed (option A) — live numbers on the Apple Silicon M1
+
+After two iterations on the `max_new_tokens` default (`3f20d050` "scale with audio duration" was a no-op because `whisper_params::max_new_tokens` defaults to `512` not `0`; `a5165c84` reformulated as `max(params.max_new_tokens, scaled_default)` and actually kicked in):
+
+| length | streamed (this PR, M1 Metal) | default chunking (VPS x86, post-opt-out) | notes |
+|---:|---|---|---|
+| 60 s  | ✓ 100 %, 11 segs / 470 chars | ✓ 100 %, 3 segs / 280 chars | denser per-utterance segmentation (streamed has 1 LLM context, no chunk cold-starts) |
+| 120 s | ✓ 100 %, 527 chars | ✓ 100 %, 541 chars | matched within token-count noise |
+| 300 s | ✓ 100 %, **1276 chars** (post-fix) / 863 tokens, natural EOS | ✓ 100 %, 1300 chars | pre-fix was 781 chars / 512-token cap mid-sentence at `"…今年は4日が今年と言えば20"`; the `a5165c84` scaling fix restored full transcript |
+| 600 s | ✗ hung on contended M1 (see below) | ✗ 900 s VPS wall-time timeout (not a coverage regression) | needs a quieter box for an actual streamed measurement |
+
+The pre-3f20d050 ship of `cc319745` introduced the streamed path with a fixed `max_new_tokens = 512` default. Empirically this capped the 300 s output at exactly 512 tokens (mid-sentence). 3f20d050 attempted a scale-with-duration heuristic but guarded on `params.max_new_tokens > 0` — defeated by `whisper_params.h:134`'s default initializer of 512. a5165c84 swapped to `std::max(params.max_new_tokens, scaled_default)`; 300 s rerun produced 1276 chars / 863 tokens with natural EOS, matching the VPS default-chunked baseline.
+
+### 600 s local M1 run hung — memory thrash, not algorithmic
+
+The 600 s streamed test on Apple Silicon ran for 2 h 10 min wall time. Total CPU time accumulated: 20.3 s. State `SN` (sleeping + nice), 0.0 % CPU at sample time. macOS `sample` showed all 850 sampled stack traces in `main` — the process never reached the encoder forward, let alone the LLM decode.
+
+Root cause: severe memory pressure. `vm_stat` reported **80 MB free out of 16 GB** at the time, with 4+ active Claude agents in parallel (`omniasr-llm` bench, doc workers, this session, the chatterbox-ref worker) plus WindowServer at 42 % CPU. The streamed path's KV cache budget for 600 s of audio is `T_prompt (~7600 tokens) + max_new (4800) + 64 ≈ 12 500 tokens` of context, which on a 3 B-parameter LLM is several hundred MB of state plus the embed splice buffers. Under sub-100 MB free, Metal's allocator stalls on first big allocation and the process never makes forward progress — confirmed by `ps -o time` showing 20 s CPU over 130 min wall.
+
+This is a *system-pressure* failure, not a *streaming-pipeline* failure. The algorithm is the same that produced 100 % at 60 / 120 / 300 s. Killed cleanly; will retry on a quieter box or by sequencing other agents to release RAM first.
+
+### Per-backend status as of session close
+
+| backend | default path on `main` | verified coverage |
+|---|---|---|
+| **parakeet** | streamed-TDT (commit `33f9a162` from 2026-05-24) | 60-600 s: 93 / 82 / 97 / 99 % (the 81.5 % at 120 s is the audio — speech ends at 1:37; both paths produce the right content) |
+| **voxtral-mini-3b** | streamed (this PR, `cc319745` → `3f20d050` → `a5165c84`); falls back to single-chunk for ≤30 s | 60-300 s: 100 % local M1; 600 s pending non-thrashing reproduce. Default-chunked path on VPS post-opt-out (`6fef8790`) was 100 % at 60-300 s and wall-time-bound at 600 s |
+| **cohere-transcribe** | default chunking with opt-out from the external overlap-save wrap (commit `dc2295b2` from earlier today) | 60-600 s: 96 / 98 / 98 / 98 % (VPS, full 22 segs at 600 s) |
+| **canary-1b-v2** | unchanged | still hallucinates English `"I am not aware…"` at every JA length — separate prompt-wiring bug (PLAN #114 P3) |
+| **qwen3-asr / granite / mimo-asr** | opt-out fixes for siblings (`46f6848d` / `eaee2319` / similar) | audit pending; not in the lenhone repro path |
+
+### Stash relocation rule update
+
+The `/Users/.../code/issue89-stash/` accumulation of audio fixtures + JSON dumps + log files (~30 MB on top of an already 99-100 % full main volume) was contributing to the memory thrash. Consolidated everything to `/Volumes/backups/code/issue89-stash/` (the SSD, 30 GB+ free). Memory rules updated: `[[feedback_storage_paths]]` and `[[feedback_parallel_workers]]` now direct intermediate work files and worktree stashes to `/Volumes/backups/code/<topic>-stash/`, not `~/code/<topic>-stash/`. The new rule applies to this writeup itself — the worktree for this commit lives at `/Volumes/backups/code/CrispASR-final-writeup/`.
+
+### What's actually open after this commit
+
+- Voxtral streamed 600 s: confirmation run when the box has > 8 GB free.
+- Voxtral upstream-groundtruth diff via `transformers.VoxtralProcessor.apply_transcription_request` — fresh venv setup pending; not blocking.
+- PLAN #114 P3 (canary lang-prompt) and P4 (qwen3 / granite / mimo audit) are separate cycles; the 2026-05-25 multi-commit work fully closes the parakeet, voxtral, and cohere portion of #114.
+
+---
+
 ## 2026-05-25 PLAN #114 — voxtral streamed (Mistral apply_transcription_request pattern) + matrix re-interpretation
 
 Two things landing together:

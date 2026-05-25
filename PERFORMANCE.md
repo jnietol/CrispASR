@@ -1531,7 +1531,7 @@ timestamps).** Higher = better. Bold = best at that length.
 | **parakeet streamed-TDT** (default)       | **93.1** | 81.5 | **96.6** | **99.3** |
 | parakeet CTC head (byte-identical)        | **93.1** | 81.5 | **96.6** | **99.3** |
 | **voxtral-mini-3b** (default chunking)    | **100.0** | **100.0** | **100.0** | wall-time timeout (`rc=124` at 900 s in 15 min limit; LLM-AR CPU-bound, not a coverage failure) |
-| **voxtral-mini-3b** streamed (this PR) — single LLM context | full 0:00→1:00, 11 segs / 470 chars | running on M1 | pending | pending |
+| **voxtral-mini-3b** streamed (option A — this PR's pipeline) — single LLM context | **100 %**, 11 segs / 470 chars | **100 %**, 527 chars | **100 %**, 1276 chars / 863 tokens (post-`a5165c84` max_new scaling fix; was 781 chars / 512-tok cap pre-fix) | hung on contended M1 (80 MB free out of 16 GB → Metal allocator stall — see HISTORY 2026-05-25 (late) "Distinguishing slow vs hung run") |
 | **cohere-transcribe** (default chunking)  | **96.3** | **97.9** | **98.1** | **97.9** (22 segs, full 0:00 → 10:00, 577 s wall) |
 | parakeet single-pass (`STREAM_THRESHOLD=999`, opt-in regression bait) | 33.2 | 81.7 | **1.5** | 99.9 |
 | parakeet + `--vad` (silero)               | 86.7 | 82.0 | 76.3 | 84.0 |

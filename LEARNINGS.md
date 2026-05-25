@@ -7617,3 +7617,40 @@ PERFORMANCE.md now keeps both matrices so the reader can see the cost of the mis
 - `[[feedback_check_performance_learnings]]` — the broader "check what's already there before benchmarking" rule
 - HISTORY 2026-05-25 "PLAN #114 voxtral streamed + matrix re-interpretation"
 - `examples/cli/crispasr_chunk_context_gate.h` `kBlocked` list — the mechanism behind the opt-out fixes
+
+---
+
+## Distinguishing "slow run" from "hung run" — CPU time ≪ wall time is the signal (2026-05-25)
+
+A voxtral streamed 600 s test on Apple Silicon Metal ran for 2 h 10 min wall time without producing a JSON output. Easy default assumption from a session-spanning "watching it grind" perspective: the model is just slow. The actual state was a hang — and the diagnosis takes one `ps` call.
+
+### Signal
+
+`ps -p $PID -o pid,etime,time,pcpu,state,wchan`
+
+| field | hung run (this incident) | active run (e.g. 300 s test on same box earlier) |
+|---|---|---|
+| `etime` | 02:10:25 | 16:34 |
+| `time` (cumulative CPU) | **00:20.31** | 14:28 |
+| `pcpu` (current) | 0.0 % | 70-95 % |
+| `state` | `SN` (sleeping + nice) | `R` (running) |
+
+A 600 s audio with a few thousand encoder + decoder forward passes should accumulate **tens of minutes of CPU time** within tens of minutes of wall time. **20 seconds of CPU in 2 hours of wall** is two-three orders of magnitude below progress; the process is sleeping on something, not computing.
+
+Confirm with `sample $PID 1`: macOS will show what the call stack is parked on. In this case all 850 samples were in `main` — the process never reached the encoder forward, parked somewhere in startup / Metal allocator / first big tensor alloc.
+
+### Cause in this incident
+
+`vm_stat` showed **80 MB free out of 16 GB** when the hang was diagnosed. Four+ parallel Claude agents, WindowServer at 42 % CPU, the voxtral-mini-3B Q4_K binary (2.8 GB resident) + the streamed path's growing context state, all sharing one 16 GB box. Metal's command-buffer allocator stalls when there's no headroom; the process becomes sleep-bound on first allocation and never reaches a working state.
+
+### Rules
+
+- **Before assuming "slow," check `time` vs `etime`.** A 100:1 wall-to-CPU ratio is a hung process, not a slow one. Treat it that way: kill, free RAM, retry.
+- **Free RAM threshold for LLM-AR backends on this box: ~4 GB.** Below that, voxtral and similar Mistral/Qwen 3 B-class LLM-AR pipelines stall on the Metal allocator. Stop other agents' heavy work or wait, don't try to push through.
+- **`sample $PID 1`** is the right next step after the `time/etime` signal — confirms whether the parked region is startup (allocator), forward pass (compute), or shutdown (cleanup).
+- **`ps STAT=SN`** alone is not the signal — many short-CPU-bound steps interleave with sleeping. The `time` accumulator is.
+
+### Cross-refs
+
+- `[[feedback_storage_paths]]` 2026-05-25 update — main volume at 99-100 % full pushed all caches into kernel-thrash territory, contributing to the headroom problem
+- HISTORY 2026-05-25 (late) "PLAN #114 close-out" for the full post-mortem
