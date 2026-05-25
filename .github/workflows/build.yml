@@ -1224,17 +1224,14 @@ jobs:
           LLAMA_ARG_THREADS=$(nproc) GG_BUILD_LOW_PERF=1 bash ./ci/run.sh ./tmp/results ./tmp/mnt
 
   # GitHub Actions assigns this job to runners from a heterogeneous CPU pool
-  # — some machines have AVX512 / AVX512_VNNI / AVX512_VBMI, some don't. The
-  # upstream ./ci/run.sh build picks up AVX512 from the build host via
-  # native-detection, but if a later step (whisper-bench in particular) runs
-  # on a different VM in the pool without those features, the binary
-  # SIGILLs. We've reported this upstream; until ggml-org pins the runner or
-  # forces -DGGML_AVX512=OFF, this job is flaky-by-infra, not by our code.
-  # `continue-on-error: true` keeps the overall workflow green while we still
-  # see the result in the per-job report.
+  # — some machines have AVX512 / AVX512_VNNI / AVX512_VBMI, some don't.
+  # Without GG_BUILD_NO_AVX512 the build picks up whatever the build host
+  # has, then the binary SIGILLs if a later step (whisper-bench in
+  # particular) runs on a different VM in the pool without those features.
+  # GG_BUILD_NO_AVX512=1 (added in ci/run.sh) pins an AVX2 + FMA baseline
+  # every x86_64 runner can execute.
   ggml-ci-x64-cpu-high-perf:
     runs-on: ubuntu-22.04
-    continue-on-error: true
 
     steps:
       - name: Clone
@@ -1261,7 +1258,7 @@ jobs:
       - name: Test
         id: ggml-ci
         run: |
-          LLAMA_ARG_THREADS=$(nproc) bash ./ci/run.sh ./tmp/results ./tmp/mnt
+          LLAMA_ARG_THREADS=$(nproc) GG_BUILD_NO_AVX512=1 bash ./ci/run.sh ./tmp/results ./tmp/mnt
 
   ggml-ci-arm64-cpu-high-perf:
     runs-on: ubuntu-22.04-arm
