@@ -64,6 +64,56 @@ decode).
 for long Japanese audio. The auto path is a safety net against zero
 output, not a quality-optimal path.
 
+#### Correction 2026-05-26 — the failure mode above describes the *chunked-decode* path, not the *streamed-decode* path
+
+The section above describes `parakeet_transcribe_chunked` (independent
+per-chunk TDT decodes, joined via LCS). The current default path on long
+audio is `parakeet_transcribe_streamed` (independent per-chunk
+*encodes*, concatenated encoder output, *one* TDT decode over the
+concat). Streamed has no per-chunk decoder reset, so the "decoder
+cold-start eats 5-20 s per chunk" mechanism does not apply there.
+
+But streamed has its own per-chunk-context failure mode that
+empirically looks identical from the outside — sparse output with
+interior dropouts. Sweep on `audio_samples/{en,de}/fleurs_{60,300}s.wav`
++ `long-clips/yt_60s.wav` (2026-05-26, M1 Metal, v3 + ja models):
+
+| model | audio | c=8 | c=15 | c=20 | c=30 | c=40 |
+|---|---|---|---|---|---|---|
+| v3 (vocab=8192) | EN 60s | 186 | 159 | 362 | 519 | **800** |
+| v3 (vocab=8192) | EN 300s | 492 | 1034 | **1703** | 1549 | 1561 |
+| v3 (vocab=8192) | DE 60s | 502 | **709** | 581 | 678 | 520 |
+| v3 (vocab=8192) | DE 300s | 2496 | 2806 | 2993 | **3063** | 2944 |
+| ja (vocab=3072) | JA 60s | **1674** | — | 907 | 507 | 363 |
+
+**The c=8 default that ships well for the JA-only model collapses on
+the v3 (multilingual / EN-focused) model.** EN 60s loses 77 % of content
+vs the c=40 max. Across the four v3 cases, c=30 is the smoothest
+default (≥ 88 % of best); c=8 is below 50 % on three of four.
+
+**Root cause: encoder context, not decoder state.** With 8 s chunks the
+Conformer's bidirectional attention only sees 8 s of context, but the
+encoder was trained on segments closer to its training-distribution
+window (~30 s). Even with global mel z-norm (which we have), small
+chunks shift the per-feature statistics enough that the encoder
+produces features the TDT decoder doesn't recognise as in-distribution,
+and the TDT decoder emits sparse blank-heavy token paths.
+
+**Fix (`e1904a1e`):** per-model chunk default in
+`parakeet_transcribe_{streamed,chunked}`. `vocab_size < 4000` ⇒ JA-only
+model ⇒ c=8 (preserved). Else ⇒ v3 / multilingual ⇒ c=30. Threshold of
+4000 cleanly separates the two known variants (JA=3072, v3=8192). Env
+override `CRISPASR_PARAKEET_STREAM_CHUNK=N` remains the escape hatch.
+
+**Methodological lesson:** the chunked-vs-streamed distinction matters
+when reasoning about which mechanism a regression hits. "TDT decoder
+cold-start" was the right diagnosis for the chunked-decode path that
+shipped at PLAN #104's start; it was the wrong diagnosis for the
+streamed-decode path that shipped at issue #89's resolution. Confusing
+the two cost a multi-hour pretend-debugging session in 2026-05-26
+before re-running the chunk-size sweep clarified which path was active
+and what was actually going wrong.
+
 ---
 
 ### Overlap-save context is for *chunks*, not for VAD slices (issue #114)
