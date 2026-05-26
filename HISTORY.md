@@ -6,6 +6,48 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-05-26 (parakeet streamed-chunk default fix) per-model heuristic via vocab_size
+
+The multi-backend long-form comparison in PERFORMANCE.md (commit `b8588bc5`) flagged parakeet truncating on the EN FLEURS 60 s clip — only 217 chars (~25 % coverage), missing 4 of 6 sentences. Other backends covered the same audio cleanly: voxtral 826 chars, cohere 864, canary 735. This was supposed to be the streamed path's home-court advantage (we made it the default in `33f9a162` precisely to fix the issue #89 truncation pattern). Instead parakeet was the worst on real long-form en.
+
+User direction: "fix parakeet methodically" + "you cannot trust however what is in learnings".
+
+**Methodical sweep** on the new fixtures (`audio_samples/{en,de}/fleurs_{60,300}s.wav` mirrored from VPS, plus `long-clips/yt_60s.wav`) with `CRISPASR_PARAKEET_STREAM_CHUNK=N` overriding the c=8 default:
+
+| model | audio | c=8 | c=15 | c=20 | c=30 | c=40 |
+|---|---|---|---|---|---|---|
+| v3 (vocab=8192) | EN 60s | 186 | 159 | 362 | 519 | **800** |
+| v3 (vocab=8192) | EN 300s | 492 | 1034 | **1703** | 1549 | 1561 |
+| v3 (vocab=8192) | DE 60s | 502 | **709** | 581 | 678 | 520 |
+| v3 (vocab=8192) | DE 300s | 2496 | 2806 | 2993 | **3063** | 2944 |
+| ja (vocab=3072) | JA 60s | **1674** | — | 907 | 507 | 363 |
+
+**Finding.** The `c=8` default that ships well for the JA-only parakeet model **collapses on the multilingual v3 model** — EN 60s drops to 23 % of the c=40 max. The JA model has the OPPOSITE preference: smaller chunks work better. So one single default can't be right for all variants.
+
+**Fix (`e1904a1e`).** Per-model chunk default keyed off `vocab_size` in both `parakeet_transcribe_streamed` and `parakeet_transcribe_chunked`:
+- `vocab_size < 4000` (JA-only, vocab=3072) → c=8 (preserved)
+- `vocab_size >= 4000` (multilingual / v3, vocab=8192) → c=30
+
+Threshold of 4000 cleanly separates the two known variants. Backend wrapper at `crispasr_backend_parakeet.cpp` now passes `chunk=0` (sentinel for "let the C library pick") instead of the hard-coded 8. `CRISPASR_PARAKEET_STREAM_CHUNK=N` env override still wins.
+
+**Regression matrix after the fix:**
+
+| case | before | after | Δ |
+|---|---|---|---|
+| v3 + EN 60s | 186 | **520** | +180 % |
+| v3 + DE 60s | 502 | 679 | +35 % |
+| v3 + EN 300s | 492 | **1550** | +215 % |
+| v3 + DE 300s | 2496 | 3064 | +23 % |
+| ja + JA 60s | 1674 | 1674 | unchanged (preserved) |
+
+**Root-cause correction (`ffd708bb`).** The LEARNINGS § "Independent-chunk TDT decode" section described decoder cold-start as the dominant failure mode. That diagnosis was right for `parakeet_transcribe_chunked` (independent per-chunk decodes) but wrong for the currently-shipping `parakeet_transcribe_streamed` (one decode over the concatenated encoder output, no per-chunk decoder reset). What actually fails in streamed: the Conformer encoder's bidirectional attention needs roughly its training-distribution context window (~30 s) to produce features the TDT decoder recognises as in-distribution. With 8 s chunks the per-feature statistics shift enough — even though the mel z-norm is global — that the TDT decoder emits a much sparser token path. The user's "don't trust learnings" directive was load-bearing: I would have gone looking for a decoder-state bug if I'd taken the section at face value, and the bug isn't there.
+
+**Methodology trail.** (1) Reproduce streamed-vs-forced-single-pass — both 217, so it's not the streaming branch itself. (2) Try `--vad` (313 chars), confirms the audio + model are fine. (3) Chunk-size sweep — c=8 → 186, c=40 → 800 on EN 60s — chunk size dominates. (4) Cross-check on JA model + JA audio — c=8 → 1674 (best), c=30 → 507 (worse) — opposite preference, must be per-model. (5) Diff hparams between v3 and JA — `vocab_size` 8192 vs 3072, clean discriminator. (6) Implement + verify across the 5-fixture matrix. (7) Correct LEARNINGS.
+
+**Lesson banked in LEARNINGS** § Correction 2026-05-26: don't generalize a failure-mode diagnosis from one decoder-decode shape to another. Streamed vs chunked is a decoder-axis distinction that matters here; we have *both* code paths and *both* are documented under "Independent-chunk TDT decode" because they shared the same external symptom (sparse interior output) — but the mechanism differs and the fix differs.
+
+---
+
 ## 2026-05-26 (P114-P3 word-snap + streaming-pattern design notes)
 
 `935ffbee` lands the word-snap heuristic for canary streamed dedup, the
