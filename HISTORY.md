@@ -6,6 +6,32 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-05-26 v0.6.11 RELEASE (cut at commit `b77a74eb`)
+
+Tagged 2026-05-26 after 146 commits since v0.6.10 (2026-05-23). Full
+user-facing notes at [`RELEASE_NOTES_v0.6.11.md`](RELEASE_NOTES_v0.6.11.md);
+the per-fix HISTORY entries below have the engineering depth.
+
+**Headline themes:**
+
+- Long-form transcription 2-7× better across parakeet / canary / voxtral / cohere — see PLAN #114 and the option matrix in PERFORMANCE.md.
+- Issue [#125](https://github.com/CrispStrobe/CrispASR/issues/125) fix train: 8 backend bugs from @montvid (firered-asr / funasr / omniasr-llm / gemma4-e2b / mimo-asr / kyutai-stt ×2 / mimo-asr scheduler P0).
+- Chatterbox TTS GPU path finally intelligible on M1 Metal — PLAN #83 R9 #5 sched `parallel=true` fix.
+- New CLI: `--hf-repo OWNER/REPO[:FILE]` (issue [#128](https://github.com/CrispStrobe/CrispASR/issues/128)) for llama-server-style HuggingFace model fetching.
+- Five new model ports: SenseVoiceSmall, Paraformer-zh, FunASR family (nano + mlt-nano), Parakeet-RNNT 0.6b + 1.1b.
+- Infrastructure: Kaggle rebake pipeline (4 new parakeet refs published), overlap-save A/B harness, local audio fixture mirror, CI cleanup (AVX512 + arm64 native runners).
+
+**Breaking / behavioural changes**, all listed in the release notes — most-visible: canary refuses unsupported languages cleanly, parakeet auto-chunks past 30 s by default, gemma4-e2b / firered-asr refuse too-long inputs with clear errors.
+
+**Methodological discipline** that proved load-bearing this cycle:
+
+- Don't trust LEARNINGS unconditionally — the parakeet streamed-path failure was originally diagnosed as decoder cold-start; empirical chunk-size sweep proved the bottleneck is encoder context. Lesson banked at LEARNINGS § Correction 2026-05-26.
+- "A CUDA-shaped grep can miss the generic scheduler when an unrelated patch touches it" — the mimo-asr Blackwell P0 was reporter-bisected to a fully `#ifdef`-guarded-OFF FA-mask patch; the real culprit was `ggml-backend.cpp` sched src-mutation log not restoring on early-error compute returns.
+
+Tag: `v0.6.11`. The next cycle (v0.6.12) opens with the Kaggle granite/omniasr chunk-context audit pending and the canary `canary_transcribe_streamed` polish stack stable.
+
+---
+
 ## 2026-05-26 (parakeet drop CAP_INTERNAL_CHUNKING) dispatcher chunk-30 + LCS becomes the default for long audio
 
 After the per-model chunk-size fix `e1904a1e`, the user asked: "should we just make per-model defaults? we can NOT expect users to consult a matrix beforehand and then finetune each cli option." Right.

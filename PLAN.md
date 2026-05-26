@@ -3,7 +3,9 @@
 Pending roadmap items. Each is self-contained with files, approach, and
 effort estimate. Completed items have been moved to `HISTORY.md`.
 
-**Current state (May 2026, v0.6.2):** 20 ASR + 3 TTS + 1 speaker-verification backends (+ Chatterbox T3 in progress), unified CLI,
+**Latest release: v0.6.11** (2026-05-26, commit `b77a74eb`). 146 commits since v0.6.10 — long-form transcription overhaul (#114), issue [#125](https://github.com/CrispStrobe/CrispASR/issues/125) fix train, chatterbox GPU path final fix, `--hf-repo` flag (#128), five new model ports. Full notes in [`RELEASE_NOTES_v0.6.11.md`](RELEASE_NOTES_v0.6.11.md).
+
+**Current state (May 2026, v0.6.11):** 20 ASR + 3 TTS + 1 speaker-verification backends (+ Chatterbox T3 in progress), unified CLI,
 OpenAI-compatible server + WebSocket streaming, shared `src/core/` library, FireRedPunc
 post-processor, C-ABI + Go/Java/Ruby/JS/Python/Dart bindings, CI on 6 platforms.
 All backends support `-m auto --auto-download`. Three new ggml ops
