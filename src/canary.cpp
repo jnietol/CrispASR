@@ -42,6 +42,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <set>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1646,6 +1647,21 @@ static canary_result* canary_finish_from_encoder(canary_context* ctx, const floa
         return nullptr;
     offset = (int)prompt.size();
 
+    // PLAN #114 P3 polish — degenerate-loop guard. The AED has no
+    // repetition penalty; on out-of-distribution audio (or a chunk
+    // boundary where the encoder embeddings collapse) the decoder can
+    // lock on a short cycle and emit ~100+ copies before <eos>. Funasr
+    // (PLAN #125 P1) had a single-id repeat (`!`); canary's BPE often
+    // emits a two-token cycle like `▁yeah` + `,` alternating, so the
+    // funasr-style consecutive-id guard misses it. Detect by
+    // small-vocabulary window: if the last kWindow generated tokens
+    // contain ≤ kMaxDistinct distinct ids, the decoder is in a loop.
+    // Window/threshold picked so normal speech (~25-30 unique ids per
+    // 40-token window) stays well above the trigger and degenerate
+    // 1/2/3-cycles all fire.
+    constexpr int kWindow = 40;
+    constexpr int kMaxDistinct = 3;
+
     for (int step = 0; step < max_steps && offset < max_ctx - 1; step++) {
         // Argmax (default) or temperature sample
         int best = 0;
@@ -1687,6 +1703,28 @@ static canary_result* canary_finish_from_encoder(canary_context* ctx, const floa
         }
         if (best == eos)
             break;
+
+        // Degenerate-loop guard: count distinct ids in the last
+        // kWindow generated tokens (including this one). Cheap O(W)
+        // per step on a fixed-size window — for kWindow=40 that's
+        // ~40 comparisons per step, negligible next to the decoder
+        // forward.
+        if ((int)generated.size() >= (int)prompt.size() + kWindow) {
+            const int start = (int)generated.size() - kWindow + 1;
+            std::set<int> distinct;
+            for (int i = start; i < (int)generated.size(); i++)
+                distinct.insert(generated[(size_t)i]);
+            distinct.insert(best);
+            if ((int)distinct.size() <= kMaxDistinct) {
+                if (ctx->params.verbosity >= 1) {
+                    fprintf(stderr,
+                            "canary: greedy decode degenerated (%d distinct ids in last %d tokens). "
+                            "Aborting at step %d.\n",
+                            (int)distinct.size(), kWindow, step);
+                }
+                break;
+            }
+        }
 
         // Softmax probability of the picked token. Numerically stable:
         // subtract the max log-prob before exponentiating.
