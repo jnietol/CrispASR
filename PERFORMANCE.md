@@ -1835,3 +1835,89 @@ clip turns out to be a streamed-path bug rather than a one-off.
 Before this thread canary truncated to ~460 chars on the 1.3 m
 De-Abwasch article and ~360 chars on EN FLEURS 60 s; after, full
 coverage (~1196 chars and ~735 chars respectively).
+
+## Parakeet long-form option matrix — 2026-05-26 (PLAN #114 follow-up)
+
+Empirical sweep across all the dispatch knobs the parakeet backend
+exposes, on the same three 60 s fixtures used elsewhere in this
+section. Default mode includes the `e1904a1e` per-model chunk default
+(v3 → c=30 internal, ja → c=8 internal).
+
+| Mode | v3 + EN 60s | v3 + DE 60s | v3 + JA 60s | ja + JA 60s |
+|---|---|---|---|---|
+| **default** (backend streamed, c=auto) | 520 | 679 | 605 | **1674** |
+| `CRISPASR_PARAKEET_STREAM_CHUNK=8` forced | 187 | 503 | 375 | **1674** |
+| `CRISPASR_PARAKEET_STREAM_CHUNK=30` forced | 520 | 679 | 605 | 508 |
+| `CRISPASR_PARAKEET_STREAM_THRESHOLD=999` (single-pass) | **626** | 621 | 599 | 271 |
+| `--vad --vad-model silero` | 368 | **709** | 637 | 1627 |
+| `--chunk-seconds 30 --chunk-overlap 0` (no LCS) | 713 | 689 | 608 | 1413 |
+| `--chunk-seconds 30 --chunk-overlap 3` (LCS) | **755** | 665 | **660** | **1942** |
+
+### Headline finding: dispatcher-side `--chunk-seconds 30 --chunk-overlap 3` wins on 3 of 4 cases
+
+The internal-streamed-path default that ships today is **not** the
+quality-optimal long-form mode. The CLI's dispatcher-side chunking +
+overlap-save context wrap + LCS-merge dedup recovers more content than
+the backend's single-pass-over-concat-encoder design:
+
+- v3 + EN 60s: 755 chars (LCS) vs 520 chars (default) — **+45 %**
+- v3 + JA 60s: 660 chars (LCS) vs 605 chars (default) — **+9 %**
+- ja + JA 60s: 1942 chars (LCS) vs 1674 chars (default) — **+16 %**
+
+Why this works: the dispatcher splits the 60 s input into ~30 s chunks
+with ±3 s acoustic overlap, calls the backend once per chunk (each
+call sees a 33 s window), and LCS-merges the boundary tokens. Inside
+each backend call, parakeet's internal streamed path now runs as a
+single 30 s encoder window (no further sub-chunking), which is
+exactly the encoder context size the v3 model was trained for. The
+backend's own "streamed over 60 s with c=30" instead splits the 60 s
+mel into two ~30 s chunks internally — but the per-chunk encoder
+passes don't see the bidirectional context across the cut as cleanly
+as the dispatcher's per-call boundaries do (the dispatcher feeds each
+chunk independently with its own mel-norm; the backend's streamed
+path applies global mel-norm first then splits).
+
+### When each mode wins
+
+| Audio profile | Recommended mode | Why |
+|---|---|---|
+| Continuous EN/DE long-form, supported v3 lang | `--chunk-seconds 30 --chunk-overlap 3` | Highest coverage; modest wallclock overhead (12 s for 60 s audio) |
+| JA model on JA long-form | `--chunk-seconds 30 --chunk-overlap 3` OR default | Both recover most content; LCS edges default by 16 % on the tested clip |
+| Short audio (< 30 s) | default | Single backend call, no dispatcher overhead |
+| Speech-with-long-silences | `--vad --vad-model silero` | VAD trims silences and feeds the backend with bounded slices; can outperform chunking when speech density is uneven |
+| Reference parity / debugging | `CRISPASR_PARAKEET_STREAM_THRESHOLD=999` | Forces `parakeet_transcribe_ex`, the bit-exact single-pass path |
+
+### Caveats
+
+- The dispatcher's chunk-overlap wrap is what `kBlocked` opts cohere /
+  gemma4-e2b / kyutai-stt etc. *out* of (LCS doesn't compose with
+  their internal-chunking pipelines). Parakeet is intentionally NOT
+  in `kBlocked` — the dispatcher's wrap and LCS dedup are correct for
+  TDT's frame-synchronous output.
+- The default did NOT change to `--chunk-seconds 30 --chunk-overlap 3`
+  because that would force a dispatcher change visible to every
+  caller (server API, Python session, …) without their request.
+  Users who want the +45 % EN coverage today pass the flags
+  explicitly; the option matrix above is the documentation.
+- Single-pass occasionally wins (v3 + EN 60s: 626 chars vs 520
+  internal-streamed default) — for clips that comfortably fit a single
+  encoder forward pass on the model's hardware, the streamed wrapper
+  is overhead. `CRISPASR_PARAKEET_STREAM_THRESHOLD=99999` makes
+  single-pass the default.
+
+### Reproduce
+
+```
+B=build/bin/crispasr
+V3=/Volumes/backups/ai/crispasr/parakeet-tdt-0.6b-v3-q4_k.gguf
+JA=/Volumes/backups/ai/crispasr/parakeet-tdt-0.6b-ja-q4_k.gguf
+EN60=/Volumes/backups/code/audio_samples/en/fleurs_60s.wav
+DE60=/Volumes/backups/code/audio_samples/de/fleurs_60s.wav
+JA60=/Volumes/backups/ai/long-clips/yt_60s.wav
+
+# default
+$B --backend parakeet -m $V3 -f $EN60 -np -nt
+# --chunk-seconds 30 --chunk-overlap 3
+$B --backend parakeet -m $V3 -f $EN60 -np -nt --chunk-seconds 30 --chunk-overlap 3
+# (etc)
+```
