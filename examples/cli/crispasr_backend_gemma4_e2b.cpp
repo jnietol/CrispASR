@@ -65,6 +65,21 @@ public:
         if (!ctx_)
             return out;
 
+        // PLAN #125 P4: gemma4-e2b is trained on ~30 s windows. Beyond
+        // that the encoder embeddings collapse and the LM hits <eos>
+        // immediately after the prompt, then continues autoregressively
+        // into unrelated commentary (issue #125 report 02). Refuse
+        // silently-wrong long inputs with a clear error so the user
+        // routes via --vad or a chunking wrapper instead.
+        constexpr int kMaxSamples = 30 * 16000;
+        if (n_samples > kMaxSamples) {
+            fprintf(stderr,
+                    "crispasr[gemma4-e2b]: input is %.1f s (> %.0f s training window). "
+                    "Use --vad to segment, or chunk externally. Aborting this slice.\n",
+                    (double)n_samples / 16000.0, (double)kMaxSamples / 16000.0);
+            return out;
+        }
+
         const std::string src =
             !params.source_lang.empty() ? params.source_lang : (!params.language.empty() ? params.language : "");
         const std::string tgt = !params.target_lang.empty() ? params.target_lang : std::string("en");
