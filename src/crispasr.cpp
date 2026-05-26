@@ -6203,19 +6203,17 @@ struct whisper_full_params* whisper_full_default_params_by_ref(enum whisper_samp
 // and forwards to the canonical by-value entry point, so the upstream
 // implementation stays untouched.
 struct whisper_context* whisper_init_from_file_with_params_by_ref(const char* path_model,
-                                                                   struct whisper_context_params* params) {
+                                                                  struct whisper_context_params* params) {
     return whisper_init_from_file_with_params(path_model, *params);
 }
 
 struct whisper_context* whisper_init_from_file_with_params_no_state_by_ref(const char* path_model,
-                                                                            struct whisper_context_params* params) {
+                                                                           struct whisper_context_params* params) {
     return whisper_init_from_file_with_params_no_state(path_model, *params);
 }
 
-int whisper_full_by_ref(struct whisper_context* ctx,
-                         struct whisper_full_params* params,
-                         const float* samples,
-                         int n_samples) {
+int whisper_full_by_ref(struct whisper_context* ctx, struct whisper_full_params* params, const float* samples,
+                        int n_samples) {
     return whisper_full(ctx, *params, samples, n_samples);
 }
 

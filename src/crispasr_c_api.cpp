@@ -3378,9 +3378,7 @@ static crispasr_session_result* transcribe_single(crispasr_session* s, const flo
         char* text = nullptr;
         bool need_free = true;
 #ifdef CA_HAVE_GRANITE_NLE
-        if (!text &&
-            (s->backend == "granite-4.1-nar" || s->backend == "granite-nle" ||
-                s->backend == "granite_nle") &&
+        if (!text && (s->backend == "granite-4.1-nar" || s->backend == "granite-nle" || s->backend == "granite_nle") &&
             s->granite_nle_ctx) {
             // granite_nle_transcribe is the single high-level entry point —
             // returns malloc'd UTF-8, caller frees. Token-prob accessors
