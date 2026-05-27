@@ -1859,10 +1859,32 @@ class CrispasrSession {
     final fn = lib.lookupFunction<
         Int32 Function(Pointer<Utf8>, Int32),
         int Function(Pointer<Utf8>, int)>('crispasr_session_available_backends');
-    final buf = calloc<Uint8>(256);
+    // Two-call protocol: first call with a probe buffer reads the
+    // full list length from the return value, then re-allocate at
+    // (length+1) bytes so trailing entries don't get cut off. The
+    // hard-coded 256-byte buffer that used to live here truncated
+    // the list at "omn" once CrispASR crossed ~30 backends — every
+    // entry past that point silently disappeared, and CrisperWeaver's
+    // front-door check rejected models whose backend happened to fall
+    // off the cliff (#7 second wave: moonshine / mimo-asr /
+    // omniasr-llm-unlimited all reported as missing).
+    const probeCap = 256;
+    final probe = calloc<Uint8>(probeCap);
+    int needed;
+    try {
+      needed = fn(probe.cast<Utf8>(), probeCap);
+    } finally {
+      calloc.free(probe);
+    }
+    if (needed <= 0) return const <String>[];
+    // Round up generously — `needed` is the list size at the moment
+    // of the probe; another thread might extend the list before the
+    // second call (unlikely in practice but cheap to guard).
+    final cap = needed + 64;
+    final buf = calloc<Uint8>(cap);
     try {
       final ptr = buf.cast<Utf8>();
-      fn(ptr, 256);
+      fn(ptr, cap);
       final csv = ptr.toDartString();
       return csv.isEmpty
           ? const <String>[]
