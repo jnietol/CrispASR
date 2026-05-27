@@ -552,10 +552,21 @@ work in 4 phases**.
     is NOT directly reusable (chatterbox-specific tensor lookups
     baked into time-MLP path); the Euler loop will be re-implemented
     locally for cosyvoice3 in 3d.
-  - **3b — AdaLN-Zero modulation + per-block DiT forward — open.**
-    Per-block γ₁/β₁/gate₁/γ₂/β₂/gate₂ from `time_mlp(t)`'s 6×dim
-    output. Apply: `x = x + gate · MHA(LN(x)·(1+γ) + β)` and same
-    for FFN. NEOX RoPE inside MHA (head_dim=64).
+  - **3b (2026-05-27): AdaLN-Zero modulation + per-block DiT forward — landed.**
+    Per-block `(shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp,
+    gate_mlp) = chunk(linear(silu(t_emb)), 6)`, then
+    `x = x + gate_msa · MHA(LN(x)·(1+scale_msa) + shift_msa)` (and FFN
+    analogously). LayerNorm is affine-free; FFN is Linear → GELU(tanh)
+    → Linear; **RoPE is x_transformers-style partial — rotates only
+    `head_dim` channels of the pre-reshape 1024-dim Q/K**, which
+    corresponds to head 0 (heads 1..15 carry no positional info).
+    Mode is `GGML_ROPE_TYPE_NORMAL` (adjacent pairs), θ=10000. Wired
+    into `cosyvoice3_tts_extract_stage` as
+    `flow_dit_blk_<N>_{lnx_a,h_a,attn,xattn,ff,out}` and exercised
+    through the unified `crispasr-diff cosyvoice3-tts` pipeline.
+    Block-0 and block-21 diff against piecewise PyTorch reconstruction
+    of `DiTBlock.forward` both PASS at cos_min ≥ 0.999994, max|Δ| ≤
+    0.156 (well under the established F16 weight floor of ~0.08%).
   - **3c — pre-lookahead conv + input pipeline — open.**
     Pre-lookahead causal conv (k=4 then k=3, 3-frame future window).
     Concat [pre_la, spk_affine(spk_emb), 0-cond] → (T_tok, 320).

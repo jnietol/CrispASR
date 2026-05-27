@@ -210,6 +210,11 @@ REGISTERED_BACKENDS: Dict[str, str] = {
     # model_dir = openbmb/VoxCPM2 HF snapshot. Audio arg = reference WAV
     # for voice cloning (optional). Synth text from VOXCPM2_SYN_TEXT env.
     "voxcpm2-tts": "reference_backends.voxcpm2_tts",
+    # CosyVoice3 TTS — Phase 3b: single-DiT-block stages only (flow
+    # model is the only thing wired through extract_stage so far).
+    # model_dir = FunAudioLLM/Fun-CosyVoice3-0.5B-2512 HF snapshot.
+    # Audio arg is unused (the per-block test vector is seeded random).
+    "cosyvoice3-tts": "reference_backends.cosyvoice3_tts",
 }
 
 DEFAULT_STAGES_BY_BACKEND: Dict[str, List[str]] = {}  # populated at import

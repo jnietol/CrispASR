@@ -65,6 +65,7 @@
 #include "funasr.h"
 #include "paraformer.h"
 #include "sensevoice.h"
+#include "cosyvoice3_tts.h"
 
 #include "common-crispasr.h"
 
@@ -3751,12 +3752,102 @@ int main(int argc, char** argv) {
             free(buf);
         }
         sensevoice_free(ctx);
+    } else if (backend_name == "cosyvoice3-tts") {
+        // CosyVoice3 Phase 3b — single-DiT-block diff. model_path is the
+        // LLM GGUF (needed to construct the context + scheduler); the
+        // flow GGUF is found alongside (s/llm/flow/) or via CV3_FLOW_GGUF.
+        auto cp = cosyvoice3_tts_context_default_params();
+        cp.n_threads = 4;
+        cp.verbosity = 0;
+        cp.use_gpu = false;
+        cosyvoice3_tts_context* ctx = cosyvoice3_tts_init_from_file(model_path.c_str(), cp);
+        if (!ctx) {
+            fprintf(stderr, "failed to load cosyvoice3-tts LLM gguf '%s'\n", model_path.c_str());
+            return 4;
+        }
+        std::string flow_path;
+        if (const char* env = std::getenv("CV3_FLOW_GGUF"); env && *env) {
+            flow_path = env;
+        } else {
+            flow_path = model_path;
+            const auto p = flow_path.find("llm");
+            if (p != std::string::npos)
+                flow_path.replace(p, 3, "flow");
+        }
+        if (cosyvoice3_tts_init_flow_from_file(ctx, flow_path.c_str()) != 0) {
+            fprintf(stderr, "failed to load cosyvoice3 flow gguf '%s' (set CV3_FLOW_GGUF to override)\n",
+                    flow_path.c_str());
+            cosyvoice3_tts_free(ctx);
+            return 4;
+        }
+
+        uint32_t dit_dim = 0;
+        cosyvoice3_tts_get_flow_hparams(ctx, nullptr, &dit_dim, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                                        nullptr, nullptr, nullptr);
+        if (dit_dim == 0) {
+            fprintf(stderr, "flow hparams missing\n");
+            cosyvoice3_tts_free(ctx);
+            return 4;
+        }
+
+        // Stage list — block 0 + block 21 per-stage outputs. Inputs
+        // (x_in / t_emb) live in the GGUF archive as separate tensors
+        // and are skipped (no C++ stage to extract).
+        static const int block_ids[] = {0, 21};
+        static const char* suffixes[] = {"lnx_a", "h_a", "attn", "xattn", "ff", "out"};
+        for (int bid : block_ids) {
+            char name_buf[64];
+            std::snprintf(name_buf, sizeof(name_buf), "flow_dit_blk_%d_x_in", bid);
+            auto x_pair = ref.get_f32(name_buf);
+            std::snprintf(name_buf, sizeof(name_buf), "flow_dit_blk_%d_t_emb", bid);
+            auto t_pair = ref.get_f32(name_buf);
+            if (!x_pair.first || !t_pair.first) {
+                fprintf(stderr, "ref archive missing inputs for block %d (x_in or t_emb)\n", bid);
+                continue;
+            }
+            const size_t x_n = x_pair.second;
+            const size_t t_n = t_pair.second;
+            if (t_n != dit_dim) {
+                fprintf(stderr, "block %d t_emb len %zu != dit_dim %u\n", bid, t_n, dit_dim);
+                continue;
+            }
+            if (x_n % dit_dim != 0) {
+                fprintf(stderr, "block %d x_in len %zu not divisible by dit_dim %u\n", bid, x_n, dit_dim);
+                continue;
+            }
+            const int T = (int)(x_n / dit_dim);
+
+            // Pack [x | t_emb] for cosyvoice3_tts_extract_stage.
+            std::vector<float> packed(x_n + t_n);
+            std::memcpy(packed.data(), x_pair.first, x_n * sizeof(float));
+            std::memcpy(packed.data() + x_n, t_pair.first, t_n * sizeof(float));
+
+            for (const char* sfx : suffixes) {
+                std::snprintf(name_buf, sizeof(name_buf), "flow_dit_blk_%d_%s", bid, sfx);
+                int n_out = 0;
+                float* buf = cosyvoice3_tts_extract_stage(ctx, name_buf, /*ids*/ nullptr, /*n_ids*/ 0, packed.data(),
+                                                          /*n_embed_tokens*/ T, &n_out);
+                if (!buf || n_out <= 0) {
+                    printf("[SKIP] %-30s  cosyvoice3_tts_extract_stage returned no data\n", name_buf);
+                    if (buf)
+                        free(buf);
+                    n_skip++;
+                    continue;
+                }
+                auto rep = ref.compare(name_buf, buf, (size_t)n_out);
+                print_row(name_buf, rep, COS_THRESHOLD);
+                record(rep);
+                free(buf);
+            }
+        }
+        cosyvoice3_tts_free(ctx);
     } else {
         fprintf(stderr,
                 "crispasr-diff: backend '%s' is not recognised. "
                 "Supported: voxtral, voxtral4b, qwen3, qwen3-tts, qwen3-tts-codec, kokoro, granite, granite-4.1, "
                 "granite-nle, parakeet, canary, cohere, gemma4, mimo-tokenizer, mimo-asr, orpheus, moonshine, "
-                "moonshine-streaming, lid-cld3, glm-asr, firered-asr, voxcpm2-tts, funasr, paraformer, sensevoice.\n",
+                "moonshine-streaming, lid-cld3, glm-asr, firered-asr, voxcpm2-tts, funasr, paraformer, sensevoice, "
+                "cosyvoice3-tts.\n",
                 backend_name.c_str());
         return 5;
     }

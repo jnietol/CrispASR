@@ -26,16 +26,16 @@ struct cosyvoice3_tts_context;
 
 struct cosyvoice3_tts_context_params {
     int n_threads;
-    int verbosity;       // 0=silent 1=normal 2=verbose
+    int verbosity; // 0=silent 1=normal 2=verbose
     bool use_gpu;
     bool flash_attn;
-    float temperature;   // 0 = greedy
-    uint64_t seed;       // RNG seed; 0 = use default 42
-    int max_tokens;      // upper bound on AR decode steps; 0 = use built-in default (1500)
-    int ras_top_k;       // RAS sampler top-k (default 25; 0 → use default)
-    float ras_top_p;     // RAS sampler top-p (default 0.8f; 0 → use default)
-    int ras_win_size;    // RAS repetition window (default 10; 0 → use default)
-    float ras_tau_r;     // RAS repetition threshold (default 0.1f)
+    float temperature; // 0 = greedy
+    uint64_t seed;     // RNG seed; 0 = use default 42
+    int max_tokens;    // upper bound on AR decode steps; 0 = use built-in default (1500)
+    int ras_top_k;     // RAS sampler top-k (default 25; 0 → use default)
+    float ras_top_p;   // RAS sampler top-p (default 0.8f; 0 → use default)
+    int ras_win_size;  // RAS repetition window (default 10; 0 → use default)
+    float ras_tau_r;   // RAS repetition threshold (default 0.1f)
 };
 
 struct cosyvoice3_tts_context_params cosyvoice3_tts_context_default_params(void);
@@ -148,6 +148,20 @@ int cosyvoice3_tts_get_flow_hparams(struct cosyvoice3_tts_context* ctx, uint32_t
                                     uint32_t* dit_input_dim, uint32_t* mel_dim, uint32_t* spk_dim_in,
                                     uint32_t* spk_dim_out, uint32_t* cfm_n_steps, float* cfm_cfg_rate);
 
+// Run ONE DiT block (block_idx in [0, n_dit_layers)) on caller-supplied
+// input. Inputs (row-major):
+//   x      [T, dit_dim]  F32
+//   t_emb  [dit_dim]     F32  — already passed through time_mlp
+// Returns malloc'd float[T * dit_dim] (caller frees with free()). The
+// per-block AdaLN-Zero linear (silu(t_emb) → 6×dit_dim chunked into
+// shift/scale/gate × {attn, ffn}) is applied inside; LayerNorm is
+// affine-free, bidirectional MHA uses RoPE θ=10000, FFN is plain
+// Linear→GELU(tanh)→Linear with no GLU gating. Diff stage for
+// verifying one block against PyTorch before wiring up the 22-block
+// stack.
+float* cosyvoice3_tts_run_flow_dit_block(struct cosyvoice3_tts_context* ctx, int block_idx, const float* x, int T,
+                                         const float* t_emb);
+
 // Diff-harness stage extractor. Returns malloc'd float[*out_n].
 // Phase 2 supports:
 //   "lm_step0_logits"   — single-step logits after prefilling on
@@ -158,6 +172,14 @@ int cosyvoice3_tts_get_flow_hparams(struct cosyvoice3_tts_context* ctx, uint32_t
 // Phase 3 (partial):
 //   "flow_inventory"    — returns sentinel buffer; verifies flow GGUF
 //                          is loaded and binds.
+//   "flow_dit_blk_<N>_out"
+//   "flow_dit_blk_<N>_{lnx_a,h_a,attn,xattn,ff}"
+//                       — single-block forward (block N) or per-stage
+//                          intermediate. `embeds_in` packs [x | t_emb]:
+//                          first n_embed_tokens*dit_dim floats are x
+//                          [T, dit_dim], next dit_dim floats are t_emb
+//                          (post time_mlp). Returns malloc'd
+//                          float[T*dit_dim].
 float* cosyvoice3_tts_extract_stage(struct cosyvoice3_tts_context* ctx, const char* stage_name, const int32_t* ids,
                                     int n_ids, const float* embeds_in, int n_embed_tokens, int* out_n);
 

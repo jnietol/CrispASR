@@ -172,6 +172,7 @@ target_link_libraries(crispasr-diff PRIVATE
     funasr
     paraformer
     sensevoice
+    cosyvoice3_tts
     crispasr-diff-lib
     ${FFMPEG_LIBRARIES}
     ${CMAKE_THREAD_LIBS_INIT}

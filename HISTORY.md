@@ -6,6 +6,71 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-05-27 cosyvoice3: Phase 3b — AdaLN-Zero DiT block forward (cos=1.0)
+
+Per-block DiT forward for the 22-block estimator in the
+cosyvoice3-flow GGUF. Validates against upstream PyTorch (FunAudioLLM/
+CosyVoice `flow/DiT/modules.py::DiTBlock`) on a seeded fixture
+(T=8, dim=1024, t=0.5) at every intermediate stage of block 0 and
+block 21.
+
+Built `cv3_build_flow_dit_block_graph` (~80 LOC) +
+`cosyvoice3_tts_run_flow_dit_block` (public API) +
+`cv3_extract_flow_dit_stage` (private; drives the same graph for
+intermediate outputs) + new `flow_dit_blk_<N>_{lnx_a,h_a,attn,xattn,
+ff,out}` stages in `cosyvoice3_tts_extract_stage`. Wired into
+`crispasr-diff` via a new `cosyvoice3-tts` backend block; the Python
+side gets a `dump()` entry in `tools/reference_backends/cosyvoice3_tts.py`
+registered in `tools/dump_reference.py` REGISTERED_BACKENDS, so the
+diff goes through the unified GGUF-archive pipeline like every other
+backend.
+
+Five corrections vs the original handover prompt, all verified against
+the upstream source:
+
+1. AdaLN-Zero chunk order is **(shift_msa, scale_msa, gate_msa,
+   shift_mlp, scale_mlp, gate_mlp)** — not the prompt's
+   "(scale, gate, shift) × 2". Upstream `AdaLayerNormZero.forward`
+   line 241: `torch.chunk(emb, 6, dim=1)` returns shift first.
+2. SiLU is applied to `t_emb` **before** the AdaLN linear, not after:
+   `emb = self.linear(self.silu(emb))`.
+3. Both norms (`AdaLayerNormZero.norm` and `DiTBlock.ff_norm`) are
+   `nn.LayerNorm(elementwise_affine=False, eps=1e-6)` — plain
+   layer norm without learned affine, **not RMSNorm**. Use
+   `ggml_norm`.
+4. FFN is `Linear → GELU(approximate="tanh") → Linear`. No SiLU, no
+   GLU gating. `ggml_gelu` already uses the tanh approximation.
+5. RoPE — biggest gotcha. Upstream's `AttnProcessor` calls
+   `apply_rotary_pos_emb` on the **pre-reshape** Q/K (shape
+   `(B, T, n_h*hd) = (B, T, 1024)`) with `rot_dim = head_dim = 64`.
+   The x_transformers helper does `t[..., :rot_dim]` + `t[..., rot_dim:]`
+   and only rotates the first 64 channels — which is **head 0**.
+   Heads 1..15 carry no positional info. Mode is x_transformers'
+   adjacent-pair rotation = ggml `GGML_ROPE_TYPE_NORMAL` (NOT NEOX),
+   θ=10000. Match in C++ by reshaping Q/K to `(d, 1, T)` and ropeing
+   with `n_dims=hd` so only the first 64 channels rotate, then
+   reshape into per-head layout for flash-attn.
+
+Per-stage diff result (`crispasr-diff cosyvoice3-tts ... cv3-flow-dit-ref.gguf`):
+
+  flow_dit_blk_0_lnx_a   cos=1.000000  max|Δ|=2.4e-07
+  flow_dit_blk_0_h_a     cos=1.000000  max|Δ|=6.9e-04
+  flow_dit_blk_0_attn    cos=0.999994  max|Δ|=2.7e-02
+  flow_dit_blk_0_xattn   cos=0.999997  max|Δ|=2.7e-02
+  flow_dit_blk_0_ff      cos=0.999997  max|Δ|=7.0e-02
+  flow_dit_blk_0_out     cos=0.999994  max|Δ|=1.6e-01
+  flow_dit_blk_21_attn   cos=0.999999  max|Δ|=1.6e-02
+  flow_dit_blk_21_out    cos=0.999997  max|Δ|=8.7e-02
+
+12/12 stages PASS at cos_min ≥ 0.999 (threshold). Max relative diff
+0.04% on the final block-21 output — comfortably under the F16
+weight floor (~0.08%) established in Phase 2 calibration.
+
+Remaining Phase 3 work: 3c pre-lookahead conv + input pipeline,
+3d local CFM Euler ODE + mel output, 3e end-to-end mel diff.
+
+---
+
 ## 2026-05-27 cosyvoice3: Phase 3a — flow loader + DiT block scaffold
 
 Extends `src/cosyvoice3_tts.{h,cpp}` with Phase 3 flow-side support:

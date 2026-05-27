@@ -77,11 +77,11 @@ struct cv3_qwen2_block {
 };
 
 struct cv3_lm {
-    ggml_tensor* token_embd_w = nullptr;      // [d_model, text_vocab]
-    ggml_tensor* output_norm_w = nullptr;     // [d_model]
-    ggml_tensor* text_output_w = nullptr;     // [d_model, text_vocab] (unused in speech AR)
-    ggml_tensor* speech_embd_w = nullptr;     // [d_model, speech_vocab]
-    ggml_tensor* speech_lm_head_w = nullptr;  // [d_model, speech_vocab]
+    ggml_tensor* token_embd_w = nullptr;     // [d_model, text_vocab]
+    ggml_tensor* output_norm_w = nullptr;    // [d_model]
+    ggml_tensor* text_output_w = nullptr;    // [d_model, text_vocab] (unused in speech AR)
+    ggml_tensor* speech_embd_w = nullptr;    // [d_model, speech_vocab]
+    ggml_tensor* speech_lm_head_w = nullptr; // [d_model, speech_vocab]
     std::vector<cv3_qwen2_block> blocks;
 };
 
@@ -137,21 +137,21 @@ struct cv3_flow {
     ggml_tensor* input_embd_w = nullptr; // (mel_dim=80, speech_codebook=6561)
     ggml_tensor* pre_la_c1_w = nullptr;  // (K=4, 80, 1024) ggml ne
     ggml_tensor* pre_la_c1_b = nullptr;
-    ggml_tensor* pre_la_c2_w = nullptr;  // (K=3, 1024, 80)
+    ggml_tensor* pre_la_c2_w = nullptr; // (K=3, 1024, 80)
     ggml_tensor* pre_la_c2_b = nullptr;
     ggml_tensor* spk_affine_w = nullptr; // (spk_dim_in=192, spk_dim_out=80)
     ggml_tensor* spk_affine_b = nullptr;
 
     // DiT input / time / position / output
-    ggml_tensor* dit_in_proj_w = nullptr;     // (320, 1024)
+    ggml_tensor* dit_in_proj_w = nullptr; // (320, 1024)
     ggml_tensor* dit_in_proj_b = nullptr;
     ggml_tensor* dit_conv_pos_c1_w = nullptr; // grouped conv1d-31 (K, in_per_grp, out)
     ggml_tensor* dit_conv_pos_c1_b = nullptr;
     ggml_tensor* dit_conv_pos_c2_w = nullptr;
     ggml_tensor* dit_conv_pos_c2_b = nullptr;
-    ggml_tensor* dit_time_mlp_0_w = nullptr;  // (256, 1024)
+    ggml_tensor* dit_time_mlp_0_w = nullptr; // (256, 1024)
     ggml_tensor* dit_time_mlp_0_b = nullptr;
-    ggml_tensor* dit_time_mlp_2_w = nullptr;  // (1024, 1024)
+    ggml_tensor* dit_time_mlp_2_w = nullptr; // (1024, 1024)
     ggml_tensor* dit_time_mlp_2_b = nullptr;
     ggml_tensor* dit_rope_inv_freq = nullptr; // (head_dim/2,)
     ggml_tensor* dit_norm_out_w = nullptr;
@@ -256,8 +256,7 @@ bool cv3_kv_init(cosyvoice3_tts_context* ctx, int max_ctx) {
     ggml_backend_buffer_clear(ctx->kv_buf, 0);
     ctx->kv_max_ctx = max_ctx;
     if (ctx->params.verbosity >= 1) {
-        fprintf(stderr,
-                "cosyvoice3_tts: kv cache %d MiB k=%s v=%s (head_dim=%d max_ctx=%d n_kv=%d n_layers=%d)\n",
+        fprintf(stderr, "cosyvoice3_tts: kv cache %d MiB k=%s v=%s (head_dim=%d max_ctx=%d n_kv=%d n_layers=%d)\n",
                 (int)((kbytes + vbytes) / 1048576), ggml_type_name(kv_pair.k), ggml_type_name(kv_pair.v), hd, max_ctx,
                 n_kv, n_lay);
     }
@@ -449,7 +448,7 @@ extern "C" struct cosyvoice3_tts_context_params cosyvoice3_tts_context_default_p
 }
 
 extern "C" struct cosyvoice3_tts_context* cosyvoice3_tts_init_from_file(const char* path_model,
-                                                                       struct cosyvoice3_tts_context_params params) {
+                                                                        struct cosyvoice3_tts_context_params params) {
     auto* ctx = new cosyvoice3_tts_context();
     ctx->params = params;
     ctx->n_threads = params.n_threads > 0 ? params.n_threads : 4;
@@ -670,7 +669,7 @@ extern "C" float* cosyvoice3_tts_embed_speech(struct cosyvoice3_tts_context* ctx
 }
 
 extern "C" float* cosyvoice3_tts_prefill_with_embeds(struct cosyvoice3_tts_context* ctx, const float* embeds,
-                                                    int n_tokens, int n_past) {
+                                                     int n_tokens, int n_past) {
     if (!ctx || !embeds || n_tokens <= 0 || n_past < 0)
         return nullptr;
     const auto& hp = ctx->hp;
@@ -892,8 +891,7 @@ int32_t nucleus_sample(const float* logits, int n_vocab, float top_p, int top_k,
     std::vector<int32_t> idx((size_t)n_vocab);
     for (int i = 0; i < n_vocab; i++)
         idx[i] = i;
-    std::stable_sort(idx.begin(), idx.end(),
-                     [&](int32_t a, int32_t b) { return probs[a] > probs[b]; });
+    std::stable_sort(idx.begin(), idx.end(), [&](int32_t a, int32_t b) { return probs[a] > probs[b]; });
     std::vector<float> kept;
     std::vector<int32_t> kept_ids;
     double cum = 0.0;
@@ -957,16 +955,14 @@ extern "C" int32_t cosyvoice3_tts_sample_ras(struct cosyvoice3_tts_context* ctx,
 }
 
 extern "C" int32_t* cosyvoice3_tts_generate_tokens_from_embeds(struct cosyvoice3_tts_context* ctx, const float* embeds,
-                                                              int n_tokens, int max_tokens, int stop_token_id,
-                                                              int* out_n) {
+                                                               int n_tokens, int max_tokens, int stop_token_id,
+                                                               int* out_n) {
     if (!ctx || !embeds || n_tokens <= 0 || !out_n)
         return nullptr;
     *out_n = 0;
     const auto& hp = ctx->hp;
     const int speech_vocab = (int)hp.speech_vocab;
-    const int max_steps = max_tokens > 0
-                              ? max_tokens
-                              : (ctx->params.max_tokens > 0 ? ctx->params.max_tokens : 1500);
+    const int max_steps = max_tokens > 0 ? max_tokens : (ctx->params.max_tokens > 0 ? ctx->params.max_tokens : 1500);
 
     cosyvoice3_tts_reset_kv(ctx);
     float* logits = cosyvoice3_tts_prefill_with_embeds(ctx, embeds, n_tokens, /*n_past*/ 0);
@@ -1032,9 +1028,16 @@ extern "C" int32_t* cosyvoice3_tts_generate_tokens_from_embeds(struct cosyvoice3
     return arr;
 }
 
+namespace {
+// Forward declaration; definition lives further down in this file (alongside
+// the per-block graph builder it depends on).
+float* cv3_extract_flow_dit_stage(cosyvoice3_tts_context* ctx, int block_idx, const float* x, int T, const float* t_emb,
+                                  const char* tensor_name);
+} // namespace
+
 extern "C" float* cosyvoice3_tts_extract_stage(struct cosyvoice3_tts_context* ctx, const char* stage_name,
-                                              const int32_t* ids, int n_ids, const float* embeds_in,
-                                              int n_embed_tokens, int* out_n) {
+                                               const int32_t* ids, int n_ids, const float* embeds_in,
+                                               int n_embed_tokens, int* out_n) {
     if (!ctx || !stage_name || !out_n)
         return nullptr;
     *out_n = 0;
@@ -1065,6 +1068,62 @@ extern "C" float* cosyvoice3_tts_extract_stage(struct cosyvoice3_tts_context* ct
         if (!out)
             return nullptr;
         *out_n = (int)hp.speech_vocab;
+        return out;
+    }
+    // Flow Phase 3b single-block diff stages:
+    //   "flow_dit_blk_<N>_out"     — final block output  [T, dit_dim] F32
+    //   "flow_dit_blk_<N>_lnx_a"   — LN(x) before modulation
+    //   "flow_dit_blk_<N>_h_a"     — post-modulate, pre-attn
+    //   "flow_dit_blk_<N>_attn"    — attention out (pre-residual)
+    //   "flow_dit_blk_<N>_xattn"   — x + gate_msa * attn_out
+    //   "flow_dit_blk_<N>_ff"      — FFN out (pre-residual)
+    //
+    // `embeds_in` carries the packed [x | t_emb] block: first
+    // n_embed_tokens*dit_dim floats are x [T, dit_dim], remaining dit_dim
+    // floats are t_emb (post time_mlp). The caller computes T from the
+    // ref archive's tensor shape.
+    if (strncmp(stage_name, "flow_dit_blk_", 13) == 0) {
+        if (!ctx->flow.loaded || !embeds_in || n_embed_tokens <= 0)
+            return nullptr;
+        const auto& fh = ctx->flow.hp;
+        const int d = (int)fh.dit_dim;
+        // Parse block index: "flow_dit_blk_<N>_<sfx>". Find the underscore
+        // after the digits.
+        const char* p = stage_name + 13;
+        int block_idx = 0;
+        const char* sfx = p;
+        while (*sfx >= '0' && *sfx <= '9') {
+            block_idx = block_idx * 10 + (*sfx - '0');
+            sfx++;
+        }
+        if (*sfx != '_')
+            return nullptr;
+        sfx++; // past the underscore separating idx from suffix
+        const char* tensor_name = nullptr;
+        if (strcmp(sfx, "out") == 0)
+            tensor_name = "dit_block_out";
+        else if (strcmp(sfx, "lnx_a") == 0)
+            tensor_name = "dbg_lnx_a";
+        else if (strcmp(sfx, "h_a") == 0)
+            tensor_name = "dbg_h_a";
+        else if (strcmp(sfx, "attn") == 0)
+            tensor_name = "dbg_attn_raw";
+        else if (strcmp(sfx, "xattn") == 0)
+            tensor_name = "dbg_x_after_attn";
+        else if (strcmp(sfx, "ff") == 0)
+            tensor_name = "dbg_ff_raw";
+        else {
+            fprintf(stderr, "cosyvoice3_tts: unknown flow_dit_blk stage suffix '%s'\n", sfx);
+            return nullptr;
+        }
+        const int T = n_embed_tokens;
+        // embeds_in layout: T*d floats of x, then d floats of t_emb.
+        const float* x = embeds_in;
+        const float* t_emb = embeds_in + (size_t)T * d;
+        float* out = cv3_extract_flow_dit_stage(ctx, block_idx, x, T, t_emb, tensor_name);
+        if (!out)
+            return nullptr;
+        *out_n = T * d;
         return out;
     }
     if (strcmp(stage_name, "flow_inventory") == 0) {
@@ -1135,8 +1194,7 @@ extern "C" int cosyvoice3_tts_init_flow_from_file(struct cosyvoice3_tts_context*
     fh.token_mel_ratio = cv3_kv_u32(gctx, "cosyvoice3.flow.token_mel_ratio", fh.token_mel_ratio);
     fh.input_frame_rate = cv3_kv_u32(gctx, "cosyvoice3.flow.input_frame_rate", fh.input_frame_rate);
     fh.cfm_n_steps = cv3_kv_u32(gctx, "cosyvoice3.flow.cfm_n_steps", fh.cfm_n_steps);
-    fh.cfm_inference_cfg_rate =
-        cv3_kv_f32(gctx, "cosyvoice3.flow.cfm_inference_cfg_rate", fh.cfm_inference_cfg_rate);
+    fh.cfm_inference_cfg_rate = cv3_kv_f32(gctx, "cosyvoice3.flow.cfm_inference_cfg_rate", fh.cfm_inference_cfg_rate);
     fh.cfm_sigma_min = cv3_kv_f32(gctx, "cosyvoice3.flow.cfm_sigma_min", fh.cfm_sigma_min);
     fh.rope_theta = cv3_kv_f32(gctx, "cosyvoice3.flow.rope_theta", fh.rope_theta);
     gguf_free(gctx);
@@ -1222,11 +1280,281 @@ extern "C" int cosyvoice3_tts_init_flow_from_file(struct cosyvoice3_tts_context*
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Phase 3b — single DiT block forward (AdaLN-Zero + bidirectional MHA + FFN)
+// ---------------------------------------------------------------------------
+//
+// Upstream ref (cosyvoice/flow/DiT/modules.py, lucidrains-style block):
+//
+//   AdaLayerNormZero.forward(x, emb):
+//     emb = self.linear(self.silu(emb))                              # (B, 6d)
+//     shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp \
+//         = torch.chunk(emb, 6, dim=1)
+//     x = self.norm(x) * (1 + scale_msa[:, None]) + shift_msa[:, None]
+//     return x, gate_msa, shift_mlp, scale_mlp, gate_mlp
+//
+//   DiTBlock.forward(x, t, mask=None, rope=...):
+//     norm, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.attn_norm(x, t)
+//     x = x + gate_msa[:, None] * self.attn(norm, rope=rope)
+//     ff = self.ff_norm(x) * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
+//     x = x + gate_mlp[:, None] * self.ff(ff)
+//
+// Notes verified against upstream PyTorch source (modules.py l. 230–245
+// for AdaLN, l. 500–531 for DiTBlock):
+//   - SiLU is applied to t_emb BEFORE the AdaLN linear (not after).
+//   - chunk order is (shift, scale, gate) × {msa, mlp}, in that order.
+//   - both LayerNorms (AdaLN's `norm` and DiTBlock's `ff_norm`) are
+//     `nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)` — affine-free
+//     (no γ/β weights), NOT RMSNorm. Use `ggml_norm`.
+//   - FFN is plain Linear(d→ff)→GELU(approximate="tanh")→Linear(ff→d). No
+//     SiLU, no GLU gating. ggml_gelu maps to the tanh approximation.
+//   - RoPE comes from `x_transformers.RotaryEmbedding`. Its `freqs =
+//     stack((freqs, freqs), -1)` + adjacent-pair `rotate_half` is the
+//     interleaved (GPT-J/Llama-classic) RoPE, which is ggml's
+//     GGML_ROPE_TYPE_NORMAL (=0), NOT NEOX. theta=10000 from
+//     `cosyvoice3.flow.rope_theta`.
+
+namespace {
+
+ggml_cgraph* cv3_build_flow_dit_block_graph(cosyvoice3_tts_context* ctx, int block_idx, int T) {
+    const auto& fh = ctx->flow.hp;
+    GGML_ASSERT(block_idx >= 0 && (uint32_t)block_idx < fh.n_dit_layers);
+    GGML_ASSERT(T > 0);
+    const auto& b = ctx->flow.blocks[block_idx];
+    const int d = (int)fh.dit_dim;       // 1024
+    const int n_h = (int)fh.dit_heads;   // 16
+    const int hd = (int)fh.dit_head_dim; // 64
+    const float ln_eps = 1e-6f;
+    const float attn_scale = 1.0f / std::sqrt((float)hd);
+    const float rope_theta = fh.rope_theta;
+
+    ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
+    ggml_context* ctx0 = ggml_init(ip);
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 1024, false);
+
+    ggml_tensor* x = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, d, T);
+    ggml_set_input(x);
+    ggml_set_name(x, "dit_x_in");
+
+    ggml_tensor* t_emb = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, d);
+    ggml_set_input(t_emb);
+    ggml_set_name(t_emb, "dit_t_emb_in");
+
+    ggml_tensor* positions = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, T);
+    ggml_set_input(positions);
+    ggml_set_name(positions, "dit_positions");
+
+    // AdaLN-Zero modulation: linear(silu(t_emb)) → chunk(6) along last dim.
+    // adaln.w has ne=(d, 6d), adaln.b has ne=(6d,) F32.
+    ggml_tensor* t_silu = ggml_silu(ctx0, t_emb);
+    ggml_tensor* mod = ggml_mul_mat(ctx0, b.adaln_w, t_silu); // (6d,)
+    mod = ggml_add(ctx0, mod, b.adaln_b);                     // (6d,)
+    const size_t fs = sizeof(float);
+    auto chunk = [&](int idx) { return ggml_view_1d(ctx0, mod, d, (size_t)(idx * d) * fs); };
+    ggml_tensor* shift_msa = chunk(0);
+    ggml_tensor* scale_msa = chunk(1);
+    ggml_tensor* gate_msa = chunk(2);
+    ggml_tensor* shift_mlp = chunk(3);
+    ggml_tensor* scale_mlp = chunk(4);
+    ggml_tensor* gate_mlp = chunk(5);
+
+    // Pre-attention LayerNorm (affine-free) + modulation.
+    //   h = LN(x) * (1 + scale_msa) + shift_msa
+    //     = LN(x) + LN(x) * scale_msa + shift_msa
+    ggml_tensor* lnx_a = ggml_norm(ctx0, x, ln_eps);
+    ggml_set_name(lnx_a, "dbg_lnx_a");
+    ggml_set_output(lnx_a);
+    ggml_tensor* h_a = ggml_add(ctx0, lnx_a, ggml_mul(ctx0, lnx_a, scale_msa));
+    h_a = ggml_add(ctx0, h_a, shift_msa);
+    ggml_set_name(h_a, "dbg_h_a");
+    ggml_set_output(h_a);
+
+    // Bidirectional MHA with partial RoPE. Upstream `AttnProcessor` calls
+    // `apply_rotary_pos_emb` on the pre-reshape Q/K (shape (B, T, n_h*hd))
+    // with `rot_dim = head_dim = 64`. The x_transformers helper splits as
+    // `t[..., :rot_dim]` + `t[..., rot_dim:]` and only rotates the first
+    // 64 channels — which corresponds to *only head 0*. Heads 1..15 carry
+    // no positional info. Match by ropeing the full Q/K tensor with
+    // `n_dims=hd` so only the first `hd` channels rotate (NORMAL = adjacent
+    // pairs, matches x_transformers' interleaved freqs+rotate_half).
+    ggml_tensor* Q = ggml_add(ctx0, ggml_mul_mat(ctx0, b.attn_q_w, h_a), b.attn_q_b); // (d, T)
+    ggml_tensor* K = ggml_add(ctx0, ggml_mul_mat(ctx0, b.attn_k_w, h_a), b.attn_k_b);
+    ggml_tensor* V = ggml_add(ctx0, ggml_mul_mat(ctx0, b.attn_v_w, h_a), b.attn_v_b);
+    // ggml_rope_ext requires ne[2] == positions length. Treat the full
+    // d-dim as a "single big head" via reshape (d, 1, T), then apply
+    // partial RoPE over `hd` elements.
+    Q = ggml_reshape_3d(ctx0, Q, d, 1, T);
+    K = ggml_reshape_3d(ctx0, K, d, 1, T);
+    Q = ggml_rope_ext(ctx0, Q, positions, nullptr, hd, GGML_ROPE_TYPE_NORMAL, /*n_ctx_orig*/ 0, rope_theta, 1.0f, 0.0f,
+                      1.0f, 0.0f, 0.0f);
+    K = ggml_rope_ext(ctx0, K, positions, nullptr, hd, GGML_ROPE_TYPE_NORMAL, /*n_ctx_orig*/ 0, rope_theta, 1.0f, 0.0f,
+                      1.0f, 0.0f, 0.0f);
+    // Now reshape into per-head layout for flash-attn.
+    Q = ggml_reshape_3d(ctx0, Q, hd, n_h, T);
+    K = ggml_reshape_3d(ctx0, K, hd, n_h, T);
+    V = ggml_reshape_3d(ctx0, V, hd, n_h, T);
+    Q = ggml_cont(ctx0, ggml_permute(ctx0, Q, 0, 2, 1, 3));
+    K = ggml_cont(ctx0, ggml_permute(ctx0, K, 0, 2, 1, 3));
+    V = ggml_cont(ctx0, ggml_permute(ctx0, V, 0, 2, 1, 3));
+    ggml_tensor* attn = ggml_flash_attn_ext(ctx0, Q, K, V, /*mask*/ nullptr, attn_scale, 0.0f, 0.0f);
+    attn = ggml_reshape_2d(ctx0, attn, d, T);
+    attn = ggml_add(ctx0, ggml_mul_mat(ctx0, b.attn_o_w, attn), b.attn_o_b);
+    ggml_set_name(attn, "dbg_attn_raw");
+    ggml_set_output(attn);
+
+    // Gated residual: x = x + gate_msa * attn_out.
+    ggml_tensor* x_after_attn = ggml_add(ctx0, x, ggml_mul(ctx0, attn, gate_msa));
+    ggml_set_name(x_after_attn, "dbg_x_after_attn");
+    ggml_set_output(x_after_attn);
+
+    // Pre-FFN LayerNorm + modulation.
+    ggml_tensor* lnx_f = ggml_norm(ctx0, x_after_attn, ln_eps);
+    ggml_tensor* h_f = ggml_add(ctx0, lnx_f, ggml_mul(ctx0, lnx_f, scale_mlp));
+    h_f = ggml_add(ctx0, h_f, shift_mlp);
+
+    // FFN: Linear(d→ff) → GELU(tanh) → Linear(ff→d).
+    ggml_tensor* ff = ggml_add(ctx0, ggml_mul_mat(ctx0, b.ffn_l1_w, h_f), b.ffn_l1_b);
+    ff = ggml_gelu(ctx0, ff);
+    ff = ggml_add(ctx0, ggml_mul_mat(ctx0, b.ffn_l2_w, ff), b.ffn_l2_b);
+    ggml_set_name(ff, "dbg_ff_raw");
+    ggml_set_output(ff);
+
+    // Gated residual: y = x' + gate_mlp * ff_out.
+    ggml_tensor* y = ggml_add(ctx0, x_after_attn, ggml_mul(ctx0, ff, gate_mlp));
+    ggml_set_name(y, "dit_block_out");
+    ggml_set_output(y);
+    ggml_build_forward_expand(gf, y);
+
+    ggml_free(ctx0);
+    return gf;
+}
+
+} // namespace
+
+extern "C" float* cosyvoice3_tts_run_flow_dit_block(struct cosyvoice3_tts_context* ctx, int block_idx, const float* x,
+                                                    int T, const float* t_emb) {
+    if (!ctx || !ctx->flow.loaded || !x || !t_emb || T <= 0 || block_idx < 0)
+        return nullptr;
+    const auto& fh = ctx->flow.hp;
+    if ((uint32_t)block_idx >= fh.n_dit_layers) {
+        fprintf(stderr, "cosyvoice3_tts: block_idx %d out of range [0, %u)\n", block_idx, fh.n_dit_layers);
+        return nullptr;
+    }
+    const int d = (int)fh.dit_dim;
+
+    // Building any graph in ctx->compute_meta clobbers the cached LM
+    // step graph's metadata. Invalidate so the next AR step rebuilds.
+    ctx->step_t1_gf = nullptr;
+    ctx->step_t1_fixed_kv_len = 0;
+
+    ggml_cgraph* gf = cv3_build_flow_dit_block_graph(ctx, block_idx, T);
+    if (!gf)
+        return nullptr;
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
+        fprintf(stderr, "cosyvoice3_tts: dit_block alloc_graph failed\n");
+        return nullptr;
+    }
+
+    auto set_t = [&](const char* nm, const void* data, size_t bytes) {
+        ggml_tensor* t = ggml_graph_get_tensor(gf, nm);
+        if (!t)
+            return false;
+        ggml_backend_tensor_set(t, data, 0, bytes);
+        return true;
+    };
+
+    if (!set_t("dit_x_in", x, (size_t)d * T * sizeof(float)))
+        return nullptr;
+    if (!set_t("dit_t_emb_in", t_emb, (size_t)d * sizeof(float)))
+        return nullptr;
+    std::vector<int32_t> pos((size_t)T);
+    for (int i = 0; i < T; i++)
+        pos[i] = i;
+    if (!set_t("dit_positions", pos.data(), pos.size() * sizeof(int32_t)))
+        return nullptr;
+
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
+        fprintf(stderr, "cosyvoice3_tts: dit_block compute failed\n");
+        return nullptr;
+    }
+
+    ggml_tensor* out_t = ggml_graph_get_tensor(gf, "dit_block_out");
+    if (!out_t)
+        return nullptr;
+    const size_t n = (size_t)ggml_nelements(out_t);
+    float* out = (float*)malloc(n * sizeof(float));
+    if (!out)
+        return nullptr;
+    ggml_backend_tensor_get(out_t, out, 0, n * sizeof(float));
+    return out;
+}
+
+namespace {
+
+// Build + run the per-block graph and extract a specific named tensor.
+// Used by `cosyvoice3_tts_extract_stage` for the `flow_dit_blk_<N>_*`
+// stages so the diff harness can hit any intermediate (post-LN,
+// post-modulate, post-attn, post-residual, post-FFN, block-out) on the
+// same graph build.
+float* cv3_extract_flow_dit_stage(cosyvoice3_tts_context* ctx, int block_idx, const float* x, int T, const float* t_emb,
+                                  const char* tensor_name) {
+    if (!ctx || !ctx->flow.loaded || !x || !t_emb || T <= 0 || block_idx < 0 || !tensor_name)
+        return nullptr;
+    const auto& fh = ctx->flow.hp;
+    if ((uint32_t)block_idx >= fh.n_dit_layers)
+        return nullptr;
+    const int d = (int)fh.dit_dim;
+
+    ctx->step_t1_gf = nullptr;
+    ctx->step_t1_fixed_kv_len = 0;
+
+    ggml_cgraph* gf = cv3_build_flow_dit_block_graph(ctx, block_idx, T);
+    if (!gf)
+        return nullptr;
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf))
+        return nullptr;
+
+    auto set_t = [&](const char* nm, const void* data, size_t bytes) {
+        ggml_tensor* t = ggml_graph_get_tensor(gf, nm);
+        if (!t)
+            return false;
+        ggml_backend_tensor_set(t, data, 0, bytes);
+        return true;
+    };
+    if (!set_t("dit_x_in", x, (size_t)d * T * sizeof(float)))
+        return nullptr;
+    if (!set_t("dit_t_emb_in", t_emb, (size_t)d * sizeof(float)))
+        return nullptr;
+    std::vector<int32_t> pos((size_t)T);
+    for (int i = 0; i < T; i++)
+        pos[i] = i;
+    if (!set_t("dit_positions", pos.data(), pos.size() * sizeof(int32_t)))
+        return nullptr;
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS)
+        return nullptr;
+
+    ggml_tensor* out_t = ggml_graph_get_tensor(gf, tensor_name);
+    if (!out_t) {
+        fprintf(stderr, "cosyvoice3_tts: tensor '%s' not in flow_dit_block graph\n", tensor_name);
+        return nullptr;
+    }
+    const size_t n = (size_t)ggml_nelements(out_t);
+    float* out = (float*)malloc(n * sizeof(float));
+    if (!out)
+        return nullptr;
+    ggml_backend_tensor_get(out_t, out, 0, n * sizeof(float));
+    return out;
+}
+
+} // namespace
+
 extern "C" int cosyvoice3_tts_get_flow_hparams(struct cosyvoice3_tts_context* ctx, uint32_t* n_dit_layers,
-                                              uint32_t* dit_dim, uint32_t* dit_heads, uint32_t* dit_head_dim,
-                                              uint32_t* dit_ff_dim, uint32_t* dit_input_dim, uint32_t* mel_dim,
-                                              uint32_t* spk_dim_in, uint32_t* spk_dim_out, uint32_t* cfm_n_steps,
-                                              float* cfm_cfg_rate) {
+                                               uint32_t* dit_dim, uint32_t* dit_heads, uint32_t* dit_head_dim,
+                                               uint32_t* dit_ff_dim, uint32_t* dit_input_dim, uint32_t* mel_dim,
+                                               uint32_t* spk_dim_in, uint32_t* spk_dim_out, uint32_t* cfm_n_steps,
+                                               float* cfm_cfg_rate) {
     if (!ctx || !ctx->flow.loaded)
         return -1;
     const auto& fh = ctx->flow.hp;

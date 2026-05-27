@@ -1,25 +1,36 @@
-"""Fun-CosyVoice3-0.5B-2512 LLM reference dump (Phase 2 diff harness).
+"""Fun-CosyVoice3-0.5B-2512 reference dump backend.
 
-The CosyVoice3 LLM is a vanilla Qwen2-0.5B body (same config as
-`Qwen/Qwen2-0.5B-Instruct`, just retrained / fine-tuned) plus two extra
-modules:
+Two reference-dump entry points:
 
-    speech_embedding : nn.Embedding(6761, 896)   # speech-token input
-    llm_decoder      : nn.Linear(896, 6761)      # speech-token AR head
+1. `dump_lm_reference(model_dir, output_npz, prompt, n_greedy)` —
+   Phase 2 LLM stages (input_embeds, per-layer hidden states,
+   step0_logits, greedy_speech_tokens) written to an .npz. Used by
+   the legacy `tools/diff-cosyvoice3-lm.py` harness.
 
-This script loads `llm.pt` directly into HuggingFace's `Qwen2Model`
-class, attaches the two speech-side modules, runs a deterministic
-forward, and dumps stage activations as a `.npz` for the diff harness
-to compare against our C++ runtime.
+2. `dump(model_dir, audio, stages, **kwargs)` — dump_reference.py
+   contract. Returns a dict of {stage_name: ndarray} for any subset of
+   the registered stages. Wired into the unified `crispasr-diff` CLI
+   via the `cosyvoice3-tts` backend (see crispasr_diff_main.cpp).
 
-Stages dumped:
-    text_input_ids       : [T] int32 — the test prompt
-    input_embeds         : [T, 896] f32 — token_embd[ids] (input to LM)
-    layer_0_out          : [T, 896] f32 — after first Qwen2 block
-    layer_23_out         : [T, 896] f32 — after last Qwen2 block
-    output_norm_out      : [T, 896] f32 — after final RMSNorm
-    step0_logits         : [6761] f32 — speech_lm_head(last_hidden)
-    greedy_speech_tokens : [N] int32 — N greedy AR steps from step0
+   Stages exposed for the Phase 3b DiT single-block diff (blocks 0 + 21):
+
+       flow_dit_blk_<N>_x_in        seeded random input  [T, 1024]
+       flow_dit_blk_<N>_t_emb       time_mlp(sin_emb(t=0.5))  [1024]
+       flow_dit_blk_<N>_lnx_a       LN(x) pre-modulation
+       flow_dit_blk_<N>_h_a         post (1+scale_msa)·LN(x) + shift_msa
+       flow_dit_blk_<N>_attn        attention output (pre-residual)
+       flow_dit_blk_<N>_xattn       x + gate_msa · attn
+       flow_dit_blk_<N>_ff          FFN output (pre-residual)
+       flow_dit_blk_<N>_out         final block output (post-FFN residual)
+
+   The C++ extract_stage handler unpacks `embeds_in` as
+   [x | t_emb] = (T*dit_dim + dit_dim) floats, runs the per-block
+   ggml graph, and returns the requested intermediate. The diff CLI
+   pulls x_in / t_emb from the GGUF archive, packs them, and compares
+   each named output.
+
+The "audio" arg from `tools/dump_reference.py` is unused (this backend
+is text/synth-token-driven, not audio-conditioned for these stages).
 """
 
 from __future__ import annotations
@@ -27,12 +38,46 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Iterable, Optional, Set
 
 import numpy as np
 
 DEFAULT_PROMPT = "Hello, this is a test."
 
+# Stages dump_reference.py will request by default. Each is a per-block
+# stage (block 0 + block 21); the dump() function honors any subset.
+DEFAULT_STAGES = [
+    # Block 0
+    "flow_dit_blk_0_x_in",
+    "flow_dit_blk_0_t_emb",
+    "flow_dit_blk_0_lnx_a",
+    "flow_dit_blk_0_h_a",
+    "flow_dit_blk_0_attn",
+    "flow_dit_blk_0_xattn",
+    "flow_dit_blk_0_ff",
+    "flow_dit_blk_0_out",
+    # Block 21 (last)
+    "flow_dit_blk_21_x_in",
+    "flow_dit_blk_21_t_emb",
+    "flow_dit_blk_21_lnx_a",
+    "flow_dit_blk_21_h_a",
+    "flow_dit_blk_21_attn",
+    "flow_dit_blk_21_xattn",
+    "flow_dit_blk_21_ff",
+    "flow_dit_blk_21_out",
+]
+
+# Fixed test-vector parameters for the Phase 3b dumps. Pinned so the
+# diff is reproducible across runs and machines.
+DIT_T = 8
+DIT_DIM = 1024
+DIT_SEED = 1234
+DIT_TIMESTEP = 0.5
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — LLM dump (unchanged).
+# ---------------------------------------------------------------------------
 
 def _load_qwen2(model_dir: Path):
     """Load CosyVoice3 LLM into a HF Qwen2Model + speech-side modules."""
@@ -47,9 +92,6 @@ def _load_qwen2(model_dir: Path):
     if isinstance(sd_raw, dict) and "state_dict" in sd_raw:
         sd_raw = sd_raw["state_dict"]
 
-    # The .pt prefixes everything with `llm.model.` (a CosyVoice wrapper
-    # around the Qwen2Model). Strip it for HF, except for the two speech
-    # modules which live at the top level.
     qwen_sd = {}
     extra = {}
     for k, v in sd_raw.items():
@@ -60,27 +102,18 @@ def _load_qwen2(model_dir: Path):
         elif k.startswith("llm.model.model."):
             qwen_sd[k[len("llm.model.model."):]] = v
         elif k.startswith("llm.model."):
-            # The .lm_head and trailing .norm at the wrapper level
             qwen_sd[k[len("llm.model."):]] = v
 
     cfg.use_cache = False
     cfg.attn_implementation = "eager"
     model = Qwen2Model(cfg)
-    # Filter for keys Qwen2Model actually owns; lm_head lives in
-    # Qwen2ForCausalLM, not Qwen2Model — we'd load the embedding+norm
-    # only and drop the rest.
     own_keys = set(model.state_dict().keys())
     filtered = {k: v for k, v in qwen_sd.items() if k in own_keys}
     missing, unexpected = model.load_state_dict(filtered, strict=False)
     if missing:
         print(f"  missing qwen2 keys ({len(missing)}): {missing[:5]} ...")
-    # `unexpected` from the strict=False call would catch any qwen_sd
-    # entries Qwen2Model doesn't own (e.g. lm_head). Those are the
-    # CosyVoice wrapper bits — fine to drop.
     model.eval()
 
-    # Build the speech-side modules. The upstream class stores them
-    # as bare nn.Module attributes outside Qwen2Model.
     speech_embd = torch.nn.Embedding(
         extra["speech_embedding.weight"].shape[0], extra["speech_embedding.weight"].shape[1])
     speech_embd.weight.data.copy_(extra["speech_embedding.weight"].float())
@@ -101,19 +134,15 @@ def dump_lm_reference(model_dir: Path, output_npz: Path, prompt: str, n_greedy: 
     print(f"  qwen2 loaded — d={cfg.hidden_size} L={cfg.num_hidden_layers} "
           f"vocab={cfg.vocab_size} kv={cfg.num_key_value_heads}")
 
-    # Tokenize via the bundled gpt2-BPE tokenizer.
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(model_dir / "CosyVoice-BlankEN")
     ids_pt = tok(prompt, return_tensors="pt").input_ids[0]
     print(f"  prompt {prompt!r} -> {ids_pt.tolist()} ({ids_pt.shape[0]} tokens)")
 
-    # Build inputs_embeds via token_embd (Qwen2Model's embed_tokens).
     with torch.no_grad():
-        input_embeds = model.embed_tokens(ids_pt).float()  # [T, d_model]
+        input_embeds = model.embed_tokens(ids_pt).float()
         T = input_embeds.shape[0]
 
-    # Forward with output_hidden_states so we can capture per-layer outputs.
-    # The HF API accepts inputs_embeds=[B, T, d]; add the batch dim.
     out_data: Dict[str, np.ndarray] = {}
     out_data["text_input_ids"] = ids_pt.detach().cpu().numpy().astype(np.int32)
     out_data["input_embeds"] = input_embeds.detach().cpu().numpy().astype(np.float32)
@@ -125,43 +154,30 @@ def dump_lm_reference(model_dir: Path, output_npz: Path, prompt: str, n_greedy: 
             use_cache=False,
             return_dict=True,
         )
-    # output_hidden_states includes the input embedding at index 0 and
-    # the output of each transformer block at indices 1..L. So
-    # hidden_states[1] = after block 0, hidden_states[-1] = after final
-    # block (before the final layer norm).
-    hidden_states = out.hidden_states  # tuple of [1, T, d]
+    hidden_states = out.hidden_states
     out_data["layer_0_out"] = hidden_states[1][0].detach().cpu().numpy().astype(np.float32)
     out_data["layer_23_out"] = hidden_states[-1][0].detach().cpu().numpy().astype(np.float32)
-    # out.last_hidden_state is the post-final-norm output of Qwen2Model.
     out_data["output_norm_out"] = out.last_hidden_state[0].detach().cpu().numpy().astype(np.float32)
 
-    # speech_lm_head on the last position → step0 logits over speech vocab.
-    last_hidden = out.last_hidden_state[0, -1, :]  # [d_model]
+    last_hidden = out.last_hidden_state[0, -1, :]
     with torch.no_grad():
-        step0_logits = speech_lm_head(last_hidden.float())  # [6761]
+        step0_logits = speech_lm_head(last_hidden.float())
     out_data["step0_logits"] = step0_logits.detach().cpu().numpy().astype(np.float32)
     print(f"  step0 top-5:")
     top = step0_logits.topk(5)
     for i in range(5):
         print(f"    {top.indices[i].item()}: {top.values[i].item():.4f}")
 
-    # Greedy AR loop: pick top speech token (within the codebook range),
-    # embed via speech_embedding, append to inputs_embeds, repeat. The
-    # max sample range is the codebook (6561); the upper ~200 entries
-    # of the head are special markers used by upstream wrappers. To
-    # validate matching with our C++ side, we use the same restriction.
     SPEECH_CODEBOOK = 6561
     cur_ids: list[int] = []
     cur_embeds = input_embeds.clone()
     last_logits = step0_logits
     for step in range(n_greedy):
-        # Sample within [0, SPEECH_CODEBOOK) — past the codebook are
-        # special tokens.
         sub = last_logits[:SPEECH_CODEBOOK]
         nid = int(sub.argmax().item())
         cur_ids.append(nid)
         with torch.no_grad():
-            next_e = speech_embd(torch.tensor([nid], dtype=torch.long)).float()  # [1, d]
+            next_e = speech_embd(torch.tensor([nid], dtype=torch.long)).float()
         cur_embeds = torch.cat([cur_embeds, next_e], dim=0)
         with torch.no_grad():
             out = model(
@@ -180,15 +196,191 @@ def dump_lm_reference(model_dir: Path, output_npz: Path, prompt: str, n_greedy: 
     print(f"  wrote {output_npz}  ({len(out_data)} stages: {sizes})")
 
 
+# ---------------------------------------------------------------------------
+# Phase 3b — single DiT block dumper (used by both the CLI and dump()).
+# ---------------------------------------------------------------------------
+
+def _ensure_upstream_on_path() -> None:
+    """Make the upstream FunAudioLLM/CosyVoice clone importable."""
+    import sys
+    upstream = Path("/Volumes/backups/code/cosyvoice3-stash/CosyVoice-upstream")
+    if not upstream.exists():
+        raise FileNotFoundError(
+            f"Upstream CosyVoice clone not found at {upstream}. "
+            "git clone https://github.com/FunAudioLLM/CosyVoice.git into that path.")
+    if str(upstream) not in sys.path:
+        sys.path.insert(0, str(upstream))
+
+
+def _capture_dit_block_stages(model_dir: Path, block_idx: int,
+                              T: int = DIT_T, seed: int = DIT_SEED,
+                              timestep: float = DIT_TIMESTEP):
+    """Build one upstream DiTBlock + TimestepEmbedding, run a seeded
+    forward, return a dict of {short_name: torch.Tensor} matching the
+    C++ side's per-stage outputs."""
+    _ensure_upstream_on_path()
+    from cosyvoice.flow.DiT.modules import DiTBlock, TimestepEmbedding
+    from x_transformers.x_transformers import RotaryEmbedding
+
+    import torch
+    state_path = model_dir / "flow.pt"
+    sd_raw = torch.load(str(state_path), map_location="cpu", weights_only=False)
+    if isinstance(sd_raw, dict) and "state_dict" in sd_raw:
+        sd_raw = sd_raw["state_dict"]
+
+    dim, heads, head_dim, ff_mult = DIT_DIM, 16, 64, 2
+
+    block_prefix = f"decoder.estimator.transformer_blocks.{block_idx}."
+    time_prefix = "decoder.estimator.time_embed."
+    block_sd = {k[len(block_prefix):]: v for k, v in sd_raw.items() if k.startswith(block_prefix)}
+    time_sd = {k[len(time_prefix):]: v for k, v in sd_raw.items() if k.startswith(time_prefix)}
+    if not block_sd:
+        raise RuntimeError(f"no tensors under prefix {block_prefix!r}")
+
+    block = DiTBlock(dim=dim, heads=heads, dim_head=head_dim, ff_mult=ff_mult, dropout=0.0)
+    block.load_state_dict(block_sd, strict=False)
+    block.eval()
+
+    time_embed = TimestepEmbedding(dim, freq_embed_dim=256)
+    time_embed.load_state_dict(time_sd, strict=False)
+    time_embed.eval()
+
+    gen = torch.Generator().manual_seed(seed)
+    x = torch.randn(1, T, dim, generator=gen, dtype=torch.float32)
+    t_scalar = torch.tensor([timestep], dtype=torch.float32)
+    with torch.no_grad():
+        t_emb = time_embed(t_scalar)  # (1, dim)
+
+    rotary = RotaryEmbedding(head_dim)
+    with torch.no_grad():
+        rope = rotary.forward_from_seq_len(T)
+
+    # Non-streaming non-masked attention: full-True (1, 1, T, T) mask
+    # — same as `add_optional_chunk_mask(..., 0, 0, -1).repeat(1, T, 1).unsqueeze(1)`.
+    mask = torch.ones(1, T, T, dtype=torch.bool).unsqueeze(1)
+
+    # Piecewise forward (mirrors DiTBlock.forward) so we can capture
+    # the same intermediates the C++ side exposes through extract_stage.
+    with torch.no_grad():
+        adaln = block.attn_norm
+        ln_x = adaln.norm(x)
+        emb_a = adaln.linear(adaln.silu(t_emb))
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = torch.chunk(emb_a, 6, dim=1)
+        h_a = ln_x * (1 + scale_msa[:, None]) + shift_msa[:, None]
+        attn_raw = block.attn(x=h_a, mask=mask, rope=rope)
+        x_after_attn = x + gate_msa[:, None] * attn_raw
+        ff_norm = block.ff_norm(x_after_attn) * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
+        ff_raw = block.ff(ff_norm)
+        y = x_after_attn + gate_mlp[:, None] * ff_raw
+
+        # Sanity: confirm the piecewise reconstruction matches the all-in-one
+        # block forward — guards against me mis-replicating the upstream block.
+        y_baseline = block(x, t_emb, mask=mask, rope=rope)
+        drift = (y - y_baseline).abs().max().item()
+        assert drift < 1e-4, f"piecewise reconstruction drift {drift}"
+
+    return {
+        "x_in": x.squeeze(0),
+        "t_emb": t_emb.squeeze(0),
+        "lnx_a": ln_x.squeeze(0),
+        "h_a": h_a.squeeze(0),
+        "attn": attn_raw.squeeze(0),
+        "xattn": x_after_attn.squeeze(0),
+        "ff": ff_raw.squeeze(0),
+        "out": y.squeeze(0),
+    }
+
+
+def _flow_dit_block_arrays(model_dir: Path, block_idx: int,
+                           stages_wanted: Optional[Set[str]] = None) -> Dict[str, np.ndarray]:
+    """Capture the per-stage activations for one DiT block and return
+    them as {full_stage_name: ndarray} ready for the GGUF archive."""
+    stages = _capture_dit_block_stages(model_dir, block_idx)
+    out: Dict[str, np.ndarray] = {}
+    for short, tensor in stages.items():
+        name = f"flow_dit_blk_{block_idx}_{short}"
+        if stages_wanted is not None and name not in stages_wanted:
+            continue
+        out[name] = tensor.contiguous().detach().cpu().numpy().astype(np.float32)
+    return out
+
+
+def dump_flow_dit_block_bins(model_dir: Path, out_dir: Path,
+                             block_idx: int = 0, T: int = DIT_T,
+                             seed: int = DIT_SEED) -> None:
+    """Legacy CLI mode — write raw float32 binaries under <out_dir>.
+    Kept for ad-hoc debugging during port work; the unified
+    crispasr-diff pipeline goes through dump() instead."""
+    arrays = _flow_dit_block_arrays(model_dir, block_idx)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for name, arr in arrays.items():
+        path = out_dir / f"{name}.bin"
+        path.write_bytes(arr.tobytes())
+        print(f"  wrote {path} ({arr.shape})")
+
+
+# ---------------------------------------------------------------------------
+# dump_reference.py entry point.
+# ---------------------------------------------------------------------------
+
+def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
+         **kwargs) -> Dict[str, np.ndarray]:  # noqa: ARG001
+    """Capture the requested cosyvoice3-tts reference activations.
+
+    For Phase 3b only the flow_dit_blk_<N>_* stages are populated. The
+    audio arg is unused (the per-block test vector is seeded random,
+    not derived from audio). LM-side stages can be re-added here when
+    the unified diff grows past the DiT block.
+    """
+    requested = set(stages) if stages else set(DEFAULT_STAGES)
+    # Group requested flow_dit_blk_<N>_* stages by block index so we
+    # build the upstream block at most once per index.
+    by_block: Dict[int, Set[str]] = {}
+    for s in requested:
+        if not s.startswith("flow_dit_blk_"):
+            continue
+        # parse N from "flow_dit_blk_<N>_<suffix>"
+        rest = s[len("flow_dit_blk_"):]
+        n_str, _, _ = rest.partition("_")
+        if not n_str.isdigit():
+            continue
+        by_block.setdefault(int(n_str), set()).add(s)
+
+    out: Dict[str, np.ndarray] = {}
+    for block_idx, names in sorted(by_block.items()):
+        out.update(_flow_dit_block_arrays(model_dir, block_idx, stages_wanted=names))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# CLI (manual debug runs only — production diff goes through
+# tools/dump_reference.py + crispasr-diff).
+# ---------------------------------------------------------------------------
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model-dir", required=True, help="Local snapshot dir for Fun-CosyVoice3-0.5B-2512")
-    ap.add_argument("--output", required=True, help="Output .npz path")
-    ap.add_argument("--prompt", default=DEFAULT_PROMPT, help="Text prompt to dump for")
-    ap.add_argument("--n-greedy", type=int, default=32, help="Number of greedy AR steps to dump")
+    ap.add_argument("--mode", choices=["lm-ref", "flow-dit-block"], default="lm-ref",
+                    help="lm-ref: Phase 2 LM .npz dump. "
+                         "flow-dit-block: Phase 3b per-block raw .bin dump (debug).")
+    ap.add_argument("--output", help="Output .npz path (lm-ref only)")
+    ap.add_argument("--prompt", default=DEFAULT_PROMPT, help="Text prompt (lm-ref only)")
+    ap.add_argument("--n-greedy", type=int, default=32, help="Greedy AR steps (lm-ref only)")
+    ap.add_argument("--flow-out-dir", help="Output dir for flow-dit-block .bin dumps")
+    ap.add_argument("--block-idx", type=int, default=0, help="DiT block index to dump")
+    ap.add_argument("--T", type=int, default=DIT_T, help="Sequence length")
+    ap.add_argument("--seed", type=int, default=DIT_SEED, help="torch RNG seed for x")
     args = ap.parse_args()
-    dump_lm_reference(Path(args.model_dir), Path(args.output), args.prompt, args.n_greedy)
+    if args.mode == "lm-ref":
+        if not args.output:
+            ap.error("--output required for lm-ref mode")
+        dump_lm_reference(Path(args.model_dir), Path(args.output), args.prompt, args.n_greedy)
+    elif args.mode == "flow-dit-block":
+        if not args.flow_out_dir:
+            ap.error("--flow-out-dir required for flow-dit-block mode")
+        dump_flow_dit_block_bins(Path(args.model_dir), Path(args.flow_out_dir),
+                                 block_idx=args.block_idx, T=args.T, seed=args.seed)
     return 0
 
 
