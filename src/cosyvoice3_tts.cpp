@@ -22,6 +22,12 @@
 //   speech_vocab  = 6761   (head dim; codebook is [0, 6561), the upper
 //                            ~200 entries are special / EOS markers)
 
+// MSVC's <cmath> strips POSIX-only math constants like M_PI unless
+// _USE_MATH_DEFINES is set BEFORE the include. Defining it here keeps
+// the Windows whisper.dll build working — Unix toolchains expose M_PI
+// unconditionally so the define is a no-op there.
+#define _USE_MATH_DEFINES
+
 #include "cosyvoice3_tts.h"
 
 #include "core/attention.h"

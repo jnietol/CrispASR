@@ -1,6 +1,12 @@
 # TODO: should not use this
 if (WIN32)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+    # MSVC's <cmath> strips POSIX-only constants (M_PI, M_SQRT2, etc.)
+    # unless _USE_MATH_DEFINES is set before the include. Several
+    # backend .cpp files (canary, qwen3_asr, chatterbox_*, cosyvoice3,
+    # voxcpm2 etc.) use M_PI — set the define globally for Windows
+    # so we don't have to touch each translation unit.
+    add_compile_definitions(_USE_MATH_DEFINES)
 
     if (BUILD_SHARED_LIBS)
         set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
