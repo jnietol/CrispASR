@@ -709,6 +709,61 @@ you follow this process systematically.
 - **ggml_norm normalizes over ne[0].** Make sure ne[0] is the feature
   dimension, not the time dimension.
 
+### Worked example: CosyVoice3 speech_tokenizer_v3 (2026-05-29)
+
+A near-complete but never-validated ggml port of the CV3 s3tokenizer
+(whisper-128 mel → 2× conv subsampler → 12 FSMN/attention blocks → FSQ)
+crashed on the first conv and, once it ran, matched the ONNX reference
+on only **14%** of output tokens. Three bugs, all pinned by the
+stage-by-stage diff:
+
+- **gguf-py reverses the numpy shape into ggml `ne`, and the C++
+  runtime consumes weights as-is.** So the *converter* must emit each
+  weight in the numpy layout whose reverse is the ggml layout the graph
+  wants: conv1d kernels in onnx `(OC, IC, KW)` order → ggml
+  `[KW, IC, OC]`; 2D MatMul/Linear `.w` transposed to `(out, in)` →
+  ggml `[in, out]`; depthwise FSMN kernel onnx `(C, 1, KW)` as-is →
+  ggml `[KW, 1, C]`. The draft had conv/FSMN double-transposed and 2D
+  weights un-transposed; **square attention weights (1280×1280) hid the
+  shape error** (right shape, transposed values) while the first conv
+  asserted `OW > 0`.
+- **erf-GELU vs tanh-GELU.** ONNX exports erf-GELU (count the `Erf`
+  ops). `ggml_gelu` is the tanh approximation — use `ggml_gelu_erf`.
+- **An unset graph input silently holds garbage.** The RoPE
+  `positions` tensor was `ggml_set_input`-created but never filled, so
+  rotary ran on whatever was in the buffer. Always set every input
+  before compute.
+
+**The most dangerous trap: a green end-to-end test masked the wrong
+component.** The cloned audio ASR-roundtripped to 0% WER while the
+tokenizer was only 14% correct — because in zero-shot TTS the prompt
+speech tokens mostly condition speaker/prosody, and the *spoken words*
+come from the LM. A passing end-to-end check does **not** validate a
+ported sub-component; diff each stage against ground truth regardless.
+
+Harness mechanics that made this fast: expose ONNX intermediate edges
+as graph outputs (`m.graph.output.append(make_tensor_value_info(edge))`)
+to capture per-stage references, feed the C++ side the *reference* input
+(here the whisper mel via `embeds_in`) so the network is diffed in
+isolation from the front-end, and tag each ggml stage with
+`ggml_set_name` + `ggml_set_output`. Result: every stage cos=1.0,
+tokens byte-exact (max_abs=0).
+
+**Filterbank ≠ STFT.** The full runtime path stayed at 99.24% (2/264
+token flips) from a low-mel-bin delta vs whisper's mel. Embedding
+whisper's *exact* `mel_filters.npz` in the GGUF did **not** change it —
+proving the delta is in the STFT magnitude (shared `core_mel`), not the
+filterbank. When a mel diff is concentrated in low bins, suspect the
+STFT/window/pad before the filterbank.
+
+**Open follow-up (2026-05-29):** WAV-cloned outputs are ~14 dB quieter
+than the `zero_shot` baseline (peak ~0.05 vs ~0.66) on *both* the native
+and Python-shellout extraction paths — so the cause is in the shared
+synth core, not the extractor. Prime suspects: `ref_mel` length not
+aligned to `2 × T_prompt_tok` (the baked zero_shot voice is aligned at
+174 = 2×87; a 10 s runtime clip gives matcha-mel ≠ 2×s3tok-tokens), or
+spk_emb projection magnitude for clips longer than ~3 s.
+
 ---
 
 ## ggml graph allocation: gallocr vs compute_with_ctx
