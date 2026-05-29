@@ -1049,15 +1049,14 @@ other backend with F16 conv kernels on CPU) was already shipped in
   cat-layer concat with HF's `output_hidden_states` indexing
   convention; quantizer gained `CRISPASR_GRANITE_QUANT_ALL=1` env knob
   to override the encoder/projector skip rules for the `-mini` build.
-- **[next] PLUS variant — speaker labels + word timestamps.** PLUS's
-  default output already includes punctuation; the upstream model
-  card also advertises speaker labels and word-level timestamps. We
-  haven't yet seen those in the LLM output — likely because the
-  granite chat template currently used isn't the one that primes for
-  structured output. Investigate `chat_template.jinja` in the PLUS
-  HF snapshot; the structured tokens may need a different prompt
-  prefix in `examples/cli/crispasr_backend_granite.cpp`. Most of the
-  work is template-only (~50 LOC).
+- **[done] PLUS variant — speaker labels + word timestamps.** Commit
+  `509846ff`. `granite_speech_is_plus()` detects the PLUS variant
+  via `proj_cat_layers`. `--diarize` → SAA prompt, `[Speaker N]:`
+  parsed into `seg.speaker`. `-owts`/`-ojf` → timestamp prompt,
+  `[T:N]` (mod-1000 cs) parsed into `seg.words` with rollover
+  unwrapping. `max_new_tokens` 4096 for timestamp mode.
+  `CAP_WORD_TIMESTAMPS` declared. Needs live validation with
+  `crispasr-diff granite` once a PLUS GGUF is on disk.
 - **[done]** ~~NAR variant — converter + runtime scaffold.~~ Converter
   (`models/convert-granite-nle-to-gguf.py`) writes all 930 tensors,
   the LLM tokenizer (BPE), the CTC tokenizer (348 chars) and the
