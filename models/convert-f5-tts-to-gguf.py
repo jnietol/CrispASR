@@ -115,6 +115,13 @@ def choose_dtype(name: str, shape: list, t: torch.Tensor):
         'final_adaln' in name or           # final AdaLN
         'final_proj' in name or            # final output projection
         'adaln' in name or                 # AdaLN modulation weights
+        'attn_q' in name or               # attention Q weight
+        'attn_k' in name or               # attention K weight
+        'attn_v' in name or               # attention V weight
+        'attn_o' in name or               # attention output weight
+        'ffn_up' in name or               # FFN up projection
+        'ffn_down' in name or             # FFN down projection
+        'blk.' in name or                 # all DiT block weights
         # Vocos: keep small tensors (gamma, embed) as F32
         'voc.embed' in name or
         'voc.norm' in name or

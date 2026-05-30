@@ -864,6 +864,14 @@ static std::vector<float> dit_forward(f5_tts_context* ctx, const float* x_data, 
         ggml_tensor* gated_ff = ggml_mul(mg.ctx, ff, gate_mlp);
         ggml_tensor* x_out = ggml_add(mg.ctx, x_res, gated_ff);
 
+        // Mark sub-stages as outputs for debugging
+        ggml_set_name(norm_x, "dump_adaln");
+        ggml_set_output(norm_x);
+        ggml_set_name(attn, "dump_attn_raw");
+        // Note: attn has been through O proj at this point
+        ggml_set_name(x_res, "dump_post_attn");
+        ggml_set_output(x_res);
+
         ggml_set_name(x_out, "blk_out");
         ggml_set_output(x_out);
 
@@ -885,6 +893,14 @@ static std::vector<float> dit_forward(f5_tts_context* ctx, const float* x_data, 
         hidden.resize(T * dim);
         ggml_backend_tensor_get(x_out, hidden.data(), 0, hidden.size() * sizeof(float));
 
+        if (step_idx == 0 && !drop_audio_cond && blk_idx == 0) {
+            std::vector<float> tmp(T * dim);
+            ggml_backend_tensor_get(norm_x, tmp.data(), 0, tmp.size() * sizeof(float));
+            dump_stage(ctx, "dit0_adaln_norm", tmp.data(), tmp.size());
+            // attn at this point includes O-proj; read from x_res - x_in to get gated attn
+            ggml_backend_tensor_get(x_res, tmp.data(), 0, tmp.size() * sizeof(float));
+            dump_stage(ctx, "dit0_post_attn", tmp.data(), tmp.size());
+        }
         if (step_idx == 0 && !drop_audio_cond) {
             char label[64];
             snprintf(label, sizeof(label), "dit_layer_%d", blk_idx);
