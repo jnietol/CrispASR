@@ -13,7 +13,7 @@ FROM ubuntu:24.04 AS runtime
 WORKDIR /app
 
 RUN apt-get update && \
-  apt-get install -y curl passwd ffmpeg libsdl2-dev wget cmake git libvulkan1 mesa-vulkan-drivers \
+  apt-get install -y curl passwd ffmpeg libsdl2-dev wget cmake git tini libvulkan1 mesa-vulkan-drivers \
   && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
 COPY --from=build /app /app
@@ -24,4 +24,4 @@ RUN (id -u crispasr 2>/dev/null || \
     chown -R crispasr:crispasr /app /cache /models
 ENV PATH=/app/build/bin:$PATH
 USER crispasr
-ENTRYPOINT [ "bash", "/app/.devops/run-server.sh" ]
+ENTRYPOINT [ "tini", "--", "bash", "/app/.devops/run-server.sh" ]

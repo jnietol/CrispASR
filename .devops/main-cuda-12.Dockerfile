@@ -50,7 +50,7 @@ FROM ${BASE_CUDA_RUN_CONTAINER} AS runtime
 WORKDIR /app
 
 RUN apt-get update && \
-  apt-get install -y curl ffmpeg wget cmake git pciutils \
+  apt-get install -y curl ffmpeg wget cmake git pciutils tini \
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
@@ -80,4 +80,4 @@ RUN (id -u crispasr 2>/dev/null || \
 ENV PATH=/app/build/bin:$PATH
 ENV CRISPASR_CACHE_DIR=/cache
 USER crispasr
-ENTRYPOINT [ "bash", "/app/.devops/run-server.sh" ]
+ENTRYPOINT [ "tini", "--", "bash", "/app/.devops/run-server.sh" ]

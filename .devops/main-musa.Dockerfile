@@ -29,7 +29,7 @@ FROM ${BASE_MUSA_RUN_CONTAINER} AS runtime
 WORKDIR /app
 
 RUN apt-get update && \
-    apt-get install -y curl passwd ffmpeg wget cmake git && \
+    apt-get install -y curl passwd ffmpeg wget cmake git tini && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* /tmp/* /var/tmp/*
 
@@ -46,4 +46,4 @@ RUN (id -u crispasr 2>/dev/null || \
 
 ENV PATH=/app/build/bin:$PATH
 USER crispasr
-ENTRYPOINT [ "bash", "/app/.devops/run-server.sh" ]
+ENTRYPOINT [ "tini", "--", "bash", "/app/.devops/run-server.sh" ]

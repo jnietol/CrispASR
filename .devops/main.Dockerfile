@@ -22,7 +22,7 @@ WORKDIR /app
 RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' \
       > /etc/apt/apt.conf.d/80-retries && \
   apt-get update && \
-  apt-get install -y --fix-missing curl ffmpeg libsdl2-dev wget cmake git \
+  apt-get install -y --fix-missing curl ffmpeg libsdl2-dev wget cmake git tini \
   && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
 COPY --from=build /app /app
@@ -32,4 +32,4 @@ RUN useradd -m -u 1000 crispasr && \
 ENV PATH=/app/build/bin:$PATH
 ENV CRISPASR_CACHE_DIR=/cache
 USER crispasr
-ENTRYPOINT [ "bash", "/app/.devops/run-server.sh" ]
+ENTRYPOINT [ "tini", "--", "bash", "/app/.devops/run-server.sh" ]

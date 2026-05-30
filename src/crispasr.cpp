@@ -5416,6 +5416,10 @@ bool whisper_vad_detect_speech(struct whisper_vad_context* vctx, const float* sa
 
     ggml_cgraph* gf = whisper_vad_build_graph(*vctx);
 
+    // Reset scheduler before re-allocation to prevent internal buffer
+    // accumulation across repeated VAD runs (fixes #132 70x regression).
+    ggml_backend_sched_reset(sched);
+
     if (!ggml_backend_sched_alloc_graph(sched, gf)) {
         CRISPASR_LOG_ERROR("%s: failed to allocate the compute buffer\n", __func__);
         return false;
@@ -5466,8 +5470,9 @@ bool whisper_vad_detect_speech(struct whisper_vad_context* vctx, const float* sa
         //CRISPASR_LOG_DEBUG("chunk %d: p = %7.3f\n", i, probs[i]);
     }
 
-    vctx->t_vad_us += ggml_time_us() - t_start_vad_us;
-    CRISPASR_LOG_INFO("%s: vad time = %.2f ms processing %d samples\n", __func__, 1e-3f * vctx->t_vad_us, n_samples);
+    const int64_t t_this_vad = ggml_time_us() - t_start_vad_us;
+    vctx->t_vad_us += t_this_vad;
+    CRISPASR_LOG_INFO("%s: vad time = %.2f ms processing %d samples\n", __func__, 1e-3f * t_this_vad, n_samples);
 
     ggml_backend_sched_reset(sched);
 
