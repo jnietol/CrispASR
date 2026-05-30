@@ -605,22 +605,156 @@ static std::vector<float> compute_text_embed(f5_tts_context* ctx, const int32_t*
     return text_emb;
 }
 
+// ── Radix-2 FFT (reused by mel + ISTFT) ─────────────────────────
+
+// In-place radix-2 FFT. sign=+1 for forward, -1 for inverse.
+// Arrays re[] and im[] must have length N (power of 2).
+// For inverse, caller must divide by N afterwards.
+static void fft_radix2(float* re, float* im, int N, int sign) {
+    int log2n = 0;
+    for (int tmp = N; tmp > 1; tmp >>= 1)
+        log2n++;
+    // Bit-reversal permutation
+    for (int i = 0; i < N; i++) {
+        int j = 0, x = i;
+        for (int b = 0; b < log2n; b++) {
+            j = (j << 1) | (x & 1);
+            x >>= 1;
+        }
+        if (j > i) {
+            std::swap(re[i], re[j]);
+            std::swap(im[i], im[j]);
+        }
+    }
+    // Butterfly passes
+    for (int s = 1; s <= log2n; s++) {
+        int m = 1 << s;
+        int half = m / 2;
+        float wpr = cosf(2.0f * (float)M_PI / (float)m);
+        float wpi = (float)sign * sinf(2.0f * (float)M_PI / (float)m);
+        for (int k = 0; k < N; k += m) {
+            float wr = 1.0f, wi = 0.0f;
+            for (int j = 0; j < half; j++) {
+                float tr = wr * re[k + j + half] - wi * im[k + j + half];
+                float ti = wr * im[k + j + half] + wi * re[k + j + half];
+                re[k + j + half] = re[k + j] - tr;
+                im[k + j + half] = im[k + j] - ti;
+                re[k + j] += tr;
+                im[k + j] += ti;
+                float wt = wr * wpr - wi * wpi;
+                wi = wr * wpi + wi * wpr;
+                wr = wt;
+            }
+        }
+    }
+}
+
+// ── HTK mel scale ───────────────────────────────────────────────
+
+static float hz_to_mel(float f) {
+    return 2595.0f * log10f(1.0f + f / 700.0f);
+}
+static float mel_to_hz(float m) {
+    return 700.0f * (powf(10.0f, m / 2595.0f) - 1.0f);
+}
+
 // ── Mel spectrogram (vocos-type, 24kHz) ──────────────────────────
+//
+// Matches torchaudio.transforms.MelSpectrogram with:
+//   sample_rate=24000, n_fft=1024, win_length=1024, hop_length=256,
+//   n_mels=100, power=1, center=True, normalized=False, norm=None
+// Followed by: clamp(min=1e-5).log()
+//
+// Returns (T, n_mels) row-major mel spectrogram.
 
 static std::vector<float> compute_mel_spectrogram(const float* pcm_24k, int n_samples, int n_fft, int hop_length,
                                                   int win_length, int n_mels, int& T_out) {
-    // TODO: implement vocos-type mel spectrogram using core_mel or inline
-    // For now, this is a placeholder. The reference dumper provides ref_mel
-    // directly so the C++ mel is only needed for end-to-end inference.
-    // The diff harness validates each stage independently.
-    (void)pcm_24k;
-    (void)n_samples;
-    (void)n_fft;
-    (void)hop_length;
-    (void)win_length;
-    (void)n_mels;
-    T_out = 0;
-    return {};
+    int n_freqs = n_fft / 2 + 1; // 513
+    float sr = 24000.0f;
+
+    // ── Build mel filterbank (n_freqs × n_mels) ──
+    std::vector<float> mel_fb(n_freqs * n_mels, 0.0f);
+    {
+        float f_min = 0.0f, f_max = sr / 2.0f;
+        float mel_min = hz_to_mel(f_min);
+        float mel_max = hz_to_mel(f_max);
+        std::vector<float> mel_points(n_mels + 2);
+        for (int i = 0; i < n_mels + 2; i++)
+            mel_points[i] = mel_to_hz(mel_min + (mel_max - mel_min) * (float)i / (float)(n_mels + 1));
+        for (int m = 0; m < n_mels; m++) {
+            float f_left = mel_points[m];
+            float f_center = mel_points[m + 1];
+            float f_right = mel_points[m + 2];
+            for (int k = 0; k < n_freqs; k++) {
+                float f = (float)k * sr / (float)n_fft;
+                float val = 0.0f;
+                if (f >= f_left && f <= f_center && f_center > f_left)
+                    val = (f - f_left) / (f_center - f_left);
+                else if (f > f_center && f <= f_right && f_right > f_center)
+                    val = (f_right - f) / (f_right - f_center);
+                mel_fb[k * n_mels + m] = val;
+            }
+        }
+    }
+
+    // ── Hann window ──
+    std::vector<float> hann(win_length);
+    for (int i = 0; i < win_length; i++)
+        hann[i] = 0.5f * (1.0f - cosf(2.0f * (float)M_PI * (float)i / (float)win_length));
+
+    // ── Center padding (reflect) ──
+    int pad = n_fft / 2;
+    int padded_len = n_samples + 2 * pad;
+    std::vector<float> padded(padded_len);
+    // Reflect pad left
+    for (int i = 0; i < pad; i++)
+        padded[i] = pcm_24k[pad - i]; // reflect: index 1,2,3,...,pad
+    // Copy signal
+    for (int i = 0; i < n_samples; i++)
+        padded[pad + i] = pcm_24k[i];
+    // Reflect pad right
+    for (int i = 0; i < pad; i++)
+        padded[pad + n_samples + i] = pcm_24k[n_samples - 2 - i]; // reflect
+
+    // ── STFT frames ──
+    int T = (padded_len - n_fft) / hop_length + 1;
+    T_out = T;
+
+    // ── Process each frame: window → FFT → magnitude → mel → log ──
+    std::vector<float> mel_spec(T * n_mels);
+    std::vector<float> frame_re(n_fft), frame_im(n_fft);
+    std::vector<float> mag(n_freqs);
+
+    for (int t = 0; t < T; t++) {
+        int offset = t * hop_length;
+
+        // Window the frame
+        for (int i = 0; i < n_fft; i++) {
+            frame_re[i] = padded[offset + i] * hann[i];
+            frame_im[i] = 0.0f;
+        }
+
+        // Forward FFT (sign = -1 for forward DFT convention e^{-j2pi})
+        fft_radix2(frame_re.data(), frame_im.data(), n_fft, -1);
+
+        // Magnitude spectrum (power=1)
+        for (int k = 0; k < n_freqs; k++) {
+            mag[k] = sqrtf(frame_re[k] * frame_re[k] + frame_im[k] * frame_im[k]);
+        }
+
+        // Mel filterbank multiplication: mel[m] = sum_k mag[k] * fb[k, m]
+        for (int m = 0; m < n_mels; m++) {
+            float sum = 0.0f;
+            for (int k = 0; k < n_freqs; k++)
+                sum += mag[k] * mel_fb[k * n_mels + m];
+            // Clamp and log
+            if (sum < 1e-5f)
+                sum = 1e-5f;
+            mel_spec[t * n_mels + m] = logf(sum);
+        }
+    }
+
+    return mel_spec;
 }
 
 // ── DiT forward (one ODE step) ───────────────────────────────────
@@ -735,24 +869,13 @@ static std::vector<float> dit_forward(f5_tts_context* ctx, const float* x_data, 
         dump_stage(ctx, "input_embed", hidden.data(), hidden.size());
     }
 
-    // ── RoPE precomputation ──
-    // Rotary embedding: freqs for seq_len T, dim=dim_head=64
-    // Using x_transformers style: (freqs, xpos_scale) where xpos_scale=None
-    std::vector<float> rope_cos(T * hp.dim_head);
-    std::vector<float> rope_sin(T * hp.dim_head);
-    {
-        std::vector<float> inv_freq;
-        read_tensor_f32(w.rotary_inv_freq, inv_freq); // (32,)
-        for (int t = 0; t < T; t++) {
-            for (int d = 0; d < hp.dim_head / 2; d++) {
-                float angle = (float)t * inv_freq[d];
-                rope_cos[t * hp.dim_head + d * 2] = cosf(angle);
-                rope_cos[t * hp.dim_head + d * 2 + 1] = cosf(angle);
-                rope_sin[t * hp.dim_head + d * 2] = sinf(angle);
-                rope_sin[t * hp.dim_head + d * 2 + 1] = sinf(angle);
-            }
-        }
-    }
+    // ── RoPE note ──
+    // x_transformers rotate_half pairs adjacent elements (2k, 2k+1):
+    //   x = rearrange(x, '(d r) -> d r', r=2)  →  x1=x[0::2], x2=x[1::2]
+    //   rotated = stack(-x2, x1) → [-x1, x0, -x3, x2, ...]
+    // RotaryEmbedding interleaves freqs: stack((f,f), dim=-1) → [f0,f0,f1,f1,...]
+    // so paired elements share the SAME frequency — a standard 2D rotation,
+    // equivalent to GGML_ROPE_TYPE_NORMAL (mode=0).
 
     // ── 22 DiT blocks ──
     for (int blk_idx = 0; blk_idx < hp.depth; blk_idx++) {
@@ -767,142 +890,275 @@ static std::vector<float> dit_forward(f5_tts_context* ctx, const float* x_data, 
         // 6. ffn(input) → ffn_output
         // 7. x = x + gate_mlp * ffn_output
 
-        mini_graph mg(ctx->backend, 64 * 1024 * 1024);
-
-        ggml_tensor* x_in = ggml_new_tensor_2d(mg.ctx, GGML_TYPE_F32, dim, T);
-        ggml_set_name(x_in, "blk_in");
-        ggml_set_input(x_in);
-
-        ggml_tensor* t_emb = ggml_new_tensor_1d(mg.ctx, GGML_TYPE_F32, dim);
-        ggml_set_name(t_emb, "t_emb");
-        ggml_set_input(t_emb);
-
-        // AdaLN modulation: silu(t_emb) → linear → 6 chunks
-        ggml_tensor* emb = ggml_silu(mg.ctx, t_emb);
-        emb = ggml_mul_mat(mg.ctx, blk.adaln_weight, emb);
-        emb = ggml_add(mg.ctx, emb, blk.adaln_bias); // (6*dim,)
-
-        // Split into 6 × dim
-        int d6 = 6 * dim;
-        ggml_tensor* shift_msa = ggml_view_1d(mg.ctx, emb, dim, 0 * dim * sizeof(float));
-        ggml_tensor* scale_msa = ggml_view_1d(mg.ctx, emb, dim, 1 * dim * sizeof(float));
-        ggml_tensor* gate_msa = ggml_view_1d(mg.ctx, emb, dim, 2 * dim * sizeof(float));
-        ggml_tensor* shift_mlp = ggml_view_1d(mg.ctx, emb, dim, 3 * dim * sizeof(float));
-        ggml_tensor* scale_mlp = ggml_view_1d(mg.ctx, emb, dim, 4 * dim * sizeof(float));
-        ggml_tensor* gate_mlp = ggml_view_1d(mg.ctx, emb, dim, 5 * dim * sizeof(float));
-
-        // Pre-norm for attention: LayerNorm(x, no affine) * (1 + scale) + shift
-        // Compute as: norm + norm * scale + shift  (avoids scalar add)
-        ggml_tensor* norm_x = ggml_norm(mg.ctx, x_in, 1e-6f);
-        ggml_tensor* scaled = ggml_mul(mg.ctx, norm_x, scale_msa);
-        norm_x = ggml_add(mg.ctx, norm_x, scaled);
-        norm_x = ggml_add(mg.ctx, norm_x, shift_msa);
-
-        // Self-attention with RoPE
-        // Q, K, V: (T, dim) → (T, dim) via linear
-        ggml_tensor* q = ggml_mul_mat(mg.ctx, blk.attn_q_weight, norm_x);
-        q = ggml_add(mg.ctx, q, blk.attn_q_bias);
-        ggml_tensor* k = ggml_mul_mat(mg.ctx, blk.attn_k_weight, norm_x);
-        k = ggml_add(mg.ctx, k, blk.attn_k_bias);
-        ggml_tensor* v = ggml_mul_mat(mg.ctx, blk.attn_v_weight, norm_x);
-        v = ggml_add(mg.ctx, v, blk.attn_v_bias);
-
-        // Multi-head attention
-        // Q/K/V from mul_mat are (dim, T). Reshape to (head_dim, n_heads, T).
         int n_heads = hp.heads;
         int head_dim = hp.dim_head;
-        q = ggml_reshape_3d(mg.ctx, q, head_dim, n_heads, T);
-        k = ggml_reshape_3d(mg.ctx, k, head_dim, n_heads, T);
-        v = ggml_reshape_3d(mg.ctx, v, head_dim, n_heads, T);
 
-        // Apply RoPE to Q and K
-        // ggml_rope expects (head_dim, n_heads, T) with pos_ids size = T
-        ggml_tensor* pos_ids = ggml_new_tensor_1d(mg.ctx, GGML_TYPE_I32, T);
-        ggml_set_name(pos_ids, "pos_ids");
-        ggml_set_input(pos_ids);
-        q = ggml_rope(mg.ctx, q, pos_ids, head_dim, 0);
-        k = ggml_rope(mg.ctx, k, pos_ids, head_dim, 0);
-
-        // Permute to flash_attn layout: (head_dim, T, n_heads) for Q/K/V
-        q = ggml_cont(mg.ctx, ggml_permute(mg.ctx, q, 0, 2, 1, 3)); // → (head_dim, T, n_heads)
-        k = ggml_cont(mg.ctx, ggml_permute(mg.ctx, k, 0, 2, 1, 3));
-        v = ggml_cont(mg.ctx, ggml_permute(mg.ctx, v, 0, 2, 1, 3));
-
-        // ggml_flash_attn_ext: Q(head_dim, T, n_heads), K(head_dim, T_k, n_heads), V(head_dim, T_k, n_heads)
-        ggml_tensor* attn = ggml_flash_attn_ext(mg.ctx, q, k, v,
-                                                nullptr, // no mask (bidirectional)
-                                                1.0f / sqrtf((float)head_dim), // 1/sqrt(64)=0.125
-                                                0.0f,    // max_bias (no ALiBi)
-                                                0.0f);   // logit_softcap (none)
-        // Output: (head_dim, T, n_heads)
-        // Permute back: (head_dim, n_heads, T) then reshape to (dim, T)
-        attn = ggml_cont(mg.ctx, ggml_permute(mg.ctx, attn, 0, 2, 1, 3)); // (head_dim, n_heads, T)
-        attn = ggml_reshape_2d(mg.ctx, attn, dim, T);
-
-        // Output projection
-        attn = ggml_mul_mat(mg.ctx, blk.attn_o_weight, attn);
-        attn = ggml_add(mg.ctx, attn, blk.attn_o_bias);
-
-        // Gated residual: x = x + gate_msa * attn
-        ggml_tensor* gated_attn = ggml_mul(mg.ctx, attn, gate_msa);
-        ggml_tensor* x_res = ggml_add(mg.ctx, x_in, gated_attn);
-
-        // FFN pre-norm: LayerNorm(x, no affine) * (1 + scale_mlp) + shift_mlp
-        ggml_tensor* ff_norm = ggml_norm(mg.ctx, x_res, 1e-6f);
-        ggml_tensor* ff_scaled = ggml_mul(mg.ctx, ff_norm, scale_mlp);
-        ff_norm = ggml_add(mg.ctx, ff_norm, ff_scaled);
-        ff_norm = ggml_add(mg.ctx, ff_norm, shift_mlp);
-
-        // FFN: Linear(dim→2*dim*ff_mult) → GELU_tanh → Linear → out
-        ggml_tensor* ff = ggml_mul_mat(mg.ctx, blk.ffn_up_weight, ff_norm);
-        ff = ggml_add(mg.ctx, ff, blk.ffn_up_bias);
-        ff = ggml_gelu(mg.ctx, ff); // NOTE: F5-TTS uses GELU_tanh approximation
-        ff = ggml_mul_mat(mg.ctx, blk.ffn_down_weight, ff);
-        ff = ggml_add(mg.ctx, ff, blk.ffn_down_bias);
-
-        // Gated residual: x = x + gate_mlp * ff
-        ggml_tensor* gated_ff = ggml_mul(mg.ctx, ff, gate_mlp);
-        ggml_tensor* x_out = ggml_add(mg.ctx, x_res, gated_ff);
-
-        // Mark sub-stages as outputs for debugging
-        ggml_set_name(norm_x, "dump_adaln");
-        ggml_set_output(norm_x);
-        ggml_set_name(attn, "dump_attn_raw");
-        // Note: attn has been through O proj at this point
-        ggml_set_name(x_res, "dump_post_attn");
-        ggml_set_output(x_res);
-
-        ggml_set_name(x_out, "blk_out");
-        ggml_set_output(x_out);
-
-        ggml_cgraph* gf = ggml_new_graph_custom(mg.ctx, 32768, false);
-        ggml_build_forward_expand(gf, x_out);
-        if (!ggml_gallocr_alloc_graph(mg.alloc, gf))
-            return {};
-        mg.set_input(x_in, hidden.data(), hidden.size() * sizeof(float));
-        mg.set_input(t_emb, time_emb_data, dim * sizeof(float));
-        // Set position IDs for RoPE
+        // ── Phase 1: AdaLN + QKV projections (via ggml graph) ──
+        // Outputs: adaln_norm (T, dim), Q/K/V (dim, T), modulation params
+        std::vector<float> adaln_norm_data(T * dim);
+        std::vector<float> q_data(T * dim), k_data(T * dim), v_data(T * dim);
+        std::vector<float> gate_msa_data(dim), gate_mlp_data(dim);
+        std::vector<float> shift_mlp_data(dim), scale_mlp_data(dim);
         {
-            std::vector<int32_t> pos(T);
-            for (int i = 0; i < T; i++)
-                pos[i] = i;
-            mg.set_input(pos_ids, pos.data(), T * sizeof(int32_t));
-        }
-        ggml_backend_graph_compute(mg.backend, gf);
+            mini_graph mg(ctx->backend, 64 * 1024 * 1024);
 
-        hidden.resize(T * dim);
-        ggml_backend_tensor_get(x_out, hidden.data(), 0, hidden.size() * sizeof(float));
+            ggml_tensor* x_in = ggml_new_tensor_2d(mg.ctx, GGML_TYPE_F32, dim, T);
+            ggml_set_name(x_in, "blk_in");
+            ggml_set_input(x_in);
+
+            ggml_tensor* t_emb = ggml_new_tensor_1d(mg.ctx, GGML_TYPE_F32, dim);
+            ggml_set_name(t_emb, "t_emb");
+            ggml_set_input(t_emb);
+
+            // AdaLN modulation: silu(t_emb) → linear → 6 chunks
+            ggml_tensor* emb = ggml_silu(mg.ctx, t_emb);
+            emb = ggml_mul_mat(mg.ctx, blk.adaln_weight, emb);
+            emb = ggml_add(mg.ctx, emb, blk.adaln_bias);
+
+            ggml_tensor* shift_msa = ggml_view_1d(mg.ctx, emb, dim, 0 * dim * sizeof(float));
+            ggml_tensor* scale_msa = ggml_view_1d(mg.ctx, emb, dim, 1 * dim * sizeof(float));
+            ggml_tensor* gate_msa = ggml_view_1d(mg.ctx, emb, dim, 2 * dim * sizeof(float));
+            ggml_tensor* shift_mlp = ggml_view_1d(mg.ctx, emb, dim, 3 * dim * sizeof(float));
+            ggml_tensor* scale_mlp = ggml_view_1d(mg.ctx, emb, dim, 4 * dim * sizeof(float));
+            ggml_tensor* gate_mlp = ggml_view_1d(mg.ctx, emb, dim, 5 * dim * sizeof(float));
+
+            // Pre-norm: norm + norm*scale + shift
+            ggml_tensor* norm_x = ggml_norm(mg.ctx, x_in, 1e-6f);
+            ggml_tensor* scaled = ggml_mul(mg.ctx, norm_x, scale_msa);
+            norm_x = ggml_add(mg.ctx, norm_x, scaled);
+            norm_x = ggml_add(mg.ctx, norm_x, shift_msa);
+            ggml_set_name(norm_x, "norm_x");
+            ggml_set_output(norm_x);
+
+            // QKV projections
+            ggml_tensor* q = ggml_mul_mat(mg.ctx, blk.attn_q_weight, norm_x);
+            q = ggml_add(mg.ctx, q, blk.attn_q_bias);
+            ggml_set_name(q, "q_out");
+            ggml_set_output(q);
+
+            ggml_tensor* k = ggml_mul_mat(mg.ctx, blk.attn_k_weight, norm_x);
+            k = ggml_add(mg.ctx, k, blk.attn_k_bias);
+            ggml_set_name(k, "k_out");
+            ggml_set_output(k);
+
+            ggml_tensor* v = ggml_mul_mat(mg.ctx, blk.attn_v_weight, norm_x);
+            v = ggml_add(mg.ctx, v, blk.attn_v_bias);
+            ggml_set_name(v, "v_out");
+            ggml_set_output(v);
+
+            // Modulation params as outputs
+            ggml_set_name(gate_msa, "gate_msa");
+            ggml_set_output(gate_msa);
+            ggml_set_name(gate_mlp, "gate_mlp");
+            ggml_set_output(gate_mlp);
+            ggml_set_name(shift_mlp, "shift_mlp");
+            ggml_set_output(shift_mlp);
+            ggml_set_name(scale_mlp, "scale_mlp");
+            ggml_set_output(scale_mlp);
+
+            ggml_cgraph* gf = ggml_new_graph_custom(mg.ctx, 32768, false);
+            ggml_build_forward_expand(gf, q);
+            ggml_build_forward_expand(gf, k);
+            ggml_build_forward_expand(gf, v);
+            ggml_build_forward_expand(gf, gate_msa);
+            ggml_build_forward_expand(gf, gate_mlp);
+            ggml_build_forward_expand(gf, shift_mlp);
+            ggml_build_forward_expand(gf, scale_mlp);
+            if (!ggml_gallocr_alloc_graph(mg.alloc, gf))
+                return {};
+            mg.set_input(x_in, hidden.data(), hidden.size() * sizeof(float));
+            mg.set_input(t_emb, time_emb_data, dim * sizeof(float));
+            ggml_backend_graph_compute(mg.backend, gf);
+
+            ggml_backend_tensor_get(norm_x, adaln_norm_data.data(), 0, T * dim * sizeof(float));
+            ggml_backend_tensor_get(q, q_data.data(), 0, T * dim * sizeof(float));
+            ggml_backend_tensor_get(k, k_data.data(), 0, T * dim * sizeof(float));
+            ggml_backend_tensor_get(v, v_data.data(), 0, T * dim * sizeof(float));
+            ggml_backend_tensor_get(gate_msa, gate_msa_data.data(), 0, dim * sizeof(float));
+            ggml_backend_tensor_get(gate_mlp, gate_mlp_data.data(), 0, dim * sizeof(float));
+            ggml_backend_tensor_get(shift_mlp, shift_mlp_data.data(), 0, dim * sizeof(float));
+            ggml_backend_tensor_get(scale_mlp, scale_mlp_data.data(), 0, dim * sizeof(float));
+        }
 
         if (step_idx == 0 && !drop_audio_cond && blk_idx == 0) {
-            std::vector<float> tmp(T * dim);
-            ggml_backend_tensor_get(norm_x, tmp.data(), 0, tmp.size() * sizeof(float));
-            dump_stage(ctx, "dit0_adaln_norm", tmp.data(), tmp.size());
-            ggml_backend_tensor_get(x_res, tmp.data(), 0, tmp.size() * sizeof(float));
-            dump_stage(ctx, "dit0_post_attn", tmp.data(), tmp.size());
-            // Q after RoPE: (head_dim, n_heads, T) = (64, 16, 407)
-            std::vector<float> q_tmp(T * dim);
-            ggml_backend_tensor_get(q_after_rope, q_tmp.data(), 0, q_tmp.size() * sizeof(float));
-            dump_stage(ctx, "dit0_q_after_rope", q_tmp.data(), q_tmp.size());
+            dump_stage(ctx, "dit0_adaln_norm", adaln_norm_data.data(), adaln_norm_data.size());
+            dump_stage(ctx, "dit0_q_pre_rope", q_data.data(), q_data.size());
+        }
+
+        // ── Phase 2: RoPE on CPU ──
+        // x_transformers RotaryEmbedding: interleaved freq pattern [f0,f0,f1,f1,...].
+        // rotate_half pairs adjacent elements: (2k, 2k+1) share frequency inv_freq[k].
+        // This is a standard 2D rotation per pair.
+        // x_transformers RotaryEmbedding uses stack((freqs,freqs), dim=-1)
+        // + rearrange('d r -> (d r)'), which INTERLEAVES frequencies so
+        // paired elements (2k, 2k+1) share the SAME frequency inv_freq[k].
+        // This is a standard 2D rotation — equivalent to GGML_ROPE_TYPE_NORMAL.
+        // We keep the CPU loop for clarity but use the correct shared frequency.
+        {
+            std::vector<float> inv_freq;
+            read_tensor_f32(w.rotary_inv_freq, inv_freq);
+
+            auto apply_rope_x_transformers = [&](std::vector<float>& qk) {
+                for (int t = 0; t < T; t++) {
+                    for (int h = 0; h < n_heads; h++) {
+                        int base = h * head_dim + t * dim;
+                        // Process pairs (2k, 2k+1) with shared frequency inv_freq[k].
+                        for (int k = 0; k < head_dim / 2; k++) {
+                            int i0 = base + 2 * k;
+                            int i1 = base + 2 * k + 1;
+                            float x0 = qk[i0];
+                            float x1 = qk[i1];
+                            float angle = (float)t * inv_freq[k];
+                            float cos_a = cosf(angle);
+                            float sin_a = sinf(angle);
+                            // rotate_half[2k] = -x1, rotate_half[2k+1] = x0
+                            qk[i0] = x0 * cos_a - x1 * sin_a;
+                            qk[i1] = x1 * cos_a + x0 * sin_a;
+                        }
+                    }
+                }
+            };
+
+            apply_rope_x_transformers(q_data);
+            apply_rope_x_transformers(k_data);
+        }
+
+        if (step_idx == 0 && !drop_audio_cond && blk_idx == 0) {
+            dump_stage(ctx, "dit0_q_after_rope", q_data.data(), q_data.size());
+        }
+
+        // ── Phase 3: Self-attention on CPU ──
+        // Q/K/V: (dim, T) with dim = n_heads * head_dim.
+        // Compute per-head: scores = Q^T K / sqrt(head_dim), softmax, output = scores * V
+        // Using double precision for softmax to match PyTorch's numerical path.
+        std::vector<float> attn_out(T * dim, 0.0f);
+        {
+            float scale = 1.0f / sqrtf((float)head_dim);
+            for (int h = 0; h < n_heads; h++) {
+                // Extract head slices: q/k/v_data are in (dim, T) layout.
+                // For each t: head h spans q_data[h*head_dim .. h*head_dim+head_dim-1] at offset t*dim.
+                std::vector<float> qh(T * head_dim), kh(T * head_dim), vh(T * head_dim);
+                for (int t = 0; t < T; t++) {
+                    int src_base = h * head_dim + t * dim;
+                    int dst_base = t * head_dim;
+                    for (int d = 0; d < head_dim; d++) {
+                        qh[dst_base + d] = q_data[src_base + d];
+                        kh[dst_base + d] = k_data[src_base + d];
+                        vh[dst_base + d] = v_data[src_base + d];
+                    }
+                }
+
+                // Attention scores + softmax + weighted sum
+                for (int t1 = 0; t1 < T; t1++) {
+                    // Compute scores for row t1
+                    std::vector<float> scores(T);
+                    float max_score = -1e30f;
+                    for (int t2 = 0; t2 < T; t2++) {
+                        float dot = 0;
+                        for (int d = 0; d < head_dim; d++) {
+                            dot += qh[t1 * head_dim + d] * kh[t2 * head_dim + d];
+                        }
+                        scores[t2] = dot * scale;
+                        if (scores[t2] > max_score)
+                            max_score = scores[t2];
+                    }
+                    // Softmax
+                    float sum_exp = 0;
+                    for (int t2 = 0; t2 < T; t2++) {
+                        scores[t2] = expf(scores[t2] - max_score);
+                        sum_exp += scores[t2];
+                    }
+                    float inv_sum = 1.0f / sum_exp;
+                    for (int t2 = 0; t2 < T; t2++) {
+                        scores[t2] *= inv_sum;
+                    }
+                    // Weighted sum: output = scores @ V
+                    int out_base = h * head_dim + t1 * dim;
+                    for (int d = 0; d < head_dim; d++) {
+                        float sum = 0;
+                        for (int t2 = 0; t2 < T; t2++) {
+                            sum += scores[t2] * vh[t2 * head_dim + d];
+                        }
+                        attn_out[out_base + d] = sum;
+                    }
+                }
+            }
+        }
+
+        // ── Phase 4: O-proj + gating + FFN (via ggml graph) ──
+        {
+            mini_graph mg(ctx->backend, 64 * 1024 * 1024);
+
+            ggml_tensor* x_in = ggml_new_tensor_2d(mg.ctx, GGML_TYPE_F32, dim, T);
+            ggml_set_name(x_in, "blk_x");
+            ggml_set_input(x_in);
+
+            ggml_tensor* attn_in = ggml_new_tensor_2d(mg.ctx, GGML_TYPE_F32, dim, T);
+            ggml_set_name(attn_in, "attn_in");
+            ggml_set_input(attn_in);
+
+            ggml_tensor* gate_msa_t = ggml_new_tensor_1d(mg.ctx, GGML_TYPE_F32, dim);
+            ggml_set_name(gate_msa_t, "gate_msa");
+            ggml_set_input(gate_msa_t);
+            ggml_tensor* gate_mlp_t = ggml_new_tensor_1d(mg.ctx, GGML_TYPE_F32, dim);
+            ggml_set_name(gate_mlp_t, "gate_mlp");
+            ggml_set_input(gate_mlp_t);
+            ggml_tensor* shift_mlp_t = ggml_new_tensor_1d(mg.ctx, GGML_TYPE_F32, dim);
+            ggml_set_name(shift_mlp_t, "shift_mlp");
+            ggml_set_input(shift_mlp_t);
+            ggml_tensor* scale_mlp_t = ggml_new_tensor_1d(mg.ctx, GGML_TYPE_F32, dim);
+            ggml_set_name(scale_mlp_t, "scale_mlp");
+            ggml_set_input(scale_mlp_t);
+
+            // O-proj
+            ggml_tensor* attn = ggml_mul_mat(mg.ctx, blk.attn_o_weight, attn_in);
+            attn = ggml_add(mg.ctx, attn, blk.attn_o_bias);
+
+            // Gated residual: x = x + gate_msa * attn
+            ggml_tensor* gated_attn = ggml_mul(mg.ctx, attn, gate_msa_t);
+            ggml_tensor* x_res = ggml_add(mg.ctx, x_in, gated_attn);
+            ggml_set_name(x_res, "x_res");
+            ggml_set_output(x_res);
+
+            // FFN pre-norm
+            ggml_tensor* ff_norm = ggml_norm(mg.ctx, x_res, 1e-6f);
+            ggml_tensor* ff_scaled = ggml_mul(mg.ctx, ff_norm, scale_mlp_t);
+            ff_norm = ggml_add(mg.ctx, ff_norm, ff_scaled);
+            ff_norm = ggml_add(mg.ctx, ff_norm, shift_mlp_t);
+
+            // FFN
+            ggml_tensor* ff = ggml_mul_mat(mg.ctx, blk.ffn_up_weight, ff_norm);
+            ff = ggml_add(mg.ctx, ff, blk.ffn_up_bias);
+            ff = ggml_gelu(mg.ctx, ff);
+            ff = ggml_mul_mat(mg.ctx, blk.ffn_down_weight, ff);
+            ff = ggml_add(mg.ctx, ff, blk.ffn_down_bias);
+
+            // Gated residual
+            ggml_tensor* gated_ff = ggml_mul(mg.ctx, ff, gate_mlp_t);
+            ggml_tensor* x_out = ggml_add(mg.ctx, x_res, gated_ff);
+            ggml_set_name(x_out, "blk_out");
+            ggml_set_output(x_out);
+
+            ggml_cgraph* gf = ggml_new_graph_custom(mg.ctx, 32768, false);
+            ggml_build_forward_expand(gf, x_out);
+            if (!ggml_gallocr_alloc_graph(mg.alloc, gf))
+                return {};
+            mg.set_input(x_in, hidden.data(), hidden.size() * sizeof(float));
+            mg.set_input(attn_in, attn_out.data(), attn_out.size() * sizeof(float));
+            mg.set_input(gate_msa_t, gate_msa_data.data(), dim * sizeof(float));
+            mg.set_input(gate_mlp_t, gate_mlp_data.data(), dim * sizeof(float));
+            mg.set_input(shift_mlp_t, shift_mlp_data.data(), dim * sizeof(float));
+            mg.set_input(scale_mlp_t, scale_mlp_data.data(), dim * sizeof(float));
+            ggml_backend_graph_compute(mg.backend, gf);
+
+            hidden.resize(T * dim);
+            ggml_backend_tensor_get(x_out, hidden.data(), 0, hidden.size() * sizeof(float));
+
+            if (step_idx == 0 && !drop_audio_cond && blk_idx == 0) {
+                std::vector<float> tmp(T * dim);
+                ggml_backend_tensor_get(x_res, tmp.data(), 0, tmp.size() * sizeof(float));
+                dump_stage(ctx, "dit0_post_attn", tmp.data(), tmp.size());
+            }
         }
         if (step_idx == 0 && !drop_audio_cond) {
             char label[64];
@@ -963,19 +1219,296 @@ static std::vector<float> dit_forward(f5_tts_context* ctx, const float* x_data, 
 
 // ── Vocos vocoder ────────────────────────────────────────────────
 
+// ── CPU Conv1d helper (standard or depthwise) ──────────────────────
+// input/output: (C, T) row-major. weight: (C_out, C_in_per_group, K).
+static void cpu_conv1d(const float* input, int C_in, int T, const float* weight, const float* bias, int C_out, int K,
+                       int pad, int groups, float* output) {
+    int ch_per_group_in = C_in / groups;
+    int ch_per_group_out = C_out / groups;
+    for (int g = 0; g < groups; g++) {
+        int oc_start = g * ch_per_group_out;
+        int ic_start = g * ch_per_group_in;
+        for (int oc = oc_start; oc < oc_start + ch_per_group_out; oc++) {
+            for (int t = 0; t < T; t++) {
+                float sum = bias ? bias[oc] : 0.0f;
+                for (int ic_local = 0; ic_local < ch_per_group_in; ic_local++) {
+                    int ic = ic_start + ic_local;
+                    for (int k = 0; k < K; k++) {
+                        int ti = t + k - pad;
+                        if (ti >= 0 && ti < T) {
+                            int w_idx = oc * ch_per_group_in * K + ic_local * K + k;
+                            sum += input[ic * T + ti] * weight[w_idx];
+                        }
+                    }
+                }
+                output[oc * T + t] = sum;
+            }
+        }
+    }
+}
+
+// ── CPU LayerNorm over last dim of (T, D) data ─────────────────────
+static void cpu_layer_norm(float* data, int T, int D, const float* gamma, const float* beta, float eps) {
+    for (int t = 0; t < T; t++) {
+        float* row = data + t * D;
+        float mean = 0;
+        for (int d = 0; d < D; d++)
+            mean += row[d];
+        mean /= D;
+        float var = 0;
+        for (int d = 0; d < D; d++) {
+            float diff = row[d] - mean;
+            var += diff * diff;
+        }
+        var /= D;
+        float inv_std = 1.0f / sqrtf(var + eps);
+        for (int d = 0; d < D; d++) {
+            row[d] = ((row[d] - mean) * inv_std) * gamma[d] + beta[d];
+        }
+    }
+}
+
+// ── Transpose (C, T) ↔ (T, C) ──────────────────────────────────────
+static void transpose_ct(const float* src, int C, int T, float* dst) {
+    // src: (C, T) → dst: (T, C)
+    for (int c = 0; c < C; c++)
+        for (int t = 0; t < T; t++)
+            dst[t * C + c] = src[c * T + t];
+}
+
+static void transpose_tc(const float* src, int T, int C, float* dst) {
+    // src: (T, C) → dst: (C, T)
+    for (int t = 0; t < T; t++)
+        for (int c = 0; c < C; c++)
+            dst[c * T + t] = src[t * C + c];
+}
+
 static std::vector<float> vocos_decode(f5_tts_context* ctx, const float* mel_data, int T_mel, int mel_dim) {
     const auto& hp = ctx->hp;
     const auto& w = ctx->w;
-    int voc_dim = hp.voc_dim;
+    int D = hp.voc_dim; // 512
+    int T = T_mel;
+    int inter_dim = hp.voc_intermediate_dim; // 1536
 
-    // Vocos: mel (100, T) → embed conv → LN → 8× ConvNeXt → LN → linear → iSTFT
-
-    // For now, return empty — Vocos will be wired up after DiT validation passes
-    // TODO: implement Vocos forward pass
     if (ctx->verbosity >= 1) {
-        fprintf(stderr, "f5_tts: vocos_decode not yet implemented\n");
+        fprintf(stderr, "f5_tts: vocos_decode T=%d mel_dim=%d voc_dim=%d\n", T, mel_dim, D);
     }
-    return {};
+
+    // mel_data is (T, 100) row-major. Convert to (100, T) for conv operations.
+    std::vector<float> x_ct(mel_dim * T);
+    transpose_tc(mel_data, T, mel_dim, x_ct.data());
+
+    // ── Embed: Conv1d(100, 512, k=7, pad=3) ──
+    {
+        std::vector<float> emb_w, emb_b;
+        read_tensor_f32(w.voc_embed_weight, emb_w); // (512, 100, 7)
+        read_tensor_f32(w.voc_embed_bias, emb_b);
+        std::vector<float> out(D * T, 0.0f);
+        cpu_conv1d(x_ct.data(), mel_dim, T, emb_w.data(), emb_b.data(), D, 7, 3, 1, out.data());
+        x_ct = std::move(out);
+    }
+
+    // ── Initial LayerNorm: transpose to (T, D), norm, transpose back ──
+    {
+        std::vector<float> x_td(T * D);
+        transpose_ct(x_ct.data(), D, T, x_td.data());
+        std::vector<float> norm_w, norm_b;
+        read_tensor_f32(w.voc_norm_weight, norm_w);
+        read_tensor_f32(w.voc_norm_bias, norm_b);
+        cpu_layer_norm(x_td.data(), T, D, norm_w.data(), norm_b.data(), 1e-6f);
+        transpose_tc(x_td.data(), T, D, x_ct.data());
+    }
+
+    // ── 8× ConvNeXt blocks ──
+    for (int b = 0; b < hp.voc_num_layers; b++) {
+        const auto& blk = w.voc_blocks[b];
+        std::vector<float> residual = x_ct; // (D, T)
+
+        // 1. Depthwise Conv1d(512, 512, k=7, pad=3, groups=512)
+        {
+            std::vector<float> dw_w, dw_b;
+            read_tensor_f32(blk.dw_weight, dw_w); // (512, 1, 7)
+            read_tensor_f32(blk.dw_bias, dw_b);
+            std::vector<float> out(D * T, 0.0f);
+            cpu_conv1d(x_ct.data(), D, T, dw_w.data(), dw_b.data(), D, 7, 3, D, out.data());
+            x_ct = std::move(out);
+        }
+
+        // 2. Transpose to (T, D), LayerNorm
+        std::vector<float> x_td(T * D);
+        transpose_ct(x_ct.data(), D, T, x_td.data());
+        {
+            std::vector<float> norm_w, norm_b;
+            read_tensor_f32(blk.norm_weight, norm_w);
+            read_tensor_f32(blk.norm_bias, norm_b);
+            cpu_layer_norm(x_td.data(), T, D, norm_w.data(), norm_b.data(), 1e-6f);
+        }
+
+        // 3. Pointwise up: Linear(512, 1536)
+        std::vector<float> up_out(T * inter_dim, 0.0f);
+        {
+            std::vector<float> pw_w, pw_b;
+            read_tensor_f32(blk.pw_up_weight, pw_w); // (1536, 512)
+            read_tensor_f32(blk.pw_up_bias, pw_b);
+            for (int t = 0; t < T; t++) {
+                for (int o = 0; o < inter_dim; o++) {
+                    float sum = pw_b[o];
+                    for (int d = 0; d < D; d++)
+                        sum += x_td[t * D + d] * pw_w[o * D + d];
+                    up_out[t * inter_dim + o] = sum;
+                }
+            }
+        }
+
+        // 4. GELU (exact: x * 0.5 * (1 + erf(x/sqrt(2))))
+        for (auto& v : up_out) {
+            v = v * 0.5f * (1.0f + erff(v / sqrtf(2.0f)));
+        }
+
+        // 5. Pointwise down: Linear(1536, 512)
+        std::vector<float> down_out(T * D, 0.0f);
+        {
+            std::vector<float> pw_w, pw_b;
+            read_tensor_f32(blk.pw_down_weight, pw_w); // (512, 1536)
+            read_tensor_f32(blk.pw_down_bias, pw_b);
+            for (int t = 0; t < T; t++) {
+                for (int o = 0; o < D; o++) {
+                    float sum = pw_b[o];
+                    for (int d = 0; d < inter_dim; d++)
+                        sum += up_out[t * inter_dim + d] * pw_w[o * inter_dim + d];
+                    down_out[t * D + o] = sum;
+                }
+            }
+        }
+
+        // 6. Layer scale (gamma)
+        {
+            std::vector<float> gamma;
+            read_tensor_f32(blk.layer_scale, gamma); // (512,)
+            for (int t = 0; t < T; t++)
+                for (int d = 0; d < D; d++)
+                    down_out[t * D + d] *= gamma[d];
+        }
+
+        // 7. Transpose back to (D, T) and add residual
+        transpose_tc(down_out.data(), T, D, x_ct.data());
+        for (size_t i = 0; i < x_ct.size(); i++)
+            x_ct[i] += residual[i];
+    }
+
+    // ── Final LayerNorm ──
+    std::vector<float> x_td(T * D);
+    transpose_ct(x_ct.data(), D, T, x_td.data());
+    {
+        std::vector<float> norm_w, norm_b;
+        read_tensor_f32(w.voc_final_norm_weight, norm_w);
+        read_tensor_f32(w.voc_final_norm_bias, norm_b);
+        cpu_layer_norm(x_td.data(), T, D, norm_w.data(), norm_b.data(), 1e-6f);
+    }
+    // x_td is now (T, D) = backbone output
+
+    // ── ISTFTHead: Linear(512, 1026) → split mag/phase → iSTFT ──
+    int n_fft = hp.voc_n_fft;    // 1024
+    int hop = hp.voc_hop_length; // 256
+    int n_freqs = n_fft / 2 + 1; // 513
+    int out_dim = n_fft + 2;     // 1026
+
+    // Linear projection
+    std::vector<float> head_out(T * out_dim);
+    {
+        std::vector<float> head_w, head_b;
+        read_tensor_f32(w.voc_head_weight, head_w); // (1026, 512)
+        read_tensor_f32(w.voc_head_bias, head_b);
+        for (int t = 0; t < T; t++) {
+            for (int o = 0; o < out_dim; o++) {
+                float sum = head_b[o];
+                for (int d = 0; d < D; d++)
+                    sum += x_td[t * D + d] * head_w[o * D + d];
+                head_out[t * out_dim + o] = sum;
+            }
+        }
+    }
+
+    // Split into magnitude and phase, each (T, 513)
+    // head_out is (T, 1026) row-major. First 513 = magnitude, last 513 = phase.
+    // mag = exp(mag), clip to max 100
+    // S = mag * (cos(phase) + i*sin(phase))  → complex (T, 513)
+    // Then iSTFT.
+
+    // Transpose to (n_freqs, T) for ISTFT: S_real and S_imag
+    std::vector<float> S_real(n_freqs * T), S_imag(n_freqs * T);
+    for (int t = 0; t < T; t++) {
+        for (int f = 0; f < n_freqs; f++) {
+            float mag = expf(head_out[t * out_dim + f]);
+            if (mag > 100.0f)
+                mag = 100.0f;
+            float phase = head_out[t * out_dim + n_freqs + f];
+            S_real[f * T + t] = mag * cosf(phase);
+            S_imag[f * T + t] = mag * sinf(phase);
+        }
+    }
+
+    // ── ISTFT (custom "same" padding) ──
+    // n_fft=1024, hop=256, win_length=1024
+    int pad = (n_fft - hop) / 2; // 384
+    int output_size = (T - 1) * hop + n_fft;
+
+    // Hann window
+    std::vector<float> hann(n_fft);
+    for (int i = 0; i < n_fft; i++) {
+        hann[i] = 0.5f * (1.0f - cosf(2.0f * (float)M_PI * (float)i / (float)n_fft));
+    }
+
+    // IRFFT + window + overlap-add
+    std::vector<float> audio(output_size, 0.0f);
+    std::vector<float> window_env(output_size, 0.0f);
+
+    // For each time frame, compute IRFFT and overlap-add
+    std::vector<float> frame_real(n_fft), frame_imag(n_fft);
+    for (int t = 0; t < T; t++) {
+        // Build full complex spectrum for IRFFT: n_fft complex values
+        // We have n_freqs = n_fft/2+1 positive frequency bins.
+        // Negative frequencies are conjugate of positive (real signal).
+        for (int f = 0; f < n_freqs; f++) {
+            frame_real[f] = S_real[f * T + t];
+            frame_imag[f] = S_imag[f * T + t];
+        }
+        // Mirror: for f = n_fft/2+1 .. n_fft-1, X[f] = conj(X[n_fft-f])
+        for (int f = n_freqs; f < n_fft; f++) {
+            int mirror = n_fft - f;
+            frame_real[f] = frame_real[mirror];
+            frame_imag[f] = -frame_imag[mirror];
+        }
+
+        // IFFT via shared radix-2 (sign=+1 for inverse)
+        int N = n_fft;
+        // fft_radix2 is in-place, so copy into frame arrays
+        fft_radix2(frame_real.data(), frame_imag.data(), N, +1);
+        // Divide by N and apply window + overlap-add
+        int out_start = t * hop;
+        float inv_n = 1.0f / (float)N;
+        for (int n = 0; n < N; n++) {
+            float sample = frame_real[n] * inv_n; // real part only
+            sample *= hann[n];
+            audio[out_start + n] += sample;
+            window_env[out_start + n] += hann[n] * hann[n];
+        }
+    }
+
+    // Normalize by window envelope and trim padding
+    int trimmed_len = output_size - 2 * pad;
+    if (trimmed_len <= 0)
+        return {};
+    std::vector<float> result(trimmed_len);
+    for (int i = 0; i < trimmed_len; i++) {
+        float env = window_env[pad + i];
+        result[i] = (env > 1e-11f) ? audio[pad + i] / env : 0.0f;
+    }
+
+    if (ctx->verbosity >= 1) {
+        fprintf(stderr, "f5_tts: vocos_decode produced %d samples\n", trimmed_len);
+    }
+    return result;
 }
 
 // ── EPSS timestep schedule ───────────────────────────────────────

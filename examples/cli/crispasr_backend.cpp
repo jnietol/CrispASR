@@ -41,6 +41,8 @@ std::unique_ptr<CrispasrBackend> crispasr_make_sensevoice_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_voxcpm2_tts_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_cosyvoice3_tts_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_piper_backend();
+std::unique_ptr<CrispasrBackend> crispasr_make_outetts_backend();
+std::unique_ptr<CrispasrBackend> crispasr_make_f5_tts_backend();
 
 #include "ggml.h"
 #include "gguf.h"
@@ -106,6 +108,10 @@ std::unique_ptr<CrispasrBackend> crispasr_create_backend(const std::string& name
         return crispasr_make_kokoro_backend();
     if (name == "piper" || name == "piper-tts" || name == "piper-vits")
         return crispasr_make_piper_backend();
+    if (name == "outetts" || name == "outetts-tts" || name == "oute-tts" || name == "outetts-0.3-1b")
+        return crispasr_make_outetts_backend();
+    if (name == "f5-tts" || name == "f5_tts" || name == "f5tts" || name == "f5")
+        return crispasr_make_f5_tts_backend();
     if (name == "voxcpm2-tts" || name == "voxcpm2" || name == "voxcpm" || name == "voxcpm2_tts")
         return crispasr_make_voxcpm2_tts_backend();
     if (name == "cosyvoice3" || name == "cosyvoice3-tts" || name == "cosyvoice3_tts" || name == "cv3" ||
@@ -178,8 +184,10 @@ std::vector<std::string> crispasr_list_backends() {
         "kartoffelbox-turbo",
         "lahgtna-chatterbox",
         "indextts",
+        "f5-tts",
         "kokoro",
         "piper",
+        "outetts",
         "voxcpm2-tts",
         "cosyvoice3-tts",
         "m2m100",
@@ -419,8 +427,12 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
         return "qwen3-tts";
     if (contains_ci("orpheus") || contains_ci("kartoffel-orpheus") || contains_ci("kartoffel_orpheus"))
         return "orpheus";
+    if (contains_ci("outetts") || contains_ci("oute-tts") || contains_ci("oute_tts"))
+        return "outetts";
     if (contains_ci("indextts"))
         return "indextts";
+    if (contains_ci("f5-tts") || contains_ci("f5tts") || contains_ci("F5TTS"))
+        return "f5-tts";
     if (contains_ci("chatterbox") || contains_ci("kartoffelbox") || contains_ci("lahgtna"))
         return "chatterbox";
     if (contains_ci("m2m100") || (contains_ci("m2m") && contains_ci("100")) || contains_ci("wmt21"))
@@ -551,6 +563,8 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
                 result = "sensevoice";
             else if (a == "indextts" || a == "indextts-1.5" || a == "indextts_1_5")
                 result = "indextts";
+            else if (a == "outetts" || a == "oute-tts" || a == "oute_tts")
+                result = "outetts";
         }
     }
     gguf_free(gctx);

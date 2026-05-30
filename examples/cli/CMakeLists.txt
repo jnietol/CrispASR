@@ -30,10 +30,12 @@ add_executable(${TARGET}
     crispasr_backend_orpheus.cpp
     crispasr_backend_chatterbox.cpp
     crispasr_backend_indextts.cpp
+    crispasr_backend_f5_tts.cpp
     crispasr_backend_voxcpm2_tts.cpp
     crispasr_backend_cosyvoice3.cpp
     crispasr_backend_kokoro.cpp
     crispasr_backend_piper.cpp
+    crispasr_backend_outetts.cpp
     crispasr_backend_m2m100.cpp
     crispasr_backend_t5.cpp
     crispasr_backend_glm_asr.cpp

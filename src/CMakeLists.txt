@@ -1010,6 +1010,18 @@ if(NOT CRISPASR_WITH_ESPEAK_NG STREQUAL "OFF")
 endif()
 
 # ---------------------------------------------------------------------------
+# outetts — OuteAI/OuteTTS LLM-based TTS + WavTokenizer codec (native ggml runtime)
+# ---------------------------------------------------------------------------
+add_library(outetts STATIC outetts.h outetts.cpp outetts_wavtok.h outetts_wavtok.cpp)
+set_target_properties(outetts PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(outetts PUBLIC .)
+target_compile_features   (outetts PUBLIC cxx_std_17)
+target_link_libraries     (outetts PUBLIC crispasr-core ggml ggml-base ggml-cpu)
+if(NOT MSVC)
+    target_compile_options(outetts PRIVATE -O3)
+endif()
+
+# ---------------------------------------------------------------------------
 # f5-tts — SWivid/F5-TTS DiT-based flow matching TTS (native ggml runtime)
 # ---------------------------------------------------------------------------
 add_library(f5-tts STATIC f5_tts.h f5_tts.cpp)
@@ -1395,6 +1407,9 @@ if (TARGET cosyvoice3_tts)
 endif()
 if (TARGET kokoro)
     target_link_libraries(crispasr PUBLIC kokoro)
+endif()
+if (TARGET outetts)
+    target_link_libraries(crispasr PUBLIC outetts)
 endif()
 if (TARGET f5-tts)
     target_link_libraries(crispasr PUBLIC f5-tts)

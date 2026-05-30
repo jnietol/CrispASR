@@ -123,6 +123,10 @@
 #include "indextts.h"
 #define CA_HAVE_INDEXTTS 1
 #endif
+#if __has_include("f5_tts.h")
+#include "f5_tts.h"
+#define CA_HAVE_F5TTS 1
+#endif
 #if __has_include("m2m100.h")
 #include "m2m100.h"
 #define CA_HAVE_M2M100 1
@@ -1039,6 +1043,8 @@ CA_EXPORT int crispasr_detect_backend_from_gguf(const char* path, char* out_name
         backend = "cosyvoice3-tts";
     else if (strcmp(arch, "indextts") == 0)
         backend = "indextts";
+    else if (strcmp(arch, "f5-tts") == 0 || strcmp(arch, "f5tts") == 0)
+        backend = "f5-tts";
     else if (strcmp(arch, "m2m100") == 0)
         backend = "m2m100";
     else if (strcmp(arch, "t5") == 0)
@@ -1294,6 +1300,9 @@ struct crispasr_session {
 #ifdef CA_HAVE_INDEXTTS
     indextts_context* indextts_ctx = nullptr;
     std::vector<float> indextts_ref_pcm; // 24 kHz mono cloning reference
+#endif
+#ifdef CA_HAVE_F5TTS
+    f5_tts_context* f5tts_ctx = nullptr;
 #endif
 #ifdef CA_HAVE_PIPER
     piper_tts_context* piper_ctx = nullptr;
@@ -1995,6 +2004,21 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
         return s;
     }
 #endif
+#ifdef CA_HAVE_F5TTS
+    if (s->backend == "f5-tts" || s->backend == "f5tts" || s->backend == "f5") {
+        s->backend = "f5-tts";
+        f5_tts_params p = f5_tts_default_params();
+        p.n_threads = s->n_threads;
+        p.verbosity = g_open_verbosity_tls;
+        p.seed = 42;
+        s->f5tts_ctx = f5_tts_init_from_file(model_path, p);
+        if (!s->f5tts_ctx) {
+            delete s;
+            return nullptr;
+        }
+        return s;
+    }
+#endif
 #ifdef CA_HAVE_PIPER
     if (s->backend == "piper" || s->backend == "piper-tts") {
         s->backend = "piper";
@@ -2281,6 +2305,9 @@ CA_EXPORT int crispasr_session_available_backends(char* out_csv, int out_cap) {
 #endif
 #ifdef CA_HAVE_INDEXTTS
     list += ",indextts";
+#endif
+#ifdef CA_HAVE_F5TTS
+    list += ",f5-tts";
 #endif
 #ifdef CA_HAVE_PIPER
     list += ",piper";
@@ -4578,6 +4605,45 @@ CA_EXPORT int crispasr_session_set_voice(crispasr_session* s, const char* path, 
         return s->indextts_ref_pcm.empty() ? -1 : 0;
     }
 #endif
+#ifdef CA_HAVE_F5TTS
+    if (s->f5tts_ctx) {
+        // F5-TTS clones from a reference WAV + its transcript. Load the
+        // audio (16 kHz from shared loader), resample to 24 kHz, and pass
+        // to the library which computes the mel spectrogram internally.
+        if (!ends_with_wav(path))
+            return -2;
+        float* pcm = nullptr;
+        int n = 0, sr = 0;
+        if (crispasr_audio_load(path, &pcm, &n, &sr) != 0 || !pcm || n <= 0) {
+            if (pcm)
+                free(pcm);
+            return -1;
+        }
+        // Resample 16 kHz → 24 kHz (linear interp)
+        int n24 = (int)((float)n * 24000.0f / 16000.0f);
+        std::vector<float> pcm24(n24);
+        for (int i = 0; i < n24; i++) {
+            float pos = (float)i * 16000.0f / 24000.0f;
+            int idx = (int)pos;
+            float frac = pos - (float)idx;
+            pcm24[i] = (idx + 1 < n) ? pcm[idx] * (1 - frac) + pcm[idx + 1] * frac : pcm[std::min(idx, n - 1)];
+        }
+        free(pcm);
+        // RMS normalize to 0.1
+        float rms = 0;
+        for (float v : pcm24)
+            rms += v * v;
+        rms = sqrtf(rms / (float)pcm24.size());
+        if (rms < 0.1f && rms > 1e-10f) {
+            float s2 = 0.1f / rms;
+            for (float& v : pcm24)
+                v *= s2;
+        }
+        const char* rt = ref_text_or_null ? ref_text_or_null : "";
+        int rc = f5_tts_set_reference(s->f5tts_ctx, pcm24.data(), n24, rt);
+        return (rc == 0) ? 0 : -1;
+    }
+#endif
 #ifdef CA_HAVE_VOXCPM2
     if (s->voxcpm2_ctx) {
         // VoxCPM2 zero-shot voice cloning: stash a 16 kHz mono reference
@@ -4809,6 +4875,18 @@ CA_EXPORT float* crispasr_session_synthesize(crispasr_session* s, const char* te
         const float* ref = s->indextts_ref_pcm.empty() ? nullptr : s->indextts_ref_pcm.data();
         const int refN = (int)s->indextts_ref_pcm.size();
         return indextts_synthesize(s->indextts_ctx, text, ref, refN, out_n_samples);
+    }
+#endif
+#ifdef CA_HAVE_F5TTS
+    if (s->f5tts_ctx) {
+        // F5-TTS outputs 24 kHz mono. Reference was already set via set_voice.
+        float* pcm = nullptr;
+        int sr = 0;
+        int n = f5_tts_synthesize(s->f5tts_ctx, text, &pcm, &sr);
+        if (n <= 0 || !pcm)
+            return nullptr;
+        *out_n_samples = n;
+        return pcm;
     }
 #endif
 #ifdef CA_HAVE_PIPER
@@ -5095,6 +5173,10 @@ CA_EXPORT void crispasr_session_close(crispasr_session* s) {
 #ifdef CA_HAVE_INDEXTTS
     if (s->indextts_ctx)
         indextts_free(s->indextts_ctx);
+#endif
+#ifdef CA_HAVE_F5TTS
+    if (s->f5tts_ctx)
+        f5_tts_free(s->f5tts_ctx);
 #endif
 #ifdef CA_HAVE_PIPER
     if (s->piper_ctx)
@@ -5389,6 +5471,12 @@ CA_EXPORT int crispasr_session_set_tts_seed(crispasr_session* s, uint64_t seed) 
 #ifdef CA_HAVE_INDEXTTS
     if (s->indextts_ctx) {
         indextts_set_seed((indextts_context*)s->indextts_ctx, seed);
+        touched++;
+    }
+#endif
+#ifdef CA_HAVE_F5TTS
+    if (s->f5tts_ctx) {
+        f5_tts_set_seed(s->f5tts_ctx, seed);
         touched++;
     }
 #endif

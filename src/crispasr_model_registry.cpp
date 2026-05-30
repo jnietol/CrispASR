@@ -470,6 +470,21 @@ constexpr Entry k_registry[] = {
      "~870 MB",
      "indextts-bigvgan.gguf",
      "https://huggingface.co/cstr/indextts-1.5-GGUF/resolve/main/indextts-bigvgan.gguf"},
+    // OuteTTS 0.3 1B: OLMo-1B LLM + WavTokenizer single-codebook VQ-GAN.
+    // 24 kHz output, CC BY 4.0 license. Voice cloning via --voice <speaker.json>.
+    // Two-file setup: OLMo talker (F16, ~2.4 GB) + WavTokenizer decoder (~130 MB).
+    {"outetts", "outetts-0.3-1b-f16.gguf",
+     "https://huggingface.co/cstr/outetts-0.3-1b-GGUF/resolve/main/outetts-0.3-1b-f16.gguf",
+     "~2380 MB",
+     "wavtokenizer-decoder-f16.gguf",
+     "https://huggingface.co/cstr/outetts-0.3-1b-GGUF/resolve/main/wavtokenizer-decoder-f16.gguf"},
+    // F5-TTS v1 Base: DiT-based flow-matching TTS with zero-shot voice
+    // cloning. Single GGUF containing DiT (330M) + Vocos vocoder (13M).
+    // Character-level tokenization (2545 vocab), 24 kHz output.
+    // Voice cloning via --voice <ref.wav> --ref-text "transcript".
+    {"f5-tts", "f5-tts-v1-base-f16.gguf",
+     "https://huggingface.co/cstr/f5-tts-GGUF/resolve/main/f5-tts-v1-base-f16.gguf",
+     "~1337 MB", nullptr, nullptr},
     // CTC forced aligner — used by `-am auto` to attach word-level
     // timestamps (LLM-decode backends, or any backend when paired
     // with `--force-aligner` / `-fa`). Q4_K is the recommended quant
