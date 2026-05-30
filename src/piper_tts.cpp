@@ -219,9 +219,18 @@ static bool phonemize_espeak(const std::string& voice, const std::string& text, 
     return !out.empty();
 #else
     // Fallback: popen to espeak-ng
+#ifdef _WIN32
+#define piper_popen _popen
+#define piper_pclose _pclose
+    const char* redir = " 2>NUL";
+#else
+#define piper_popen popen
+#define piper_pclose pclose
+    const char* redir = " 2>/dev/null";
+#endif
     char cmd[512];
-    snprintf(cmd, sizeof(cmd), "espeak-ng -q --ipa=3 -v %s \"%s\" 2>/dev/null", voice.c_str(), text.c_str());
-    FILE* fp = popen(cmd, "r");
+    snprintf(cmd, sizeof(cmd), "espeak-ng -q --ipa=3 -v %s \"%s\"%s", voice.c_str(), text.c_str(), redir);
+    FILE* fp = piper_popen(cmd, "r");
     if (!fp)
         return false;
     out.clear();
@@ -235,7 +244,7 @@ static bool phonemize_espeak(const std::string& voice, const std::string& text, 
             out += ' ';
         out.append(buf, len);
     }
-    pclose(fp);
+    piper_pclose(fp);
     return !out.empty();
 #endif
 }
