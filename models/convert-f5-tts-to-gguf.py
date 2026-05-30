@@ -95,33 +95,68 @@ def to_f16(t: torch.Tensor) -> np.ndarray:
 def to_f32(t: torch.Tensor) -> np.ndarray:
     return t.detach().to(torch.float32).numpy()
 
-def choose_dtype(name: str, shape: list, t: torch.Tensor):
-    """Choose F16 vs F32. Keep small/1D/embedding/critical tensors as F32.
-    Large weight matrices (DiT QKV, FFN, Vocos conv) go to F16."""
+# Quantization support: gguf library can write Q8_0 / Q4_K via raw data
+# but it's simpler to mark the type and let gguf handle it.
+try:
+    from gguf import quants as gguf_quants
+    _HAS_GGUF_QUANTS = True
+except ImportError:
+    _HAS_GGUF_QUANTS = False
+
+def _quantize_to(t: torch.Tensor, qtype: GGMLQuantizationType):
+    """Quantize a tensor using gguf's built-in quantization."""
+    data_f32 = t.detach().to(torch.float32).numpy()
+    if _HAS_GGUF_QUANTS:
+        try:
+            return gguf_quants.quantize(data_f32, qtype), qtype
+        except Exception:
+            # Fall back to F16 for tensors that can't be quantized
+            # (e.g. 3D conv weights with odd shapes)
+            return to_f16(t), GGMLQuantizationType.F16
+    else:
+        return to_f16(t), GGMLQuantizationType.F16
+
+
+def choose_dtype(name: str, shape: list, t: torch.Tensor, quant: str = "f16"):
+    """Choose tensor precision.
+
+    quant="f16":  F16 for large weights, F32 for small/critical.
+    quant="q8_0": Q8_0 for bulk weight matrices (QKV, FFN, Vocos conv),
+                  F32 for conditioning pathway (AdaLN, time MLP, norms).
+    """
     n = int(np.prod(shape))
     if t.ndim <= 1 or n < 256:
         return to_f32(t), GGMLQuantizationType.F32
-    # Keep these as F32 for precision (small or precision-critical)
-    keep_f32 = (
-        'text_emb' in name or              # embedding table (small, lookup)
+
+    # ── Conditioning pathway: ALWAYS F32 regardless of quant level ──
+    # These tensors control timestep conditioning. Errors here compound
+    # through 32 ODE steps × 22 DiT layers. Even Q8_0 degrades quality.
+    always_f32 = (
+        'text_emb' in name or              # embedding table (lookup)
         'freqs_cis' in name or             # position encoding
         'inv_freq' in name or              # rotary frequencies
-        'time_' in name or                 # timestep MLP (small, critical)
+        'time_' in name or                 # timestep MLP (critical)
         'conv_pos' in name or              # positional conv (critical)
         'input_proj' in name or            # input projection
         'input_embed.proj' in name or      # input projection
-        'final_adaln' in name or           # final AdaLN (small)
+        'final_adaln' in name or           # final AdaLN
         'final_proj' in name or            # final output projection
-        'adaln' in name or                 # AdaLN modulation (6144 params, critical)
-        # Vocos: keep critical small tensors as F32
-        'voc.norm' in name or
+        'adaln' in name or                 # AdaLN modulation (scale/shift/gate)
+        'voc.norm' in name or              # Vocos norms
         'voc.final' in name or
         'voc.head' in name or
         '.layer_scale' in name
     )
-    if keep_f32:
+    if always_f32:
         return to_f32(t), GGMLQuantizationType.F32
-    return to_f16(t), GGMLQuantizationType.F16
+
+    # ── Bulk weight matrices: quantize according to --quant ──
+    if quant == "q8_0":
+        return _quantize_to(t, GGMLQuantizationType.Q8_0)
+    elif quant == "q4_k":
+        return _quantize_to(t, GGMLQuantizationType.Q4_K)
+    else:  # "f16" or default
+        return to_f16(t), GGMLQuantizationType.F16
 
 
 # ── F5-TTS tensor name remapping ──────────────────────────────────
@@ -212,6 +247,10 @@ def main():
                    help="Path to vocab.txt (default: bundled with f5_tts)")
     p.add_argument("--output", type=Path, required=True,
                    help="Output GGUF path")
+    p.add_argument("--quant", choices=["f16", "q8_0", "q4_k"], default="f16",
+                   help="Quantization: f16 (default), q8_0, q4_k. "
+                        "Only bulk weights (QKV, FFN, conv) are quantized; "
+                        "conditioning pathway (AdaLN, time MLP) stays F32.")
     args = p.parse_args()
 
     # Resolve paths
@@ -294,13 +333,23 @@ def main():
     # Vocab as a string array
     w.add_array(f"f5.vocab", vocab_chars)
 
+    quant = args.quant
+    if quant != "f16":
+        print(f"  Quantization: {quant} (bulk weights only; conditioning stays F32)")
+
+    def _add_tensor(writer, name, t, quant_level):
+        shape = list(t.shape)
+        data, dtype = choose_dtype(name, shape, t, quant=quant_level)
+        if dtype not in (GGMLQuantizationType.F32, GGMLQuantizationType.F16):
+            writer.add_tensor(name, data, raw_dtype=dtype)
+        else:
+            writer.add_tensor(name, data)
+
     # ── F5-TTS tensors ──
     n_f5 = 0
     for hf_name, t in sorted(f5_tensors.items()):
         gguf_name = map_f5tts_name(hf_name)
-        shape = list(t.shape)
-        data, dtype = choose_dtype(gguf_name, shape, t)
-        w.add_tensor(gguf_name, data)
+        _add_tensor(w, gguf_name, t, quant)
         n_f5 += 1
 
     # ── Vocos tensors ──
@@ -309,9 +358,7 @@ def main():
         gguf_name = map_vocos_name(pt_name)
         if gguf_name is None:
             continue
-        shape = list(t.shape)
-        data, dtype = choose_dtype(gguf_name, shape, t)
-        w.add_tensor(gguf_name, data)
+        _add_tensor(w, gguf_name, t, quant)
         n_voc += 1
 
     # ── Write ──
