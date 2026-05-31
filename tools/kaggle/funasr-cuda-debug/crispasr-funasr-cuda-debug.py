@@ -109,7 +109,7 @@ run(["nvidia-smi", "-L"])
 gpu_name = subprocess.check_output(
     ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], text=True
 ).strip()
-step("gpu", name=gpu_name)
+step("gpu", gpu_name=gpu_name)
 
 kh.install_build_toolchain()
 arch = kh.detect_cuda_arch()
