@@ -2,6 +2,8 @@
 //
 // Single-GGUF runtime: DiT + Vocos in one file. Voice cloning via
 // --voice <ref.wav> --ref-text "transcript of ref audio".
+// When --ref-text is omitted, the reference audio is automatically
+// transcribed using whisper (tiny.en) to estimate the ref transcript.
 // No codec model needed (Vocos vocoder is part of the GGUF).
 
 #include "crispasr_backend.h"
@@ -10,6 +12,7 @@
 #include "crispasr_model_registry.h"
 #include "whisper_params.h"
 
+#include "crispasr.h" // whisper_init_from_file_with_params, whisper_full, etc.
 #include "f5_tts.h"
 
 #include <cmath>
@@ -111,6 +114,65 @@ static std::vector<float> resample_linear(const std::vector<float>& in, int sr_i
     return out;
 }
 
+// Auto-transcribe reference audio via whisper when --ref-text is missing.
+// Uses the tiny.en model for speed; loads and frees it in one shot.
+static std::string transcribe_ref_audio(const std::vector<float>& pcm_16k, int n_threads, bool quiet,
+                                        const std::string& cache_dir) {
+    // Resolve whisper tiny.en model path (uses models/ dir or auto-download cache)
+    std::string model_path = "models/ggml-tiny.en.bin";
+    {
+        FILE* probe = fopen(model_path.c_str(), "rb");
+        if (probe) {
+            fclose(probe);
+        } else {
+            // Try auto-resolve via registry
+            auto resolved = crispasr_resolve_model_cli("ggml-tiny.en.bin", "whisper", quiet, cache_dir, true);
+            if (!resolved.empty())
+                model_path = resolved;
+        }
+    }
+
+    struct whisper_context_params cparams = whisper_context_default_params();
+    cparams.use_gpu = false;
+    struct whisper_context* wctx = whisper_init_from_file_with_params(model_path.c_str(), cparams);
+    if (!wctx) {
+        if (!quiet)
+            fprintf(stderr, "crispasr[f5-tts]: could not load whisper model for ref-text auto-transcription\n");
+        return "";
+    }
+
+    struct whisper_full_params wparams = whisper_full_default_params(CRISPASR_SAMPLING_GREEDY);
+    wparams.print_progress = false;
+    wparams.print_special = false;
+    wparams.print_realtime = false;
+    wparams.print_timestamps = false;
+    wparams.no_timestamps = true;
+    wparams.single_segment = true;
+    wparams.n_threads = n_threads;
+    wparams.language = "en";
+
+    if (whisper_full(wctx, wparams, pcm_16k.data(), (int)pcm_16k.size()) != 0) {
+        whisper_free(wctx);
+        return "";
+    }
+
+    std::string result;
+    int n_seg = whisper_full_n_segments(wctx);
+    for (int i = 0; i < n_seg; i++) {
+        const char* seg_text = whisper_full_get_segment_text(wctx, i);
+        if (seg_text)
+            result += seg_text;
+    }
+    whisper_free(wctx);
+
+    // Trim leading/trailing whitespace
+    size_t start = result.find_first_not_of(" \t\n\r");
+    size_t end = result.find_last_not_of(" \t\n\r");
+    if (start == std::string::npos)
+        return "";
+    return result.substr(start, end - start + 1);
+}
+
 class F5TtsBackend : public CrispasrBackend {
 public:
     ~F5TtsBackend() override { F5TtsBackend::shutdown(); }
@@ -160,7 +222,28 @@ public:
                     s *= scale;
             }
 
-            const char* ref_text = p.tts_ref_text.empty() ? "" : p.tts_ref_text.c_str();
+            // Auto-transcribe reference audio when --ref-text is missing.
+            // F5-TTS needs the ref transcript to estimate speech rate for
+            // duration calculation; without it, output length is wrong.
+            std::string ref_text_str = p.tts_ref_text;
+            if (ref_text_str.empty()) {
+                // Resample ref to 16kHz for whisper
+                auto ref_16k = resample_linear(ref_pcm, wav_sr, 16000);
+                if (!p.no_prints) {
+                    fprintf(stderr, "crispasr[f5-tts]: --ref-text not set, auto-transcribing ref audio...\n");
+                }
+                ref_text_str = transcribe_ref_audio(ref_16k, p.n_threads, p.no_prints, "");
+                if (ref_text_str.empty()) {
+                    if (!p.no_prints) {
+                        fprintf(stderr, "crispasr[f5-tts]: auto-transcription returned empty; "
+                                        "duration estimate may be inaccurate\n");
+                    }
+                } else if (!p.no_prints) {
+                    fprintf(stderr, "crispasr[f5-tts]: auto-transcribed ref: '%s'\n", ref_text_str.c_str());
+                }
+            }
+
+            const char* ref_text = ref_text_str.empty() ? "" : ref_text_str.c_str();
             if (f5_tts_set_reference(ctx_, ref_24k.data(), (int)ref_24k.size(), ref_text) != 0) {
                 fprintf(stderr, "crispasr[f5-tts]: failed to set reference audio\n");
                 return false;
