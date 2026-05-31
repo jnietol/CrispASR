@@ -4762,6 +4762,7 @@ struct whisper_vad_context {
     struct ggml_tensor* h_state;
     struct ggml_tensor* c_state;
     std::vector<float> probs;
+    std::vector<float> window_buf; // pre-allocated per-chunk window (#132)
 };
 
 struct whisper_vad_context_params whisper_vad_default_context_params(void) {
@@ -5410,7 +5411,12 @@ bool whisper_vad_detect_speech(struct whisper_vad_context* vctx, const float* sa
     vctx->probs.resize(n_chunks);
     CRISPASR_LOG_INFO("%s: props size: %u\n", __func__, n_chunks);
 
-    std::vector<float> window(vctx->n_window, 0.0f);
+    // Use pre-allocated window buffer to avoid per-call heap allocation
+    // that fragments memory across repeated server requests (#132).
+    if ((int)vctx->window_buf.size() != vctx->n_window) {
+        vctx->window_buf.resize(vctx->n_window, 0.0f);
+    }
+    auto& window = vctx->window_buf;
 
     auto& sched = vctx->sched.sched;
 
@@ -5439,20 +5445,12 @@ bool whisper_vad_detect_speech(struct whisper_vad_context* vctx, const float* sa
 
         if (chunk_len < vctx->n_window) {
             CRISPASR_LOG_INFO("%s: chunk_len: %d < n_window: %d\n", __func__, chunk_len, vctx->n_window);
-            std::vector<float> partial_chunk(vctx->n_window, 0.0f);
-            std::copy(samples + idx_start, samples + idx_end, partial_chunk.begin());
-
-            // Copy the zero-padded chunk to the window.
-            const int samples_to_copy_max = vctx->n_window;
-            const int samples_to_copy_cur = std::min(samples_to_copy_max, (int)partial_chunk.size());
-            std::copy(partial_chunk.begin(), partial_chunk.begin() + samples_to_copy_cur, window.begin());
-            if (samples_to_copy_cur < samples_to_copy_max) {
-                std::fill(window.begin() + samples_to_copy_cur, window.end(), 0.0f);
-            }
+            // Zero-pad the last partial chunk directly into window.
+            std::copy(samples + idx_start, samples + idx_end, window.begin());
+            std::fill(window.begin() + chunk_len, window.end(), 0.0f);
         } else {
             // Copy current frame samples to the window.
-            const int samples_to_copy = std::min(idx_end - idx_start, vctx->n_window);
-            std::copy(samples + idx_start, samples + idx_start + samples_to_copy, window.begin());
+            std::copy(samples + idx_start, samples + idx_start + vctx->n_window, window.begin());
         }
 
         // Set the frame tensor data with the samples.
@@ -5471,7 +5469,7 @@ bool whisper_vad_detect_speech(struct whisper_vad_context* vctx, const float* sa
     }
 
     const int64_t t_this_vad = ggml_time_us() - t_start_vad_us;
-    vctx->t_vad_us += t_this_vad;
+    vctx->t_vad_us = t_this_vad; // per-call only, not accumulated (#132)
     CRISPASR_LOG_INFO("%s: vad time = %.2f ms processing %d samples\n", __func__, 1e-3f * t_this_vad, n_samples);
 
     ggml_backend_sched_reset(sched);

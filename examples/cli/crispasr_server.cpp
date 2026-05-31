@@ -325,6 +325,11 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
         return result;
     }
 
+    // VAD (if any) already ran above — disable it for the backend so
+    // whisper_full doesn't re-run Silero on every slice (#132).
+    rp.vad = false;
+    rp.vad_model.clear();
+
     {
         std::lock_guard<std::mutex> lock(model_mutex);
         auto t0 = std::chrono::steady_clock::now();

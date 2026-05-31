@@ -23,7 +23,6 @@
 // an actual instance — so there's only one source of truth.
 
 #include "crispasr_backend.h"
-#include "crispasr_vad_cli.h" // crispasr_resolve_vad_model — auto-DL silero
 #include "whisper_params.h"
 
 #include "grammar-parser.h" // grammar_parser::parse_state::c_rules()
@@ -123,33 +122,17 @@ public:
         // params.vad_model is empty, in which case all of whisper-internal
         // VAD's behaviour is preserved.
         // Resolve VAD model so `--vad` without `--vad-model` auto-downloads
-        // ggml-silero-v5.1.2.bin to the cache, matching the non-whisper
-        // backends' UX (#33). The resolved path must outlive the whisper
-        // call, so we hold it on the stack here.
+        // CrispASR's dispatch layer (crispasr_compute_audio_slices) already
+        // runs Silero / FireRed / MarbleNet / whisper-vad before calling
+        // transcribe(), so the audio arriving here is pre-sliced to speech
+        // segments.  Running whisper's internal VAD again is redundant and
+        // doubles the VAD cost on every request — causing the performance
+        // regression in #132 where VAD time accumulates 60x.
         //
-        // FireRedVAD (GGUF format) is NOT supported by whisper's internal
-        // Silero-only VAD loader (#34). When FireRed is detected, disable
-        // whisper-internal VAD — the CLI dispatch layer will handle it via
-        // crispasr_compute_audio_slices() before calling transcribe().
-        // External VAD models (FireRedVAD, whisper-vad-encdec) are NOT compatible
-        // with whisper's internal Silero-only VAD loader. Detect and disable.
-        const bool firered = crispasr_vad_is_firered(p);
-        const std::string resolved_vad = crispasr_resolve_vad_model(p);
-        const bool external_vad =
-            firered || (resolved_vad.find("marblenet") != std::string::npos) ||
-            (resolved_vad.find("whisper") != std::string::npos && resolved_vad.find("vad") != std::string::npos &&
-             resolved_vad.find(".gguf") != std::string::npos);
-        const std::string vad_path = external_vad ? "" : resolved_vad;
-        wp.vad = external_vad ? false : p.vad;
-        wp.vad_model_path = vad_path.c_str();
-        if (external_vad && !p.no_prints)
-            fprintf(stderr, "crispasr[whisper]: external VAD detected — using crispasr VAD dispatch\n");
-        wp.vad_params.threshold = p.vad_threshold;
-        wp.vad_params.min_speech_duration_ms = p.vad_min_speech_duration_ms;
-        wp.vad_params.min_silence_duration_ms = p.vad_min_silence_duration_ms;
-        wp.vad_params.max_speech_duration_s = p.vad_max_speech_duration_s;
-        wp.vad_params.speech_pad_ms = p.vad_speech_pad_ms;
-        wp.vad_params.samples_overlap = p.vad_samples_overlap;
+        // Always disable whisper-internal VAD; the CrispASR dispatch handles
+        // all VAD variants uniformly.
+        wp.vad = false;
+        wp.vad_model_path = "";
 
         // Grammar. When the user passed --grammar + --grammar-rule, the CLI
         // has already parsed the GBNF and stashed it in params.grammar_parsed.
