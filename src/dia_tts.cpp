@@ -1224,8 +1224,8 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
 
     uint32_t max_gen = (p.max_tokens > (int)m.max_delay) ? (uint32_t)p.max_tokens : m.max_generation_size;
     // TEMP: limit for CPU testing (full 3072 steps impractical on this CPU)
-    if (max_gen > 100)
-        max_gen = 100;
+    if (max_gen > 200)
+        max_gen = 200;
 
     // ===================================================================
     // 1. Run encoder (batch=2: conditional + unconditional)
