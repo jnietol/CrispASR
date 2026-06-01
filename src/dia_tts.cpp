@@ -36,7 +36,10 @@
 #include "ggml.h"
 #include "gguf.h"
 
+#include "core/activation.h"
+#include "core/conv.h"
 #include "core/dac_decoder.h"
+#include "core/gguf_loader.h"
 
 #include <algorithm>
 #include <cassert>
@@ -135,6 +138,10 @@ struct dia_model {
     // ggml context that owns the weight tensors
     ggml_context* ctx_w = nullptr;
     ggml_backend_buffer_t buf_w = nullptr;
+
+    // DAC codec weight context (separate GGUF)
+    ggml_context* ctx_dac = nullptr;
+    ggml_backend_buffer_t buf_dac = nullptr;
 };
 
 // -----------------------------------------------------------------------
@@ -833,14 +840,350 @@ struct dia_tts_context* dia_tts_init_from_file(const char* path_model, struct di
     return ctx;
 }
 
+// -----------------------------------------------------------------------
+// DAC codec loading
+// -----------------------------------------------------------------------
+
+static bool dia_load_dac_weights(dia_model& m, const std::map<std::string, ggml_tensor*>& t, int verbosity) {
+    const char* tag = "dia_dac";
+    const int n_cb = m.dac.config.n_codebooks;
+
+    // Quantizer weights
+    m.dac.quantizers.resize(n_cb);
+    for (int k = 0; k < n_cb; k++) {
+        auto& q = m.dac.quantizers[k];
+        char name[128];
+        std::snprintf(name, sizeof(name), "quantizer.quantizers.%d.codebook.weight", k);
+        q.codebook = core_gguf::require(t, name, tag);
+
+        std::snprintf(name, sizeof(name), "quantizer.quantizers.%d.out_proj.weight", k);
+        q.out_proj_w = core_gguf::require(t, name, tag);
+
+        std::snprintf(name, sizeof(name), "quantizer.quantizers.%d.out_proj.bias", k);
+        q.out_proj_b = core_gguf::require(t, name, tag);
+
+        if (!q.codebook || !q.out_proj_w || !q.out_proj_b) {
+            fprintf(stderr, "dia_dac: missing quantizer %d weights\n", k);
+            return false;
+        }
+    }
+
+    // Decoder input conv: decoder.conv1.weight (7, 1024, 1536), decoder.conv1.bias (1536)
+    m.dac.in_conv_w = core_gguf::require(t, "decoder.conv1.weight", tag);
+    m.dac.in_conv_b = core_gguf::require(t, "decoder.conv1.bias", tag);
+    if (!m.dac.in_conv_w || !m.dac.in_conv_b) {
+        return false;
+    }
+
+    // Decoder blocks (4 blocks)
+    for (int b = 0; b < 4; b++) {
+        auto& blk = m.dac.blocks[b];
+        char name[128];
+
+        // Block snake alpha: decoder.block.B.snake1.alpha
+        std::snprintf(name, sizeof(name), "decoder.block.%d.snake1.alpha", b);
+        blk.snake_alpha = core_gguf::require(t, name, tag);
+
+        // ConvTranspose1d: decoder.block.B.conv_t1.weight/bias
+        std::snprintf(name, sizeof(name), "decoder.block.%d.conv_t1.weight", b);
+        blk.up_w = core_gguf::require(t, name, tag);
+        std::snprintf(name, sizeof(name), "decoder.block.%d.conv_t1.bias", b);
+        blk.up_b = core_gguf::require(t, name, tag);
+
+        if (!blk.snake_alpha || !blk.up_w || !blk.up_b) {
+            return false;
+        }
+
+        // 3 ResidualUnits
+        for (int r = 0; r < 3; r++) {
+            auto& ru = blk.res[r];
+
+            std::snprintf(name, sizeof(name), "decoder.block.%d.res_unit%d.snake1.alpha", b, r + 1);
+            ru.alpha0 = core_gguf::require(t, name, tag);
+            std::snprintf(name, sizeof(name), "decoder.block.%d.res_unit%d.conv1.weight", b, r + 1);
+            ru.conv0_w = core_gguf::require(t, name, tag);
+            std::snprintf(name, sizeof(name), "decoder.block.%d.res_unit%d.conv1.bias", b, r + 1);
+            ru.conv0_b = core_gguf::require(t, name, tag);
+
+            std::snprintf(name, sizeof(name), "decoder.block.%d.res_unit%d.snake2.alpha", b, r + 1);
+            ru.alpha1 = core_gguf::require(t, name, tag);
+            std::snprintf(name, sizeof(name), "decoder.block.%d.res_unit%d.conv2.weight", b, r + 1);
+            ru.conv1_w = core_gguf::require(t, name, tag);
+            std::snprintf(name, sizeof(name), "decoder.block.%d.res_unit%d.conv2.bias", b, r + 1);
+            ru.conv1_b = core_gguf::require(t, name, tag);
+
+            if (!ru.alpha0 || !ru.conv0_w || !ru.conv0_b || !ru.alpha1 || !ru.conv1_w || !ru.conv1_b) {
+                fprintf(stderr, "dia_dac: missing res_unit%d in block %d\n", r + 1, b);
+                return false;
+            }
+        }
+    }
+
+    // Output snake + conv: decoder.snake1.alpha, decoder.conv2.weight/bias
+    m.dac.out_snake_alpha = core_gguf::require(t, "decoder.snake1.alpha", tag);
+    m.dac.out_conv_w = core_gguf::require(t, "decoder.conv2.weight", tag);
+    m.dac.out_conv_b = core_gguf::require(t, "decoder.conv2.bias", tag);
+    if (!m.dac.out_snake_alpha || !m.dac.out_conv_w || !m.dac.out_conv_b) {
+        return false;
+    }
+
+    if (verbosity >= 1) {
+        fprintf(stderr, "dia_dac: loaded %d codebooks, 4 decoder blocks\n", n_cb);
+    }
+    return true;
+}
+
 int dia_tts_set_codec_path(struct dia_tts_context* ctx, const char* path) {
     if (!ctx || !path)
         return -1;
-    // TODO: load DAC codec from separate GGUF
-    // For now, the DAC must be embedded in the main GGUF
-    (void)path;
-    fprintf(stderr, "dia_tts: separate DAC codec loading not yet implemented\n");
-    return -1;
+
+    auto& m = ctx->model;
+    int verbosity = ctx->params.verbosity;
+
+    if (m.has_dac) {
+        fprintf(stderr, "dia_tts: DAC codec already loaded\n");
+        return 0;
+    }
+
+    // Load DAC GGUF using core_gguf loader
+    core_gguf::WeightLoad wl;
+    ggml_backend_t backend = ctx->backend ? ctx->backend : ctx->backend_cpu;
+    if (!core_gguf::load_weights(path, backend, "dia_dac", wl)) {
+        fprintf(stderr, "dia_tts: failed to load DAC codec from '%s'\n", path);
+        return -1;
+    }
+
+    // Map tensors to DacWeights struct
+    if (!dia_load_dac_weights(m, wl.tensors, verbosity)) {
+        fprintf(stderr, "dia_tts: failed to map DAC codec tensors\n");
+        if (wl.buf)
+            ggml_backend_buffer_free(wl.buf);
+        if (wl.ctx)
+            ggml_free(wl.ctx);
+        return -1;
+    }
+
+    m.ctx_dac = wl.ctx;
+    m.buf_dac = wl.buf;
+    m.has_dac = true;
+
+    if (verbosity >= 1) {
+        fprintf(stderr, "dia_tts: DAC codec loaded from '%s'\n", path);
+    }
+    return 0;
+}
+
+// -----------------------------------------------------------------------
+// DAC decode graph helpers
+// -----------------------------------------------------------------------
+
+// Standard Conv1d k=K, groups=1, dilation=d.
+// Weight ne=[K, Cin, Cout]. Input (Cin, T) -> output (Cout, T).
+static ggml_tensor* dac_conv1d(ggml_context* ctx, ggml_tensor* x, ggml_tensor* w, ggml_tensor* b, int pad, int dil) {
+    const int Cout = (int)w->ne[2];
+    ggml_tensor* xT = ggml_cont(ctx, ggml_transpose(ctx, x));          // (T, Cin)
+    ggml_tensor* y = ggml_conv_1d(ctx, w, xT, /*stride*/ 1, pad, dil); // (T_out, Cout, 1)
+    const int T_out = (int)y->ne[0];
+    y = ggml_reshape_2d(ctx, y, T_out, Cout);   // (T_out, Cout)
+    y = ggml_cont(ctx, ggml_transpose(ctx, y)); // (Cout, T_out)
+    if (b) {
+        y = ggml_add(ctx, y, b);
+    }
+    return y;
+}
+
+// DAC ResidualUnit: Snake1d -> Conv1d(k=7, dil=d) -> Snake1d -> Conv1d(k=1) + residual
+static ggml_tensor* dac_residual_unit(ggml_context* ctx, ggml_tensor* x, const core_dac::DacResUnit& ru, int dil) {
+    ggml_tensor* y = core_act::snake_alpha(ctx, x, ru.alpha0);
+    y = dac_conv1d(ctx, y, ru.conv0_w, ru.conv0_b, /*pad*/ 3 * dil, /*dil*/ dil);
+    y = core_act::snake_alpha(ctx, y, ru.alpha1);
+    y = dac_conv1d(ctx, y, ru.conv1_w, ru.conv1_b, /*pad*/ 0, /*dil*/ 1);
+    return ggml_add(ctx, x, y);
+}
+
+// DAC DecoderBlock: Snake1d -> ConvTranspose1d(stride=s, k=2s, p=s/2) -> 3 ResidualUnits
+static ggml_tensor* dac_decoder_block(ggml_context* ctx, ggml_tensor* x, const core_dac::DacDecoderBlock& blk,
+                                      int stride) {
+    x = core_act::snake_alpha(ctx, x, blk.snake_alpha);
+    x = core_convt::convt1d_crop(ctx, x, blk.up_w, blk.up_b, stride,
+                                 /*crop_left*/ stride / 2, /*crop_right*/ stride / 2);
+    static const int dilations[3] = {1, 3, 9};
+    for (int r = 0; r < 3; r++) {
+        x = dac_residual_unit(ctx, x, blk.res[r], dilations[r]);
+    }
+    return x;
+}
+
+// Build DAC decode graph: codes (n_codebooks, n_frames) -> PCM (n_frames * 512)
+static ggml_cgraph* dac_build_decode_graph(const core_dac::DacWeights& dac, ggml_context* ctx0, int n_frames) {
+    const auto& cfg = dac.config;
+    const int n_cb = cfg.n_codebooks;
+
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 16384, false);
+
+    // Input: per-codebook code tensors (1D, i32)
+    std::vector<ggml_tensor*> codes_in(n_cb);
+    for (int k = 0; k < n_cb; k++) {
+        char name[32];
+        std::snprintf(name, sizeof(name), "dac_codes_%d", k);
+        codes_in[k] = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_frames);
+        ggml_set_name(codes_in[k], name);
+        ggml_set_input(codes_in[k]);
+    }
+
+    // RVQ dequantize: for each codebook, lookup + linear project, then sum
+    ggml_tensor* z_q = nullptr;
+    for (int k = 0; k < n_cb; k++) {
+        const auto& q = dac.quantizers[k];
+        // codebook: (codebook_dim=8, codebook_size=1024) — ggml_get_rows indexes dim1
+        ggml_tensor* z = ggml_get_rows(ctx0, q.codebook, codes_in[k]); // (8, n_frames)
+        z = ggml_cast(ctx0, z, GGML_TYPE_F32);
+
+        // out_proj: weight (1, 8, 1024) — reshape to (8, 1024) for mul_mat
+        ggml_tensor* proj_w = ggml_reshape_2d(ctx0, q.out_proj_w, 8, 1024);
+        proj_w = ggml_cast(ctx0, proj_w, GGML_TYPE_F32);
+        z = ggml_mul_mat(ctx0, proj_w, z); // (1024, n_frames)
+        if (q.out_proj_b) {
+            z = ggml_add(ctx0, z, q.out_proj_b);
+        }
+
+        if (k == 0) {
+            z_q = z;
+        } else {
+            z_q = ggml_add(ctx0, z_q, z);
+        }
+    }
+    z_q = ggml_cont(ctx0, z_q); // (1024, n_frames)
+
+    // Decoder input conv: Conv1d(1024, 1536, k=7, p=3)
+    ggml_tensor* h = dac_conv1d(ctx0, z_q, dac.in_conv_w, dac.in_conv_b, /*pad*/ 3, /*dil*/ 1);
+
+    // 4 decoder blocks with strides [8, 8, 4, 2]
+    for (int b = 0; b < cfg.n_decoder_blocks; b++) {
+        h = dac_decoder_block(ctx0, h, dac.blocks[b], cfg.upsampling_ratios[b]);
+        h = ggml_cont(ctx0, h);
+    }
+
+    // Output: Snake1d -> Conv1d(96, 1, k=7, p=3) -> tanh
+    h = core_act::snake_alpha(ctx0, h, dac.out_snake_alpha);
+    h = dac_conv1d(ctx0, h, dac.out_conv_w, dac.out_conv_b, /*pad*/ 3, /*dil*/ 1);
+    h = ggml_tanh(ctx0, h);
+
+    // Reshape to 1D PCM
+    const int T_pcm = (int)h->ne[1]; // (1, T_pcm)
+    h = ggml_reshape_1d(ctx0, h, (int64_t)T_pcm);
+    h = ggml_cont(ctx0, h);
+    ggml_set_name(h, "dac_pcm");
+    ggml_set_output(h);
+    ggml_build_forward_expand(gf, h);
+
+    return gf;
+}
+
+// Run DAC decode on integer codes and return PCM float buffer.
+// filtered_codes: interleaved [frame0_cb0, frame0_cb1, ..., frame0_cb8, frame1_cb0, ...]
+// n_frames: number of code frames
+// Returns malloc'd float buffer with n_frames * hop_length samples, or nullptr on error.
+static float* dac_decode(dia_tts_context* ctx, const std::vector<uint32_t>& filtered_codes, size_t n_frames,
+                         int* out_n_samples) {
+    auto& m = ctx->model;
+    const auto& cfg = m.dac.config;
+    const int n_cb = cfg.n_codebooks;
+    const int verbosity = ctx->params.verbosity;
+
+    // Build per-codebook code arrays (transposing from interleaved layout)
+    std::vector<std::vector<int32_t>> codes_per_cb(n_cb);
+    for (int k = 0; k < n_cb; k++) {
+        codes_per_cb[k].resize(n_frames);
+    }
+    for (size_t f = 0; f < n_frames; f++) {
+        for (int k = 0; k < n_cb; k++) {
+            codes_per_cb[k][f] = (int32_t)filtered_codes[f * n_cb + k];
+        }
+    }
+
+    // Allocate compute context
+    const size_t buf_size =
+        ggml_tensor_overhead() * GGML_DEFAULT_GRAPH_SIZE * 8 + ggml_graph_overhead_custom(16384, false);
+    std::vector<uint8_t> compute_meta(buf_size);
+    ggml_init_params ip = {compute_meta.size(), compute_meta.data(), true};
+    ggml_context* ctx0 = ggml_init(ip);
+    if (!ctx0) {
+        fprintf(stderr, "dia_dac: failed to init compute context\n");
+        return nullptr;
+    }
+
+    ggml_cgraph* gf = dac_build_decode_graph(m.dac, ctx0, (int)n_frames);
+
+    // Allocate graph buffers
+    ggml_backend_t backend = ctx->backend ? ctx->backend : ctx->backend_cpu;
+    ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
+    if (!galloc) {
+        ggml_free(ctx0);
+        return nullptr;
+    }
+    if (!ggml_gallocr_alloc_graph(galloc, gf)) {
+        fprintf(stderr, "dia_dac: failed to allocate decode graph\n");
+        ggml_gallocr_free(galloc);
+        ggml_free(ctx0);
+        return nullptr;
+    }
+
+    // Set input codes
+    for (int k = 0; k < n_cb; k++) {
+        char name[32];
+        std::snprintf(name, sizeof(name), "dac_codes_%d", k);
+        ggml_tensor* inp = ggml_graph_get_tensor(gf, name);
+        if (!inp) {
+            fprintf(stderr, "dia_dac: input tensor '%s' not in graph\n", name);
+            ggml_gallocr_free(galloc);
+            ggml_free(ctx0);
+            return nullptr;
+        }
+        ggml_backend_tensor_set(inp, codes_per_cb[k].data(), 0, n_frames * sizeof(int32_t));
+    }
+
+    if (verbosity >= 1) {
+        fprintf(stderr, "dia_dac: decoding %zu frames -> %zu samples...\n", n_frames, n_frames * cfg.hop_length);
+    }
+
+    // Compute
+    ggml_status st = ggml_backend_graph_compute(backend, gf);
+    if (st != GGML_STATUS_SUCCESS) {
+        fprintf(stderr, "dia_dac: graph compute failed (status=%d)\n", (int)st);
+        ggml_gallocr_free(galloc);
+        ggml_free(ctx0);
+        return nullptr;
+    }
+
+    // Extract PCM output
+    ggml_tensor* pcm_out = ggml_graph_get_tensor(gf, "dac_pcm");
+    if (!pcm_out) {
+        fprintf(stderr, "dia_dac: pcm output tensor not in graph\n");
+        ggml_gallocr_free(galloc);
+        ggml_free(ctx0);
+        return nullptr;
+    }
+
+    const int n_samples = (int)ggml_nelements(pcm_out);
+    float* pcm = (float*)malloc(n_samples * sizeof(float));
+    if (!pcm) {
+        ggml_gallocr_free(galloc);
+        ggml_free(ctx0);
+        return nullptr;
+    }
+
+    ggml_backend_tensor_get(pcm_out, pcm, 0, n_samples * sizeof(float));
+    *out_n_samples = n_samples;
+
+    if (verbosity >= 1) {
+        fprintf(stderr, "dia_dac: decoded %d PCM samples (%.2f sec at %d Hz)\n", n_samples,
+                (float)n_samples / cfg.sample_rate, cfg.sample_rate);
+    }
+
+    ggml_gallocr_free(galloc);
+    ggml_free(ctx0);
+    return pcm;
 }
 
 float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* out_n_samples) {
@@ -1441,16 +1784,14 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
     }
 
     // DAC decode: codes (9, n_frames) -> PCM at 44.1 kHz
-    // Total samples = n_frames * hop_length (512)
-    int n_samples = (int)(n_frames * m.dac.config.hop_length);
-    float* pcm = (float*)malloc(n_samples * sizeof(float));
-    if (!pcm)
+    int n_samples = 0;
+    float* pcm = dac_decode(ctx, filtered_codes, n_frames, &n_samples);
+    if (!pcm || n_samples <= 0) {
+        fprintf(stderr, "dia_tts: DAC decode failed\n");
+        if (pcm)
+            free(pcm);
         return nullptr;
-
-    // TODO: implement DAC decode graph using core_dac helpers
-    // For now, output silence placeholder until DAC graph building is done
-    memset(pcm, 0, n_samples * sizeof(float));
-    fprintf(stderr, "dia_tts: DAC decode not yet implemented, returning %d samples of silence\n", n_samples);
+    }
 
     *out_n_samples = n_samples;
     return pcm;
@@ -1475,6 +1816,12 @@ void dia_tts_free(struct dia_tts_context* ctx) {
     }
     if (ctx->model.ctx_w) {
         ggml_free(ctx->model.ctx_w);
+    }
+    if (ctx->model.buf_dac) {
+        ggml_backend_buffer_free(ctx->model.buf_dac);
+    }
+    if (ctx->model.ctx_dac) {
+        ggml_free(ctx->model.ctx_dac);
     }
     if (ctx->sched) {
         ggml_backend_sched_free(ctx->sched);
