@@ -1744,8 +1744,8 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
             // CFG filtering (matching Python _decoder_step lines 442-445):
             // 1. Compute CFG logits for top-k selection
             // 2. Apply mask to CONDITIONAL logits (not CFG) for sampling
-            float* uncond = logits_raw.data();                        // batch 0
-            float* cond = logits_raw.data() + m.output_vocab_size;    // batch 1
+            float* uncond = logits_raw.data();                     // batch 0
+            float* cond = logits_raw.data() + m.output_vocab_size; // batch 1
             std::vector<float> cfg_logits(m.output_vocab_size);
             for (uint32_t i = 0; i < m.output_vocab_size; i++)
                 cfg_logits[i] = cond[i] + p.cfg_scale * (cond[i] - uncond[i]);
@@ -1754,16 +1754,15 @@ float* dia_tts_synthesize(struct dia_tts_context* ctx, const char* text, int* ou
             std::vector<std::pair<float, int>> sorted_cfg(m.output_vocab_size);
             for (uint32_t i = 0; i < m.output_vocab_size; i++)
                 sorted_cfg[i] = {cfg_logits[i], (int)i};
-            std::partial_sort(sorted_cfg.begin(), sorted_cfg.begin() + topk,
-                              sorted_cfg.end(), [](auto& a, auto& b) { return a.first > b.first; });
+            std::partial_sort(sorted_cfg.begin(), sorted_cfg.begin() + topk, sorted_cfg.end(),
+                              [](auto& a, auto& b) { return a.first > b.first; });
             // Final logits = COND masked by CFG top-k
             std::vector<float> final_logits(m.output_vocab_size, -INFINITY);
             for (int k = 0; k < topk; k++)
                 final_logits[sorted_cfg[k].second] = cond[sorted_cfg[k].second];
 
             if (step == 0 && h == 0 && p.verbosity >= 1) {
-                fprintf(stderr, "  cond h0 first4: %.4f %.4f %.4f %.4f argmax=%d\n",
-                        cond[0], cond[1], cond[2], cond[3],
+                fprintf(stderr, "  cond h0 first4: %.4f %.4f %.4f %.4f argmax=%d\n", cond[0], cond[1], cond[2], cond[3],
                         (int)(std::max_element(cond, cond + m.output_vocab_size) - cond));
                 fprintf(stderr, "  Python ref:     -2.8282 -1.6599 -4.0806 -0.2944 argmax=568\n");
             }

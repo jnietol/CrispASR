@@ -191,8 +191,49 @@ static bool ggml_graph_compute_helper(struct ggml_cgraph* graph, int n_threads, 
     return ggml_backend_graph_compute(backend.get(), graph) == GGML_STATUS_SUCCESS;
 }
 
+// Persistent threadpool for CPU backends.  Without this, every
+// ggml_backend_cpu_graph_compute call creates a disposable threadpool,
+// spawning n_threads-1 pthreads on non-OpenMP builds.  After hundreds of
+// encoder/decoder calls the accumulated mmap/munmap for thread stacks
+// fragments memory and degrades perf 2-5× — the #132 pattern.
+//
+// Created lazily on first use (when n_threads is known), shared by all
+// whisper_state instances, freed at process exit.
+static ggml_threadpool_t g_cpu_threadpool = nullptr;
+static int g_cpu_threadpool_n = 0;
+
+static void whisper_ensure_cpu_threadpool(ggml_backend_sched_t sched, int n_threads) {
+    if (!g_cpu_threadpool || g_cpu_threadpool_n < n_threads) {
+        // (Re)create with the requested size.
+        if (g_cpu_threadpool) {
+            ggml_threadpool_free(g_cpu_threadpool);
+            g_cpu_threadpool = nullptr;
+            g_cpu_threadpool_n = 0;
+        }
+        struct ggml_threadpool_params tpp = ggml_threadpool_params_default(n_threads);
+        g_cpu_threadpool = ggml_threadpool_new(&tpp);
+        if (g_cpu_threadpool) {
+            g_cpu_threadpool_n = n_threads;
+        }
+    }
+
+    // Always (re)attach the pool to every CPU backend in the scheduler.
+    // Backends may have been recreated since the pool was first set.
+    if (g_cpu_threadpool) {
+        for (int i = 0; i < ggml_backend_sched_get_n_backends(sched); ++i) {
+            ggml_backend_t backend = ggml_backend_sched_get_backend(sched, i);
+            if (ggml_backend_is_cpu(backend)) {
+                ggml_backend_cpu_set_threadpool(backend, g_cpu_threadpool);
+            }
+        }
+    }
+}
+
 static bool ggml_graph_compute_helper(ggml_backend_sched_t sched, struct ggml_cgraph* graph, int n_threads,
                                       bool sched_reset = true) {
+    // Lazy-init persistent threadpool on the CPU backend (#132).
+    whisper_ensure_cpu_threadpool(sched, n_threads);
+
     for (int i = 0; i < ggml_backend_sched_get_n_backends(sched); ++i) {
         ggml_backend_t backend = ggml_backend_sched_get_backend(sched, i);
         ggml_backend_dev_t dev = ggml_backend_get_device(backend);
