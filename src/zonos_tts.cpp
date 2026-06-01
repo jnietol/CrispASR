@@ -207,7 +207,7 @@ struct zonos_tts_params zonos_tts_default_params(void) {
     p.seed = 0;
     p.max_audio_tokens = 0; // 0 = default (86*30=2580)
     p.flash_attn = false;
-    p.cfg_scale = 2.0f;
+    p.cfg_scale = 1.0f; // disable CFG by default (dual-prefill OOMs on <8 GB RAM)
     return p;
 }
 
