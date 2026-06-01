@@ -160,7 +160,6 @@ def run_funasr(label: str, extra_env: dict, timeout: int = 300) -> dict:
     env = {
         "FUNASR_DUMP_STAGES": "1",
         "CRISPASR_VERBOSE": "1",
-        "GGML_SCHED_DEBUG": "2",
         **extra_env,
     }
     cmd = [
@@ -240,8 +239,8 @@ def run_funasr(label: str, extra_env: dict, timeout: int = 300) -> dict:
 # ──────────────────────────────────────────────────────────────────────────
 results = []
 
-# Run A: CUDA all-GPU (force LLM to GPU to trigger the sched bug, with debug trace)
-r_cuda_fa = run_funasr("cuda_fa_on", {"FUNASR_LLM_GPU": "1"})
+# Run A: CUDA default (enc GPU, LLM+KV CPU via weight-split)
+r_cuda_fa = run_funasr("cuda_fa_on", {})
 results.append(r_cuda_fa)
 
 # v3-v4 proved: FA off and KV_READ_F32 do NOT fix it. LLM layer 0 is fine,
