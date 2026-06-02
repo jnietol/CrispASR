@@ -111,7 +111,85 @@ target_link_libraries(${TARGET} PRIVATE
 ## 5. Optional: add to the model registry
 
 If your model has a canonical Q4_K HuggingFace release, add it to
-`src/crispasr_model_registry.cpp` so `-m auto` works.
+`src/crispasr_model_registry.cpp` so `-m auto` / `-m <name> --auto-download`
+works (one `k_registry[]` row: `{"name", "file.gguf", "https://…", "~size",
+nullptr, nullptr}`).
+
+## 6. Expose through the C ABI, bindings, and docs
+
+§2–§5 make `--backend X` work on the CLI. To reach every other consumer
+(Python, Go, Dart, server) and `-m <file>` auto-detection, wire the points
+below. **`chatterbox` is the canonical template** — `grep -n chatterbox`
+(or `CA_HAVE_CHATTERBOX`) in each file shows the exact pattern to copy.
+
+### CLI auto-detection — `examples/cli/crispasr_backend.cpp`
+So `-m model.gguf` *without* `--backend` routes correctly, add the name to
+**both** passes of `crispasr_detect_backend_from_gguf()`:
+- Pass 1 (filename heuristic): `if (contains_ci("yourmodel")) return "yourmodel";`
+- Pass 2 (GGUF `general.architecture`): `else if (a == "<arch>") result = "yourmodel";`
+  — `<arch>` is whatever your converter passes to `GGUFWriter(arch=...)`.
+
+The `--list-backends` capability row is read live from the backend's
+`capabilities()`, so it needs no separate edit.
+
+### C ABI — `src/crispasr_c_api.cpp` (this is what the bindings/server call)
+Python/Go/Dart/server use the **session C ABI**, not the CLI factory.
+Eight edit points, each mirroring the `CA_HAVE_CHATTERBOX` blocks:
+1. **include + flag:** `#if __has_include("yourmodel.h")` → `#include` →
+   `#define CA_HAVE_YOURMODEL 1` → `#endif`.
+2. **session struct field:** `#ifdef CA_HAVE_YOURMODEL  yourmodel_context* yourmodel_ctx = nullptr;  #endif`.
+3. **`crispasr_session_open_explicit()`** dispatch: when `s->backend ==
+   "yourmodel"`, build params + `yourmodel_init_from_file(model_path, p)`.
+4. **`crispasr_session_synthesize()`** (TTS) or transcribe dispatch:
+   `if (s->yourmodel_ctx) return yourmodel_synthesize(s->yourmodel_ctx, text, out_n_samples);`.
+5. **`crispasr_session_free()`:** free the ctx.
+6. **`crispasr_session_set_temperature()`** — if sampling-capable.
+7. **`crispasr_session_set_tts_seed()`** — if seedable.
+8. **`crispasr_session_available_backends()`:** append `,yourmodel`. The
+   Python binding rejects any backend missing from this list, so this is
+   not optional.
+
+### CMake — link into the C-ABI library, `src/CMakeLists.txt`
+§4 links the backend into the CLI binary. The C ABI needs it in
+`libcrispasr` too. In the "C-ABI wrappers" block (grep
+`target_link_libraries(crispasr PUBLIC`):
+```cmake
+if (TARGET yourmodel_lib)
+    target_link_libraries(crispasr PUBLIC yourmodel_lib)
+endif()
+```
+
+### Bindings — docstrings only (dispatch is automatic once the C ABI is wired)
+- `python/crispasr/_binding.py` — add the name to the TTS-backend lists in
+  the `synthesize` comment + docstring.
+- `bindings/go/crispasr_session.go` — add to the header/type comments.
+  Go links `-lcrispasr` (not per-backend), so **no LDFLAGS change**.
+
+### Docs
+- `README.md` — model-table row (TTS or ASR section).
+- `docs/tts.md` — backend table row (TTS backends).
+- `docs/architecture.md` — a `### yourmodel` section under "Per-backend
+  architecture details"; README/tts.md link `docs/architecture.md#yourmodel`.
+
+### Build targets (don't be fooled by stale binaries)
+- `crispasr` → the **library** (libcrispasr / `.dylib`).
+- `crispasr-cli` → the **CLI binary** (`OUTPUT_NAME crispasr`).
+- `crispasr-diff` → the diff harness.
+
+After C-ABI edits, build **`crispasr`** (the dylib) and re-test the Python
+`Session` — building only `crispasr-cli` may leave the dylib stale, and the
+binding then loads an old backend list. Verify with:
+```python
+import crispasr
+assert "yourmodel" in crispasr.Session.available_backends()
+crispasr.Session("model.gguf", backend="yourmodel")  # opens?
+```
+
+> ⚠️ **Commit from a separate `git worktree`, or `git pull --rebase`
+> immediately before committing.** A `git add -A` / `commit -a` from a
+> parallel session over a stale tree silently reverts others' work through
+> the shared `.git/index` — this clobbered the entire §135 CSM landing
+> (commit `100b9ee5`). `git config pull.rebase true` is set in this repo.
 
 ## Regression-test your backend
 
