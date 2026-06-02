@@ -202,10 +202,10 @@ static bool ggml_graph_compute_helper(struct ggml_cgraph* graph, int n_threads, 
 #include <mutex>
 #include <unordered_map>
 struct cpu_pool_entry {
-    ggml_threadpool_t pool      = nullptr;
-    int               n_threads = 0;
+    ggml_threadpool_t pool = nullptr;
+    int n_threads = 0;
 };
-static std::mutex                                         g_cpu_pools_mtx;
+static std::mutex g_cpu_pools_mtx;
 static std::unordered_map<ggml_backend_t, cpu_pool_entry> g_cpu_pools;
 
 static void whisper_ensure_cpu_threadpool(ggml_backend_sched_t sched, int n_threads) {
@@ -225,7 +225,7 @@ static void whisper_ensure_cpu_threadpool(ggml_backend_sched_t sched, int n_thre
             ggml_threadpool_free(entry.pool);
         }
         struct ggml_threadpool_params tpp = ggml_threadpool_params_default(n_threads);
-        entry.pool      = ggml_threadpool_new(&tpp);
+        entry.pool = ggml_threadpool_new(&tpp);
         entry.n_threads = entry.pool ? n_threads : 0;
         if (entry.pool) {
             ggml_backend_cpu_set_threadpool(backend, entry.pool);
