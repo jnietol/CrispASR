@@ -430,6 +430,31 @@ GGUF built from the HF-transformers checkpoint (rotate_half layout → NEOX
 rope). Diff via `crispasr-diff csm` (backbone per-layer + depth + RVQ vs
 the manual PyTorch reference).
 
+### speecht5
+
+Microsoft SpeechT5 (`microsoft/speecht5_tts`, MIT, ~80M params), single
+GGUF (~300 MB F16), 16 kHz mono. Architecture:
+
+- **Text encoder** — Embedding(81, 768) + ScaledPositionalEncoding +
+  LayerNorm + 12L transformer with SpeechT5RelativePositionalEncoding
+  (embedding-based, max_rel=160). Post-LN, GELU FFN.
+- **Speech decoder** — AR over continuous mel frames (no codebook tokens).
+  Prenet: 2× Linear(80→256)+ReLU + Linear(256→768) + ScaledPosEnc +
+  speaker projection Linear(1280→768)+ReLU (512-d x-vector concatenated).
+  6L decoder (self-attn KV-cached + cross-attn + FFN, post-LN).
+  feat_out Linear(768→160) → reshape (reduction_factor=2, 80 mel bins).
+  prob_out Linear(768→2) → sigmoid → stop token.
+- **Postnet** — 5-layer Conv1d(k=5) + BatchNorm + Tanh stack, residual
+  add to feat_out mel.
+- **HiFi-GAN vocoder** — `microsoft/speecht5_hifigan`, 4× upsample
+  (rates [4,4,4,4]) with MRF resblocks (kernels [3,7,11],
+  dilations [[1,3,5]×3]) → 16 kHz PCM. Weight-norm fused at conversion.
+
+Speaker conditioning requires a 512-d x-vector (e.g. from
+`Matthijs/cmu-arctic-xvectors`), passed as raw float32 `.bin` via
+`--voice`. The prenet uses "consistent dropout" at inference in the
+original; the C++ port omits it (deterministic).
+
 ### m2m100 / wmt21
 
 12L encoder + 12L decoder transformer (d=1024, 16 heads, FFN=4096, ReLU,
