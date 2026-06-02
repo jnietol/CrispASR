@@ -1323,7 +1323,8 @@ static void conv1d_eager(float* out, const float* in, int Cin, int T_in, ggml_te
 }
 
 // ConvTranspose1d (naive)
-// w: (K, Cout, Cin) in ggml layout
+// GGUF ne = [K, Cout, Cin]: ggml row-major data[cin * Cout * K + cout * K + k].
+// PyTorch ConvTranspose1d weight is (Cin, Cout, K).
 // Input: (Cin, T_in) -> Output: (Cout, T_out) where T_out = (T_in-1)*stride + K - 2*pad
 static void conv_transpose1d_eager(float* out, const float* in, int Cin, int T_in, ggml_tensor* w_tensor,
                                    ggml_tensor* b_tensor, int stride, int pad) {
@@ -1348,7 +1349,8 @@ static void conv_transpose1d_eager(float* out, const float* in, int Cin, int T_i
                 int t_out_pos = t_out_raw - pad;
                 if (t_out_pos >= 0 && t_out_pos < T_out_cropped) {
                     for (int co = 0; co < Cout; co++) {
-                        out[co * T_out_cropped + t_out_pos] += w[(k * Cout + co) * Cin + ci] * x_val;
+                        // ggml row-major: data[cin * Cout * K + cout * K + k]
+                        out[co * T_out_cropped + t_out_pos] += w[ci * Cout * K + co * K + k] * x_val;
                     }
                 }
             }
@@ -1402,19 +1404,15 @@ static void mimi_decode(pocket_tts_context* pctx, const float* latent_seq, int n
     }
 
     // 2. Quantizer projection: Conv1d(inner_dim -> outer_dim, kernel=1)
-    // quant_proj_w shape: (1, inner_dim, outer_dim) => pointwise conv
-    // Treat as matmul: (outer_dim, inner_dim) x (inner_dim, n_frames) -> (outer_dim, n_frames)
+    // quant_proj_w: Conv1d(inner_dim -> outer_dim, K=1), stored in GGUF as
+    // ne=[1, 32, 512] — ggml row-major: data[cout * Cin + cin], i.e. (Cout, Cin).
     std::vector<float> projected(n_frames * OD);
     const float* qp_w = tensor_f32_data(m.quant_proj_w);
-    // quant_proj_w is stored as Conv1d weight (K=1, Cin=LD, Cout=OD)
     for (int f = 0; f < n_frames; f++) {
         for (int o = 0; o < OD; o++) {
             float val = 0.0f;
             for (int d = 0; d < LD; d++) {
-                // weight layout: (K=1, Cin, Cout) -> index [0 * Cin*Cout + d * Cout + o]
-                // but ggml ne = [1, 32, 512], so data[0*32*512 + d*512 + o] for traditional layout
-                // Actually for conv1d weight (K, Cin, Cout): offset = k*Cin*Cout + cin*Cout + cout
-                val += qp_w[d * OD + o] * denorm[f * LD + d];
+                val += qp_w[o * LD + d] * denorm[f * LD + d];
             }
             projected[f * OD + o] = val;
         }
@@ -1429,17 +1427,61 @@ static void mimi_decode(pocket_tts_context* pctx, const float* latent_seq, int n
         }
     }
 
-    // T_up = n_frames * DS for stride=kernel (approximation)
-    // The upsample conv has kernel = stride (common pattern)
+    // Upsample: ConvTranspose1d with groups=Cin (depthwise).
+    // Weight ne=[K, 1, Cin] means (Cin, Cout_per_group=1, K) in PyTorch.
+    // Each of the Cin=OD=512 channels independently upsamples by stride DS=16.
     int K_up = (int)m.upsample_conv_w->ne[0];
+    int Cout_pg = (int)m.upsample_conv_w->ne[1]; // 1 (per-group output channels)
     int pad_up = (K_up - DS) / 2;
     if (pad_up < 0)
         pad_up = 0;
     int T_up_actual = (n_frames - 1) * DS + K_up - 2 * pad_up;
-    std::vector<float> upsampled(OD * T_up_actual);
-    conv_transpose1d_eager(upsampled.data(), channels_first.data(), OD, n_frames, m.upsample_conv_w, m.upsample_conv_b,
-                           DS, pad_up);
+    std::vector<float> upsampled(OD * T_up_actual, 0.0f);
+
+    if (Cout_pg == 1) {
+        // Depthwise: each channel ci uses w[ci, 0, :] (= data[ci * K + k])
+        const float* w = tensor_f32_data(m.upsample_conv_w);
+        for (int ci = 0; ci < OD; ci++) {
+            for (int t = 0; t < n_frames; t++) {
+                float x_val = channels_first[ci * n_frames + t];
+                for (int k = 0; k < K_up; k++) {
+                    int t_out = t * DS + k - pad_up;
+                    if (t_out >= 0 && t_out < T_up_actual) {
+                        // ggml row-major with ne=[K, 1, Cin]: data[cin * 1 * K + 0 * K + k] = data[cin * K + k]
+                        upsampled[ci * T_up_actual + t_out] += w[ci * K_up + k] * x_val;
+                    }
+                }
+            }
+        }
+        // Add bias
+        if (m.upsample_conv_b) {
+            const float* b = tensor_f32_data(m.upsample_conv_b);
+            for (int ci = 0; ci < OD; ci++) {
+                for (int t = 0; t < T_up_actual; t++) {
+                    upsampled[ci * T_up_actual + t] += b[ci];
+                }
+            }
+        }
+    } else {
+        // Non-depthwise fallback
+        conv_transpose1d_eager(upsampled.data(), channels_first.data(), OD, n_frames, m.upsample_conv_w,
+                               m.upsample_conv_b, DS, pad_up);
+    }
     int T_xfmr = T_up_actual;
+
+    // Dump post-upsample
+    if (pctx->verbosity >= 2 || getenv("POCKET_DUMP_DIR")) {
+        const char* dd = getenv("POCKET_DUMP_DIR");
+        if (dd) {
+            std::string p = std::string(dd) + "/cpp_mimi_upsample.f32";
+            FILE* f = fopen(p.c_str(), "wb");
+            if (f) {
+                fwrite(upsampled.data(), sizeof(float), upsampled.size(), f);
+                fclose(f);
+            }
+            fprintf(stderr, "POCKET_DUMP_DIR: wrote cpp_mimi_upsample.f32 (%d x %d)\n", OD, T_xfmr);
+        }
+    }
 
     // 4. Decoder transformer (2 layers, 512D, context=250, LayerScale)
     // Convert to seq-first layout: (T, D)
@@ -1468,6 +1510,18 @@ static void mimi_decode(pocket_tts_context* pctx, const float* latent_seq, int n
             linear_f32(&proj_seq[t * OD], &xfmr_seq[t * OD], m.dec_xfmr_output_proj, nullptr, OD, OD);
         }
         xfmr_seq = std::move(proj_seq);
+    }
+
+    // Dump post-transformer
+    if (getenv("POCKET_DUMP_DIR")) {
+        const char* dd = getenv("POCKET_DUMP_DIR");
+        std::string p = std::string(dd) + "/cpp_mimi_post_xfmr.f32";
+        FILE* f = fopen(p.c_str(), "wb");
+        if (f) {
+            fwrite(xfmr_seq.data(), sizeof(float), xfmr_seq.size(), f);
+            fclose(f);
+        }
+        fprintf(stderr, "POCKET_DUMP_DIR: wrote cpp_mimi_post_xfmr.f32 (%d x %d)\n", T_xfmr, OD);
     }
 
     // Convert back to channels-first: (OD, T_xfmr)
@@ -1886,6 +1940,16 @@ float* pocket_tts_synthesize(struct pocket_tts_context* ctx, const char* text, i
         std::vector<float> backbone_out(D);
         backbone_forward_step(ctx, prev_input.data(), backbone_out.data());
         ctx->backbone_kv.offset++;
+
+        // Dump step-0 backbone output for diff testing
+        if (frame == 0 && pocket_dump_dir) {
+            FILE* f = fopen(dump_path("cpp_backbone_out0.f32").c_str(), "wb");
+            if (f) {
+                fwrite(backbone_out.data(), sizeof(float), D, f);
+                fclose(f);
+            }
+            fprintf(stderr, "POCKET_DUMP_DIR: wrote cpp_backbone_out0.f32 (%d floats)\n", D);
+        }
 
         // Check EOS (skip if teacher-forcing)
         if (forced_latents.empty() && check_eos(ctx, backbone_out.data())) {
