@@ -175,7 +175,7 @@ import (
 	"unsafe"
 )
 
-// CrispasrSession is a TTS-capable session (kokoro, vibevoice, qwen3-tts, orpheus, parler-tts).
+// CrispasrSession is a TTS-capable session (kokoro, vibevoice, qwen3-tts, orpheus, parler-tts, pocket-tts).
 type CrispasrSession struct {
 	handle *C.CrispasrSession
 }

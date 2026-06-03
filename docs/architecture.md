@@ -507,6 +507,24 @@ Tokenizer: ARPABET vocabulary (115 tokens: space + 24 consonants +
 45 stressed vowels + 26 lowercase chars + apostrophe + 15 punct +
 pad/blank/oov). Currently character-level; G2P not yet implemented.
 
+### pocket-tts
+
+Kyutai Pocket TTS (100M, MIT / CC-BY-4.0). Continuous-latent AR TTS —
+architecturally unique: no codebook, no RVQ, no softmax.
+
+Pipeline: SentencePiece (4000 vocab) → 4001×1024 embedding LUT →
+6-layer causal transformer (1024D, 16H, RoPE, pre-norm LN, GELU FFN)
+→ consistency head (SimpleMLPAdaLN: 6 ResBlocks + FinalLayer, 512D,
+AdaLN conditioning from timestep embeddings + backbone output) →
+one-step Lagrangian Self Distillation (LSD) decode → continuous 32-dim
+float vectors at 12.5 Hz → Mimi VAE decoder (depthwise ConvTranspose1d
+upsample ×16 + 2L causal transformer with RoPE and LayerScale +
+SEANet CNN decoder with causal convolutions, ratios [6,5,4]) → 24 kHz
+mono PCM. Voice cloning: ref audio → Mimi VAE encoder → linear project
+→ prepend to transformer KV cache. Model:
+`kyutai/pocket-tts-without-voice-cloning` (no encoder weights) or
+`kyutai/pocket-tts` (full, with encoder for voice cloning).
+
 ### parler-tts
 
 Prompt-conditioned TTS from
