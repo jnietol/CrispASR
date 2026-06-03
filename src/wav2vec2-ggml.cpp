@@ -21,6 +21,7 @@
  */
 
 #include "wav2vec2-ggml.h"
+#include "core/ctc.h"
 #include "core/gguf_loader.h"
 
 #include <unordered_map>
@@ -1986,5 +1987,100 @@ std::vector<wav2vec2_token_prob> wav2vec2_greedy_decode_with_probs(const wav2vec
         }
     }
 
+    return out;
+}
+
+std::vector<wav2vec2_token_prob> wav2vec2_beam_decode_with_probs(const wav2vec2_model& m, const float* logits, int T,
+                                                                 int beam_size, float gamma) {
+    const int V = (int)m.hparams.vocab_size;
+    const int blank_id = (int)m.hparams.pad_token_id;
+
+    // Convert raw logits to log-softmax
+    std::vector<float> logprobs((size_t)T * V);
+    for (int t = 0; t < T; t++) {
+        const float* row = logits + (size_t)t * V;
+        float* lp = logprobs.data() + (size_t)t * V;
+        float mx = row[0];
+        for (int v = 1; v < V; v++)
+            if (row[v] > mx)
+                mx = row[v];
+        double sum = 0.0;
+        for (int v = 0; v < V; v++)
+            sum += std::exp((double)(row[v] - mx));
+        double log_sum = (double)mx + std::log(sum);
+        for (int v = 0; v < V; v++)
+            lp[v] = (float)((double)row[v] - log_sum);
+    }
+
+    // Run prefix beam search (shift=0 since wav2vec2 token IDs are direct)
+    auto br = core_ctc::prefix_beam_search(logprobs.data(), T, V, blank_id,
+                                           /*shift=*/0, beam_size, gamma);
+
+    // Convert token IDs to text records with approximate timestamps.
+    // For timestamps, scan forward through logits to find the first frame
+    // where each token has high probability (greedy-match heuristic).
+    std::vector<wav2vec2_token_prob> out;
+    out.reserve(br.tokens.size());
+
+    int scan_t = 0; // current scan position in the logit grid
+    for (size_t i = 0; i < br.tokens.size(); i++) {
+        int32_t tok = br.tokens[i];
+        if (tok < 0 || tok >= (int)m.vocab.size())
+            continue;
+
+        // Find first frame where this token is the argmax (rough timestamp)
+        int frame_start = scan_t;
+        for (int t = scan_t; t < T; t++) {
+            const float* row = logits + (size_t)t * V;
+            int best = 0;
+            float bv = row[0];
+            for (int v = 1; v < V; v++)
+                if (row[v] > bv) {
+                    bv = row[v];
+                    best = v;
+                }
+            if (best == tok) {
+                frame_start = t;
+                // Find the end of this token's run
+                int frame_end = t;
+                for (int t2 = t + 1; t2 < T; t2++) {
+                    const float* r2 = logits + (size_t)t2 * V;
+                    int b2 = 0;
+                    float bv2 = r2[0];
+                    for (int v = 1; v < V; v++)
+                        if (r2[v] > bv2) {
+                            bv2 = r2[v];
+                            b2 = v;
+                        }
+                    if (b2 == tok)
+                        frame_end = t2;
+                    else
+                        break;
+                }
+                scan_t = frame_end + 1;
+
+                // Compute softmax prob at frame_start
+                float mx2 = logits[(size_t)frame_start * V + tok];
+                double sum2 = 0.0;
+                const float* row2 = logits + (size_t)frame_start * V;
+                for (int v = 0; v < V; v++)
+                    sum2 += std::exp((double)(row2[v] - mx2));
+                float prob = (float)(1.0 / sum2);
+
+                wav2vec2_token_prob tp;
+                const std::string& piece = m.vocab[tok];
+                if (piece == "|")
+                    tp.text = " ";
+                else if (piece != "<unk>" && piece != "<s>" && piece != "</s>")
+                    tp.text = piece;
+                tp.id = tok;
+                tp.prob = prob;
+                tp.frame_start = frame_start;
+                tp.frame_end = frame_end;
+                out.push_back(std::move(tp));
+                break;
+            }
+        }
+    }
     return out;
 }

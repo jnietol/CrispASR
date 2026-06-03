@@ -165,6 +165,15 @@ struct wav2vec2_token_prob {
 std::vector<wav2vec2_token_prob> wav2vec2_greedy_decode_with_probs(const wav2vec2_model& m, const float* logits, int T);
 
 /**
+ * CTC prefix beam search decode. Returns per-emission records like greedy,
+ * but uses beam search for better accuracy. Timestamps are approximate
+ * (frame-level mapping lost in beam mode, uses first-occurrence heuristic).
+ * gamma > 0 enables MAES-style gamma-threshold pruning.
+ */
+std::vector<wav2vec2_token_prob> wav2vec2_beam_decode_with_probs(const wav2vec2_model& m, const float* logits, int T,
+                                                                 int beam_size = 4, float gamma = 2.3f);
+
+/**
  * Compute the encoder frame duration in seconds.
  * For standard wav2vec2 at 16 kHz with default strides this is 0.02 s (50 fps).
  */

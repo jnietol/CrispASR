@@ -3582,7 +3582,9 @@ static crispasr_session_result* transcribe_single(crispasr_session* s, const flo
         }
         const int V = (int)s->wav2vec2_ctx->hparams.vocab_size;
         const int T = (int)(logits.size() / (size_t)V);
-        auto emits = wav2vec2_greedy_decode_with_probs(*s->wav2vec2_ctx, logits.data(), T);
+        auto emits = (s->beam_size > 1)
+                         ? wav2vec2_beam_decode_with_probs(*s->wav2vec2_ctx, logits.data(), T, s->beam_size, 2.3f)
+                         : wav2vec2_greedy_decode_with_probs(*s->wav2vec2_ctx, logits.data(), T);
         const float frame_dur_s = wav2vec2_frame_dur(*s->wav2vec2_ctx);
 
         // Build the transcript text and project emissions into the
