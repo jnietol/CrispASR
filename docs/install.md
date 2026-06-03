@@ -233,3 +233,24 @@ Strip debug symbols to reduce binary size:
 ```bash
 strip build/bin/crispasr*
 ```
+
+### Cross-compiling for Android (NDK)
+
+To cross-compile from a Linux or macOS host for Android deployment
+(e.g. embedding `libcrispasr.so` in an Android app), use the provided
+`build-android.sh` script. This requires the
+[Android NDK](https://developer.android.com/ndk) installed on the host:
+
+```bash
+export ANDROID_NDK_HOME=/path/to/android-ndk
+./build-android.sh                      # all ABIs (arm64-v8a, armeabi-v7a, x86_64)
+./build-android.sh --abi arm64-v8a      # single ABI
+./build-android.sh --vulkan             # with Vulkan GPU support
+```
+
+Output lands in `build-android/<ABI>/src/libcrispasr.so`.
+
+**This is not the same as building inside Termux.** The NDK
+cross-compiler produces binaries linked against Android's bionic libc,
+suitable for embedding in Android apps via JNI. Termux uses its own
+linker and packages — use the native Termux build above instead.

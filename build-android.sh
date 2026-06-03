@@ -1,7 +1,19 @@
 #!/bin/bash
-# Build CrispASR (crispasr) for Android via NDK.
+# Cross-compile CrispASR for Android using the NDK toolchain.
 #
-# Usage:
+# This script is for CROSS-COMPILATION from a Linux/macOS host.
+# It requires the Android NDK installed on the host machine.
+#
+# !! If you are building INSIDE Termux on an Android device, you do
+# !! NOT need this script. Just use plain cmake:
+# !!
+# !!   cmake -B build -DBUILD_SHARED_LIBS=OFF -DCRISPASR_BUILD_TESTS=OFF .
+# !!   cmake --build build -j$(nproc)
+# !!
+# !! See docs/install.md "Android / Termux" for details and the
+# !! -DBUILD_SHARED_LIBS=OFF rationale (avoids libggml.so conflicts).
+#
+# Usage (from a host machine with NDK installed):
 #   ./build-android.sh                      # All ABIs
 #   ./build-android.sh --abi arm64-v8a      # Single ABI
 #   ./build-android.sh --vulkan             # With Vulkan GPU

@@ -94,6 +94,78 @@ curl http://localhost:8080/v1/audio/transcriptions \
 | `max_tokens` | Generated-token cap for supported autoregressive ASR backends |
 | `max_new_tokens` | Alias for `max_tokens` |
 | `frequency_penalty` | Opt-in repeated generated-token penalty for supported autoregressive ASR backends (`0.0` disabled) |
+| `translate` | `true`/`false` — translate to English (backends with `CAP_TRANSLATE`) |
+| `source_lang` | Source language for AST backends (canary, cohere) |
+| `target_lang` | Target language for AST backends |
+| `punctuation` | `true`/`false` — enable/disable punctuation (default: `true`; `false` strips punctuation from output) |
+| `diarize` | `true`/`false` — enable speaker diarization |
+| `diarize_method` | `energy`, `xcorr`, `vad-turns`, `pyannote`, `sherpa` (default: `energy`) |
+| `vad` | `true`/`false` — enable VAD pre-processing |
+| `vad_threshold` | VAD speech probability threshold (default: 0.5) |
+| `vad_min_speech_duration_ms` | Minimum speech segment duration in ms (default: 250) |
+| `vad_min_silence_duration_ms` | Minimum silence gap to split on in ms (default: 100) |
+| `vad_max_speech_duration_s` | Maximum speech segment duration in seconds |
+| `vad_speech_pad_ms` | Padding around speech segments in ms (default: 30) |
+| `hotwords` | Comma-separated hotword list for biased decoding |
+| `hotwords_boost` | Log-prob boost per hotword token match (default: 2.0) |
+| `suppress_regex` | Regex pattern to suppress from output |
+| `suppress_nst` | `true`/`false` — suppress non-speech tokens |
+| `grammar` | GBNF grammar string for constrained decoding |
+| `grammar_rule` | Root rule name for the grammar |
+| `best_of` | Whisper best-of-N sampling candidates |
+| `beam_size` | Whisper beam search width |
+| `entropy_thold` | Entropy threshold for decoder fallback |
+| `logprob_thold` | Log-probability threshold for decoder fallback |
+| `no_speech_thold` | No-speech probability threshold |
+| `temperature_inc` | Temperature increment for fallback retries |
+| `no_fallback` | `true`/`false` — disable temperature fallback |
+| `detect_language` | `true`/`false` — run language detection |
+| `no_timestamps` | `true`/`false` — omit timestamps from output |
+| `split_on_word` | `true`/`false` — split segments on word boundaries |
+| `max_len` | Maximum segment length in characters |
+| `chunk_seconds` | Maximum chunk duration for long audio (default: 30) |
+
+The `/inference` endpoint accepts the same CrispASR extension fields.
+
+### Diarization example
+
+```bash
+# Speaker diarization (energy method — works on stereo audio):
+curl http://localhost:8080/v1/audio/transcriptions \
+  -F "file=@meeting.wav" \
+  -F "response_format=verbose_json" \
+  -F "diarize=true"
+
+# Pyannote diarization (works on mono, needs pyannote-seg GGUF):
+crispasr --server -m model.gguf --diarize --diarize-method pyannote \
+  --sherpa-segment-model pyannote-seg-3.0.gguf
+
+curl http://localhost:8080/v1/audio/transcriptions \
+  -F "file=@meeting.wav" \
+  -F "response_format=verbose_json" \
+  -F "diarize=true" \
+  -F "diarize_method=pyannote"
+```
+
+### Translation example
+
+```bash
+# Translate non-English audio to English (whisper, canary, cohere):
+curl http://localhost:8080/v1/audio/transcriptions \
+  -F "file=@german.wav" \
+  -F "translate=true" \
+  -F "response_format=json"
+```
+
+### Hotwords example
+
+```bash
+# Boost domain-specific terms:
+curl http://localhost:8080/v1/audio/transcriptions \
+  -F "file=@audio.wav" \
+  -F "hotwords=CrispASR,GGUF,parakeet" \
+  -F "hotwords_boost=3.0"
+```
 
 `GET /v1/models` returns an OpenAI-compatible model list with the
 currently loaded model.
