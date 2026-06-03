@@ -1167,8 +1167,8 @@ struct crispasr_session {
     int best_of = 1;
     int max_new_tokens = 0;
     float frequency_penalty = 0.0f;
-    float temperature = 0.0f;  // 0 = greedy / backend default
-    uint64_t seed = 0;         // 0 = time-based
+    float temperature = 0.0f; // 0 = greedy / backend default
+    uint64_t seed = 0;        // 0 = time-based
 
     // ── §90 session-level beam-search width ──────────────────────────────
     // beam_size > 1 activates beam search for backends that support it:

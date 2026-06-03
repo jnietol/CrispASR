@@ -19,6 +19,8 @@
 // Adapted from examples/server/server.cpp for multi-backend support.
 
 #include "crispasr_backend.h"
+#include "crispasr_diarize_cli.h"
+#include "crispasr_speaker_embedder.h"
 #include "crispasr_lid.h"
 #include "crispasr_lid_cli.h"
 #include "crispasr_output.h"
@@ -238,6 +240,20 @@ static uint64_t form_u64(const httplib::Request& req, const std::string& key, ui
     }
 }
 
+static bool form_bool(const httplib::Request& req, const std::string& key, bool def) {
+    std::string v = form_string(req, key, "");
+    if (v.empty())
+        return def;
+    // Accept "true", "1", "yes" (case-insensitive) as truthy.
+    for (auto& c : v)
+        c = (char)std::tolower((unsigned char)c);
+    if (v == "true" || v == "1" || v == "yes")
+        return true;
+    if (v == "false" || v == "0" || v == "no")
+        return false;
+    return def;
+}
+
 // JSON error response helper. Shape matches OpenAI's:
 //   { "error": { "message": ..., "type": ..., "code": ..., "param": ... } }
 // `code` is a stable machine-readable enum-string the client can switch on
@@ -404,6 +420,74 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
             }
         }
 
+        // Diarization post-step (#143): assign speaker labels to segments.
+        // Mirrors the CLI path in crispasr_run.cpp:732-743.
+        if (rp.diarize && !result.segs.empty()) {
+            const bool have_stereo = pcmf32s.size() == 2 && !pcmf32s[0].empty() && !pcmf32s[1].empty();
+
+            // Pre-compute global caches for cross-slice consistency.
+            CrispasrPyannoteCache pyannote_cache;
+            if (rp.diarize_method == "pyannote" && !pcmf32.empty()) {
+                crispasr_compute_pyannote_cache(pcmf32.data(), n_samples, rp, pyannote_cache);
+            }
+            CrispasrSherpaCache sherpa_cache;
+            if ((rp.diarize_method == "sherpa" || rp.diarize_method == "sherpa-onnx" || rp.diarize_method == "ecapa") &&
+                !pcmf32.empty()) {
+                crispasr_compute_sherpa_cache(pcmf32.data(), n_samples, rp, sherpa_cache);
+            }
+            const CrispasrPyannoteCache* pya_ptr = pyannote_cache.valid() ? &pyannote_cache : nullptr;
+            const CrispasrSherpaCache* shp_ptr = sherpa_cache.valid() ? &sherpa_cache : nullptr;
+
+            // Apply diarize per-slice. We re-walk the slices and apply
+            // diarize to the corresponding range of result.segs.
+            size_t seg_offset = 0;
+            for (size_t i = 0; i < slices.size(); ++i) {
+                const auto& sl = slices[i];
+                // Count how many segments belong to this slice (by timestamp range).
+                size_t seg_count = 0;
+                for (size_t j = seg_offset; j < result.segs.size(); ++j) {
+                    // Segments from the next slice will have t0 >= next slice's t0_cs.
+                    if (i + 1 < slices.size() && result.segs[j].t0 >= slices[i + 1].t0_cs)
+                        break;
+                    seg_count++;
+                }
+
+                if (seg_count > 0) {
+                    std::vector<crispasr_segment> slice_segs(result.segs.begin() + (ptrdiff_t)seg_offset,
+                                                             result.segs.begin() + (ptrdiff_t)(seg_offset + seg_count));
+                    if (have_stereo) {
+                        std::vector<float> sl_l(pcmf32s[0].begin() + sl.start, pcmf32s[0].begin() + sl.end);
+                        std::vector<float> sl_r(pcmf32s[1].begin() + sl.start, pcmf32s[1].begin() + sl.end);
+                        crispasr_apply_diarize(sl_l, sl_r, /*is_stereo=*/true, sl.t0_cs, slice_segs, rp, pya_ptr,
+                                               shp_ptr);
+                    } else {
+                        std::vector<float> mono_slice(pcmf32.begin() + sl.start, pcmf32.begin() + sl.end);
+                        crispasr_apply_diarize(mono_slice, mono_slice,
+                                               /*is_stereo=*/false, sl.t0_cs, slice_segs, rp, pya_ptr, shp_ptr);
+                    }
+                    // Copy back the diarized segments.
+                    for (size_t j = 0; j < seg_count; ++j)
+                        result.segs[seg_offset + j] = std::move(slice_segs[j]);
+                }
+                seg_offset += seg_count;
+            }
+
+            // Global embedding-based re-clustering (issue #107 P3).
+            if (!rp.diarize_embedder.empty() && !pcmf32.empty()) {
+                auto embedder = crispasr_make_speaker_embedder(rp.diarize_embedder, rp.n_threads, rp.cache_dir);
+                if (embedder) {
+                    crispasr_remap_speakers_via_embeddings(result.segs, pcmf32.data(), n_samples, embedder.get(), rp);
+                }
+            }
+        }
+
+        // Punctuation stripping: when `--no-punctuation` / `punctuation=false`
+        // is set and the backend doesn't natively toggle it, strip here.
+        if (!rp.punctuation) {
+            for (auto& seg : result.segs)
+                crispasr_strip_punctuation(seg);
+        }
+
         auto t1 = std::chrono::steady_clock::now();
         result.elapsed_s = std::chrono::duration<double>(t1 - t0).count();
     }
@@ -547,6 +631,42 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
         // Per-request parameter overrides.
         whisper_params rp = params;
         rp.language = form_string(req, "language", rp.language);
+        rp.source_lang = form_string(req, "source_lang", rp.source_lang);
+        rp.target_lang = form_string(req, "target_lang", rp.target_lang);
+        rp.translate = form_bool(req, "translate", rp.translate);
+        rp.punctuation = form_bool(req, "punctuation", rp.punctuation);
+        rp.diarize = form_bool(req, "diarize", rp.diarize);
+        if (rp.diarize && rp.diarize_method.empty())
+            rp.diarize_method = form_string(req, "diarize_method", "energy");
+        rp.vad = form_bool(req, "vad", rp.vad);
+        rp.vad_threshold = form_float(req, "vad_threshold", rp.vad_threshold);
+        rp.vad_min_speech_duration_ms = form_int(req, "vad_min_speech_duration_ms", rp.vad_min_speech_duration_ms);
+        rp.vad_min_silence_duration_ms = form_int(req, "vad_min_silence_duration_ms", rp.vad_min_silence_duration_ms);
+        rp.vad_max_speech_duration_s = form_float(req, "vad_max_speech_duration_s", rp.vad_max_speech_duration_s);
+        rp.vad_speech_pad_ms = form_int(req, "vad_speech_pad_ms", rp.vad_speech_pad_ms);
+        rp.hotwords = form_string(req, "hotwords", rp.hotwords);
+        rp.hotwords_boost = form_float(req, "hotwords_boost", rp.hotwords_boost);
+        rp.temperature = form_float(req, "temperature", rp.temperature);
+        rp.seed = form_u64(req, "seed", rp.seed);
+        rp.max_new_tokens = form_int(req, "max_new_tokens", rp.max_new_tokens);
+        rp.max_new_tokens = form_int(req, "max_tokens", rp.max_new_tokens);
+        rp.frequency_penalty = form_float(req, "frequency_penalty", rp.frequency_penalty);
+        rp.suppress_regex = form_string(req, "suppress_regex", rp.suppress_regex);
+        rp.suppress_nst = form_bool(req, "suppress_nst", rp.suppress_nst);
+        rp.grammar = form_string(req, "grammar", rp.grammar);
+        rp.grammar_rule = form_string(req, "grammar_rule", rp.grammar_rule);
+        rp.best_of = form_int(req, "best_of", rp.best_of);
+        rp.beam_size = form_int(req, "beam_size", rp.beam_size);
+        rp.entropy_thold = form_float(req, "entropy_thold", rp.entropy_thold);
+        rp.logprob_thold = form_float(req, "logprob_thold", rp.logprob_thold);
+        rp.no_speech_thold = form_float(req, "no_speech_thold", rp.no_speech_thold);
+        rp.temperature_inc = form_float(req, "temperature_inc", rp.temperature_inc);
+        rp.no_fallback = form_bool(req, "no_fallback", rp.no_fallback);
+        rp.detect_language = form_bool(req, "detect_language", rp.detect_language);
+        rp.chunk_seconds = form_int(req, "chunk_seconds", rp.chunk_seconds);
+        rp.no_timestamps = form_bool(req, "no_timestamps", rp.no_timestamps);
+        rp.split_on_word = form_bool(req, "split_on_word", rp.split_on_word);
+        rp.max_len = form_int(req, "max_len", rp.max_len);
 
         auto result = do_transcribe(audio_file, backend.get(), model_mutex, rp, /*need_timestamps=*/true);
         if (!result.ok) {
@@ -576,6 +696,26 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
     //   max_new_tokens   (optional) — alias for max_tokens
     //   frequency_penalty (optional) — opt-in repeated-token penalty for AR backends
     //   timestamp_granularities[] (optional) — word|segment (verbose_json)
+    //
+    // CrispASR extension fields (ignored by vanilla OpenAI clients):
+    //   translate        (optional) — true|false, translate to English
+    //   source_lang      (optional) — source language for AST backends
+    //   target_lang      (optional) — target language for AST backends
+    //   punctuation      (optional) — true|false, enable punctuation restoration
+    //   diarize          (optional) — true|false, enable speaker diarization
+    //   diarize_method   (optional) — energy|xcorr|vad-turns|pyannote|sherpa
+    //   vad              (optional) — true|false, enable VAD pre-processing
+    //   vad_threshold    (optional) — VAD speech probability threshold
+    //   hotwords         (optional) — comma-separated hotword list
+    //   hotwords_boost   (optional) — log-prob boost for hotword matches
+    //   suppress_regex   (optional) — regex pattern to suppress from output
+    //   grammar          (optional) — GBNF grammar for constrained decoding
+    //   grammar_rule     (optional) — root rule for grammar
+    //   best_of          (optional) — whisper best-of-N sampling
+    //   beam_size        (optional) — whisper beam search size
+    //   entropy_thold    (optional) — entropy threshold for decoder fail
+    //   no_speech_thold  (optional) — no-speech probability threshold
+    //   chunk_seconds    (optional) — max chunk duration for long audio
     // -----------------------------------------------------------------------
     svr.Post("/v1/audio/transcriptions", [&](const Request& req, Response& res) {
         if (!require_auth(req, res))
@@ -593,7 +733,7 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
         fprintf(stderr, "crispasr-server: /v1/audio/transcriptions received '%s' (%zu bytes)\n",
                 audio_file.filename.c_str(), audio_file.content.size());
 
-        // Parse OpenAI form fields.
+        // Parse OpenAI form fields + CrispASR extensions.
         std::string response_format = form_string(req, "response_format", "json");
         std::string language = form_string(req, "language", params.language);
         std::string prompt = form_string(req, "prompt", "");
@@ -612,6 +752,13 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
             return;
         }
 
+        // CrispASR extension fields (ignored by vanilla OpenAI clients).
+        bool translate = form_bool(req, "translate", params.translate);
+        std::string source_lang = form_string(req, "source_lang", params.source_lang);
+        std::string target_lang = form_string(req, "target_lang", params.target_lang);
+        bool punctuation = form_bool(req, "punctuation", params.punctuation);
+        bool diarize = form_bool(req, "diarize", params.diarize);
+        std::string diarize_method = form_string(req, "diarize_method", params.diarize_method);
         // Build per-request params.
         whisper_params rp = params;
         rp.language = language;
@@ -619,6 +766,39 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
         rp.seed = seed;
         rp.max_new_tokens = max_new_tokens;
         rp.frequency_penalty = frequency_penalty;
+        rp.translate = translate;
+        rp.source_lang = source_lang;
+        rp.target_lang = target_lang;
+        rp.punctuation = punctuation;
+        rp.diarize = diarize;
+        if (diarize && !diarize_method.empty())
+            rp.diarize_method = diarize_method;
+        else if (diarize && rp.diarize_method.empty())
+            rp.diarize_method = "energy";
+        rp.vad = form_bool(req, "vad", rp.vad);
+        rp.vad_threshold = form_float(req, "vad_threshold", rp.vad_threshold);
+        rp.vad_min_speech_duration_ms = form_int(req, "vad_min_speech_duration_ms", rp.vad_min_speech_duration_ms);
+        rp.vad_min_silence_duration_ms = form_int(req, "vad_min_silence_duration_ms", rp.vad_min_silence_duration_ms);
+        rp.vad_max_speech_duration_s = form_float(req, "vad_max_speech_duration_s", rp.vad_max_speech_duration_s);
+        rp.vad_speech_pad_ms = form_int(req, "vad_speech_pad_ms", rp.vad_speech_pad_ms);
+        rp.hotwords = form_string(req, "hotwords", rp.hotwords);
+        rp.hotwords_boost = form_float(req, "hotwords_boost", rp.hotwords_boost);
+        rp.suppress_regex = form_string(req, "suppress_regex", rp.suppress_regex);
+        rp.suppress_nst = form_bool(req, "suppress_nst", rp.suppress_nst);
+        rp.grammar = form_string(req, "grammar", rp.grammar);
+        rp.grammar_rule = form_string(req, "grammar_rule", rp.grammar_rule);
+        rp.best_of = form_int(req, "best_of", rp.best_of);
+        rp.beam_size = form_int(req, "beam_size", rp.beam_size);
+        rp.entropy_thold = form_float(req, "entropy_thold", rp.entropy_thold);
+        rp.logprob_thold = form_float(req, "logprob_thold", rp.logprob_thold);
+        rp.no_speech_thold = form_float(req, "no_speech_thold", rp.no_speech_thold);
+        rp.temperature_inc = form_float(req, "temperature_inc", rp.temperature_inc);
+        rp.no_fallback = form_bool(req, "no_fallback", rp.no_fallback);
+        rp.detect_language = form_bool(req, "detect_language", rp.detect_language);
+        rp.chunk_seconds = form_int(req, "chunk_seconds", rp.chunk_seconds);
+        rp.no_timestamps = form_bool(req, "no_timestamps", rp.no_timestamps);
+        rp.split_on_word = form_bool(req, "split_on_word", rp.split_on_word);
+        rp.max_len = form_int(req, "max_len", rp.max_len);
         if (!prompt.empty())
             rp.prompt = prompt;
 

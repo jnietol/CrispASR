@@ -46,7 +46,7 @@ for ABI in "${ABIS[@]}"; do
 
     cmake --build "$BUILD_DIR/$ABI" -j"$(nproc 2>/dev/null || echo 4)"
 
-    ls -lh "$BUILD_DIR/$ABI/src/libwhisper.so" 2>/dev/null || true
+    ls -lh "$BUILD_DIR/$ABI/src/libcrispasr.so" 2>/dev/null || true
 done
 
 echo "=== Android build complete ==="
