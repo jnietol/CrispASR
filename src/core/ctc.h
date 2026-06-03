@@ -23,6 +23,8 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -123,6 +125,189 @@ static inline std::vector<int32_t> greedy_decode_with_blank(const float* logits,
         ids.push_back(id + shift);
     }
     return ids;
+}
+
+// -----------------------------------------------------------------------
+// CTC prefix beam search with optional gamma-threshold pruning.
+//
+// Standard CTC prefix beam search (Graves & Jaitly 2014) extended with
+// MAES-style gamma pruning: at each frame, only keep hypotheses whose
+// score is within `gamma` of the best. This gives beam-search quality
+// at near-greedy speed for typical beam sizes (4–8).
+//
+// The algorithm maintains two probability channels per prefix:
+//   p_b(y) — probability of y ending in blank at time t
+//   p_nb(y) — probability of y ending in non-blank at time t
+// Total prefix probability: p(y) = p_b(y) + p_nb(y)
+//
+// Parameters:
+//   logprobs  : (T, V) row-major — log-softmax CTC output
+//   T         : number of time steps
+//   V         : vocab size including blank
+//   blank_id  : blank label index
+//   shift     : added to every surviving id (e.g. -1 to map CTC→LM ids)
+//   beam_size : max hypotheses to keep per frame
+//   gamma     : pruning threshold (0 = no pruning). Hypotheses with
+//               score < best - gamma are dropped. 2.0–3.0 is typical.
+//
+// Returns the best hypothesis as a token id sequence.
+// -----------------------------------------------------------------------
+
+struct BeamResult {
+    std::vector<int32_t> tokens; // decoded token ids (after shift)
+    double score;                // log-probability of best hypothesis
+};
+
+static inline BeamResult prefix_beam_search(const float* logprobs, int T, int V, int blank_id, int shift,
+                                            int beam_size = 4, float gamma = 0.0f) {
+    // Hypothesis: a prefix and its blank/non-blank log-probs.
+    // We use vectors as prefix keys (small — typically < 100 tokens).
+    struct Hyp {
+        std::vector<int32_t> prefix;
+        double p_b;  // log-prob of paths ending in blank
+        double p_nb; // log-prob of paths ending in non-blank
+        double score() const {
+            // log-sum-exp of p_b and p_nb
+            double m = (p_b > p_nb) ? p_b : p_nb;
+            return m + std::log(std::exp(p_b - m) + std::exp(p_nb - m));
+        }
+    };
+
+    const double NEG_INF = -1e30;
+
+    // Initial state: empty prefix, blank prob = 1 (log = 0), non-blank = 0
+    std::vector<Hyp> beam(1);
+    beam[0].p_b = 0.0;
+    beam[0].p_nb = NEG_INF;
+
+    for (int t = 0; t < T; t++) {
+        const float* lp = logprobs + (size_t)t * V; // log-probs at frame t
+
+        // Collect new hypotheses in a map keyed by prefix.
+        // Using a flat vector + linear search since beam is small.
+        struct NewHyp {
+            std::vector<int32_t> prefix;
+            double p_b;
+            double p_nb;
+            double score() const {
+                double m = (p_b > p_nb) ? p_b : p_nb;
+                return m + std::log(std::exp(p_b - m) + std::exp(p_nb - m));
+            }
+        };
+        std::vector<NewHyp> next;
+        next.reserve(beam.size() * 2); // rough estimate
+
+        auto find_or_insert = [&](const std::vector<int32_t>& pfx) -> NewHyp& {
+            for (auto& h : next)
+                if (h.prefix == pfx)
+                    return h;
+            next.push_back({pfx, NEG_INF, NEG_INF});
+            return next.back();
+        };
+
+        // log-sum-exp helper
+        auto logaddexp = [](double a, double b) -> double {
+            if (a == -1e30)
+                return b;
+            if (b == -1e30)
+                return a;
+            double m = (a > b) ? a : b;
+            return m + std::log(std::exp(a - m) + std::exp(b - m));
+        };
+
+        for (auto& h : beam) {
+            double p_total = h.score();
+
+            // 1. Extend with blank
+            {
+                auto& nh = find_or_insert(h.prefix);
+                nh.p_b = logaddexp(nh.p_b, p_total + (double)lp[blank_id]);
+            }
+
+            // 2. Extend with each non-blank token
+            // For efficiency, only consider top-k tokens at this frame
+            // when beam is small. For now, iterate all (V is typically
+            // 1K–8K which is fine for CPU).
+            for (int c = 0; c < V; c++) {
+                if (c == blank_id)
+                    continue;
+
+                double lp_c = (double)lp[c];
+
+                // Prefix extension
+                auto new_pfx = h.prefix;
+                bool is_repeat = (!h.prefix.empty() && h.prefix.back() == c);
+
+                if (is_repeat) {
+                    // Repeat of last char: only extend from blank-ending paths
+                    // (non-blank ending with same char would be a collapsed repeat)
+                    auto& nh = find_or_insert(new_pfx);
+                    nh.p_nb = logaddexp(nh.p_nb, h.p_b + lp_c);
+
+                    // Also allow extending from non-blank (which merges into same prefix)
+                    // This handles the case: "aa" where both a's are separate emissions
+                    new_pfx.push_back(c);
+                    auto& nh2 = find_or_insert(new_pfx);
+                    nh2.p_nb = logaddexp(nh2.p_nb, h.p_nb + lp_c);
+                } else {
+                    new_pfx.push_back(c);
+                    auto& nh = find_or_insert(new_pfx);
+                    nh.p_nb = logaddexp(nh.p_nb, p_total + lp_c);
+                }
+            }
+        }
+
+        // Prune: sort by score, keep top beam_size
+        // Apply gamma pruning first if enabled
+        if (gamma > 0.0f && !next.empty()) {
+            double best_score = NEG_INF;
+            for (auto& h : next) {
+                double s = h.score();
+                if (s > best_score)
+                    best_score = s;
+            }
+            double threshold = best_score - (double)gamma;
+            size_t write = 0;
+            for (size_t i = 0; i < next.size(); i++) {
+                if (next[i].score() >= threshold) {
+                    if (write != i)
+                        next[write] = std::move(next[i]);
+                    write++;
+                }
+            }
+            next.resize(write);
+        }
+
+        // Keep top beam_size
+        if ((int)next.size() > beam_size) {
+            std::partial_sort(next.begin(), next.begin() + beam_size, next.end(),
+                              [](const NewHyp& a, const NewHyp& b) { return a.score() > b.score(); });
+            next.resize(beam_size);
+        }
+
+        // Move to beam for next frame
+        beam.resize(next.size());
+        for (size_t i = 0; i < next.size(); i++) {
+            beam[i].prefix = std::move(next[i].prefix);
+            beam[i].p_b = next[i].p_b;
+            beam[i].p_nb = next[i].p_nb;
+        }
+    }
+
+    // Return best hypothesis
+    if (beam.empty())
+        return {{}, NEG_INF};
+    int best = 0;
+    for (int i = 1; i < (int)beam.size(); i++)
+        if (beam[i].score() > beam[best].score())
+            best = i;
+
+    // Apply shift to token ids
+    std::vector<int32_t> tokens;
+    tokens.reserve(beam[best].prefix.size());
+    for (int32_t id : beam[best].prefix)
+        tokens.push_back(id + shift);
+    return {std::move(tokens), beam[best].score()};
 }
 
 } // namespace core_ctc

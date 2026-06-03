@@ -66,6 +66,10 @@ struct sensevoice_context* sensevoice_init_from_file(const char* path_model, str
 
 void sensevoice_free(struct sensevoice_context* ctx);
 
+// CTC beam search. beam_size == 1 (default) is greedy; > 1 runs prefix
+// beam search with optional gamma-threshold pruning (gamma == 0 = off).
+void sensevoice_set_beam_size(struct sensevoice_context* ctx, int beam_size, float gamma);
+
 // Transcribe 16 kHz mono PCM. Returns malloc'd UTF-8 string (caller
 // owns; free with free()). The string includes the 4-token rich-annotation
 // prefix as special tokens like `<|en|><|HAPPY|><|Speech|><|withitn|>`

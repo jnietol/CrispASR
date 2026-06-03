@@ -27,6 +27,7 @@
 #define M_PI 3.14159265358979323846
 #endif
 #include "core/asr_context_bias.h"
+#include "core/ctc.h"
 #include "core/fastconformer.h"
 
 #ifndef M_PI
@@ -1988,46 +1989,79 @@ static std::vector<parakeet_emitted_token> parakeet_ctc_decode(parakeet_context*
     }
     ggml_backend_tensor_get(ctx->model.ctc_b, b.data(), 0, (size_t)ctc_vocab * sizeof(float));
 
-    // For each encoder frame: logits = w @ enc[t] + b, then argmax.
-    std::vector<float> logits((size_t)ctc_vocab);
-    int prev_tok = ctc_blank;
-    const bool has_hotwords = !ctx->hotword_trie.empty();
-    core_context_bias::MatchState hw_state;
+    // Compute CTC logits for all frames: logits[t][v] = w[v] @ enc[t] + b[v]
+    std::vector<float> all_logits((size_t)T_enc * ctc_vocab);
     for (int t = 0; t < T_enc; t++) {
         const float* e = enc + (size_t)t * d_model;
+        float* out_row = all_logits.data() + (size_t)t * ctc_vocab;
         for (int v = 0; v < ctc_vocab; v++) {
             float s = b[v];
             const float* wv = w.data() + (size_t)v * d_model;
             for (int k = 0; k < d_model; k++)
                 s += wv[k] * e[k];
-            logits[v] = s;
+            out_row[v] = s;
         }
-        // CTC-WS phrase boost (PLAN #98): bias logits toward hotword tokens
-        if (has_hotwords)
-            core_context_bias::apply_bias(ctx->hotword_trie, hw_state, logits.data(), ctc_vocab, ctx->hotword_boost);
-        // Argmax
+    }
+
+    // CTC-WS phrase boost (PLAN #98): bias logits toward hotword tokens
+    const bool has_hotwords = !ctx->hotword_trie.empty();
+    if (has_hotwords) {
+        core_context_bias::MatchState hw_state;
+        for (int t = 0; t < T_enc; t++) {
+            float* row = all_logits.data() + (size_t)t * ctc_vocab;
+            core_context_bias::apply_bias(ctx->hotword_trie, hw_state, row, ctc_vocab, ctx->hotword_boost);
+            // Advance hotword state with argmax token for next frame's bias
+            int tok = (int)(std::max_element(row, row + ctc_vocab) - row);
+            if (tok != ctc_blank)
+                core_context_bias::advance(ctx->hotword_trie, hw_state, tok);
+        }
+    }
+
+    // CTC beam search when beam_size > 1
+    const int beam_sz = ctx->decode_beam_size;
+    if (beam_sz > 1) {
+        // Convert logits to log-softmax per frame
+        std::vector<float> logprobs((size_t)T_enc * ctc_vocab);
+        for (int t = 0; t < T_enc; t++) {
+            const float* row = all_logits.data() + (size_t)t * ctc_vocab;
+            float* lp = logprobs.data() + (size_t)t * ctc_vocab;
+            float mx = *std::max_element(row, row + ctc_vocab);
+            double sum = 0.0;
+            for (int v = 0; v < ctc_vocab; v++)
+                sum += std::exp((double)(row[v] - mx));
+            double log_sum = (double)mx + std::log(sum);
+            for (int v = 0; v < ctc_vocab; v++)
+                lp[v] = (float)((double)row[v] - log_sum);
+        }
+        float gamma = ctx->decode_maes ? ctx->maes_gamma : 0.0f;
+        auto br = core_ctc::prefix_beam_search(logprobs.data(), T_enc, ctc_vocab, ctc_blank,
+                                               /*shift=*/0, beam_sz, gamma);
+        for (int32_t tok : br.tokens)
+            emitted.push_back({tok, 0, 0, 0.0f}); // no per-token timestamps in beam mode
+        return emitted;
+    }
+
+    // Greedy CTC decode (original path)
+    int prev_tok = ctc_blank;
+    for (int t = 0; t < T_enc; t++) {
+        const float* row = all_logits.data() + (size_t)t * ctc_vocab;
         int tok = 0;
-        float tok_lp = logits[0];
+        float tok_lp = row[0];
         for (int v = 1; v < ctc_vocab; v++) {
-            if (logits[v] > tok_lp) {
-                tok_lp = logits[v];
+            if (row[v] > tok_lp) {
+                tok_lp = row[v];
                 tok = v;
             }
         }
-        // CTC collapse: skip blanks and repeated tokens.
         if (tok != ctc_blank && tok != prev_tok) {
-            // Softmax probability of the picked token.
             float tok_p = 1.0f;
             {
                 double sum = 0.0;
                 for (int v = 0; v < ctc_vocab; v++)
-                    sum += std::exp((double)(logits[v] - tok_lp));
+                    sum += std::exp((double)(row[v] - tok_lp));
                 tok_p = sum > 0.0 ? (float)(1.0 / sum) : 0.0f;
             }
             emitted.push_back({tok, t, t, tok_p});
-            // Advance hotword trie state on non-blank, non-repeat tokens
-            if (has_hotwords)
-                core_context_bias::advance(ctx->hotword_trie, hw_state, tok);
         }
         prev_tok = tok;
     }

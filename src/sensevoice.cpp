@@ -12,6 +12,7 @@
 #include "ggml.h"
 #include "gguf.h"
 
+#include "core/ctc.h"
 #include "core/gguf_loader.h"
 #include "core/kaldi_fbank.h"
 #include "core/lfr.h"
@@ -158,6 +159,9 @@ struct sensevoice_context {
 
     bool enc_flash_attn = true;
     std::string requested_stage;
+
+    int beam_size = 1;       // CTC beam search (1 = greedy)
+    float beam_gamma = 0.0f; // gamma-threshold pruning (0 = off)
 };
 
 // ===========================================================================
@@ -602,7 +606,29 @@ static std::string sensevoice_transcribe_impl(sensevoice_context* ctx, const flo
         }
     }
 
-    std::vector<int32_t> ids = sensevoice_ctc_greedy(logits.data(), T_total, (int)hp.vocab_size, (int)hp.blank_id);
+    std::vector<int32_t> ids;
+    if (ctx->beam_size > 1) {
+        // CTC prefix beam search with optional gamma pruning.
+        // Convert raw logits to log-softmax first.
+        const int V = (int)hp.vocab_size;
+        std::vector<float> logprobs((size_t)T_total * V);
+        for (int t = 0; t < T_total; t++) {
+            const float* row = logits.data() + (size_t)t * V;
+            float* lp = logprobs.data() + (size_t)t * V;
+            float mx = *std::max_element(row, row + V);
+            double sum = 0.0;
+            for (int v = 0; v < V; v++)
+                sum += std::exp((double)(row[v] - mx));
+            double log_sum = (double)mx + std::log(sum);
+            for (int v = 0; v < V; v++)
+                lp[v] = (float)((double)row[v] - log_sum);
+        }
+        auto br = core_ctc::prefix_beam_search(logprobs.data(), T_total, V, (int)hp.blank_id, /*shift=*/0,
+                                               ctx->beam_size, ctx->beam_gamma);
+        ids = std::move(br.tokens);
+    } else {
+        ids = sensevoice_ctc_greedy(logits.data(), T_total, (int)hp.vocab_size, (int)hp.blank_id);
+    }
     return sensevoice_detokenize(ctx->vocab, ids);
 }
 
@@ -658,6 +684,13 @@ extern "C" sensevoice_context* sensevoice_init_from_file(const char* path, sense
                      ctx->enc_flash_attn ? "on" : "off");
     }
     return ctx;
+}
+
+extern "C" void sensevoice_set_beam_size(sensevoice_context* ctx, int beam_size, float gamma) {
+    if (!ctx)
+        return;
+    ctx->beam_size = beam_size > 1 ? beam_size : 1;
+    ctx->beam_gamma = gamma > 0.0f ? gamma : 0.0f;
 }
 
 extern "C" void sensevoice_free(sensevoice_context* ctx) {

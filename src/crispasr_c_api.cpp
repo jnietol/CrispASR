@@ -3898,9 +3898,8 @@ static crispasr_session_result* transcribe_single(crispasr_session* s, const flo
 #endif
 #ifdef CA_HAVE_SENSEVOICE
         if (!text && s->backend == "sensevoice" && s->sensevoice_ctx) {
-            // sensevoice takes a language hint (uses it for its built-in
-            // lid-tag prefix). Pass the session's source-language setter
-            // through; null/empty means "auto" on the sensevoice side.
+            if (s->beam_size > 1)
+                sensevoice_set_beam_size(s->sensevoice_ctx, s->beam_size, /*gamma=*/2.3f);
             const char* lang = s->source_language.empty() ? nullptr : s->source_language.c_str();
             text = sensevoice_transcribe(s->sensevoice_ctx, pcm, n_samples, lang, /*use_itn=*/true);
             need_free = true;
