@@ -4620,8 +4620,13 @@ int main(int argc, char** argv) {
                 prompt_ids_str += ",";
             prompt_ids_str += std::to_string((int)ref_prompt_data[i]);
         }
+#ifdef _WIN32
+        _putenv_s("PARLER_DESC_IDS", desc_ids_str.c_str());
+        _putenv_s("PARLER_PROMPT_IDS", prompt_ids_str.c_str());
+#else
         setenv("PARLER_DESC_IDS", desc_ids_str.c_str(), 1);
         setenv("PARLER_PROMPT_IDS", prompt_ids_str.c_str(), 1);
+#endif
 
         auto cp = parler_tts_context_default_params();
         cp.n_threads = 4;
