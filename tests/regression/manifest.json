@@ -472,6 +472,231 @@
       "_sample_note": "Reference audio for voice cloning. The synth phrase is fixed inside chatterbox_turbo.py (deterministic seed).",
       "expected_transcript": "PLACEHOLDER — TTS output, not a transcript. Rebake will capture a deterministic hash of the decoded audio.",
       "expected_transcript_source": "TODO — capture once rebake produces the ref archive."
+    },
+    {
+      "name": "wav2vec2-xlsr-en",
+      "backend_id": "wav2vec2",
+      "skip_diff": true,
+      "skip_preflight": true,
+      "gguf": {
+        "repo": "cstr/wav2vec2-large-xlsr-53-english-GGUF",
+        "revision": "3de5f69700e163286eaae85952fba9bf4ab761f6",
+        "file": "wav2vec2-xlsr-en-q4_k.gguf",
+        "approx_size_mb": 200
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "PLACEHOLDER",
+      "expected_transcript_source": "TODO"
+    },
+    {
+      "name": "hubert-large",
+      "backend_id": "hubert",
+      "skip_diff": true,
+      "skip_preflight": true,
+      "gguf": {
+        "repo": "cstr/hubert-large-ls960-ft-GGUF",
+        "revision": "fa24754efea02b7b2f8616c3b149c74d3cb8491a",
+        "file": "hubert-large-ls960-ft-q4_k.gguf",
+        "approx_size_mb": 200
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "PLACEHOLDER",
+      "expected_transcript_source": "TODO"
+    },
+    {
+      "name": "data2vec-base",
+      "backend_id": "data2vec",
+      "skip_diff": true,
+      "skip_preflight": true,
+      "gguf": {
+        "repo": "cstr/data2vec-audio-960h-GGUF",
+        "revision": "97d798574af55a3b861d323c2222f3d6cbbf1048",
+        "file": "data2vec-audio-base-960h-q4_k.gguf",
+        "approx_size_mb": 60
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "PLACEHOLDER",
+      "expected_transcript_source": "TODO"
+    },
+    {
+      "name": "fastconformer-ctc-large",
+      "backend_id": "fastconformer-ctc",
+      "skip_diff": true,
+      "skip_preflight": true,
+      "gguf": {
+        "repo": "cstr/stt-en-fastconformer-ctc-large-GGUF",
+        "revision": "bc24257f571edd7ea58d807d408e0254d0c6bcab",
+        "file": "stt-en-fastconformer-ctc-large-q4_k.gguf",
+        "approx_size_mb": 80
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "PLACEHOLDER",
+      "expected_transcript_source": "TODO"
+    },
+    {
+      "name": "sensevoice-small",
+      "backend_id": "sensevoice",
+      "skip_diff": true,
+      "skip_preflight": true,
+      "gguf": {
+        "repo": "cstr/sensevoice-small-GGUF",
+        "revision": "abbeaf54fdae72fc6034e23edc0efd8f8e1cc982",
+        "file": "sensevoice-small-q4_k.gguf",
+        "approx_size_mb": 470
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "PLACEHOLDER",
+      "expected_transcript_source": "TODO"
+    },
+    {
+      "name": "qwen3-asr-0.6b",
+      "backend_id": "qwen3",
+      "skip_diff": true,
+      "skip_preflight": true,
+      "gguf": {
+        "repo": "cstr/qwen3-asr-0.6b-GGUF",
+        "revision": "ad086c22597ed47af05cc159dd61c98bd6e945f9",
+        "file": "qwen3-asr-0.6b-q4_k.gguf",
+        "approx_size_mb": 400
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "PLACEHOLDER",
+      "expected_transcript_source": "TODO"
+    },
+    {
+      "name": "omniasr-ctc-1b-v2",
+      "backend_id": "omniasr",
+      "skip_diff": true,
+      "skip_preflight": true,
+      "gguf": {
+        "repo": "cstr/omniASR-CTC-1B-v2-GGUF",
+        "revision": "e05a1d261ca3f0dfe6932ee9d50794860d849ea0",
+        "file": "omniasr-ctc-1b-v2-q4_k.gguf",
+        "approx_size_mb": 660
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "PLACEHOLDER",
+      "expected_transcript_source": "TODO"
+    },
+    {
+      "name": "omniasr-llm-300m",
+      "backend_id": "omniasr",
+      "skip_diff": true,
+      "skip_preflight": true,
+      "gguf": {
+        "repo": "cstr/omniasr-llm-300m-v2-GGUF",
+        "revision": "9c3d29db4175fa38bf48414b78a37938edfd7568",
+        "file": "omniasr-llm-300m-v2-q4_k.gguf",
+        "approx_size_mb": 1100
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "PLACEHOLDER",
+      "expected_transcript_source": "TODO"
+    },
+    {
+      "name": "kyutai-stt-1b",
+      "backend_id": "kyutai-stt",
+      "skip_diff": true,
+      "skip_preflight": true,
+      "gguf": {
+        "repo": "cstr/kyutai-stt-1b-GGUF",
+        "revision": "e58ef4fec3fa53c359c4e0c73205dc46acf509b3",
+        "file": "kyutai-stt-1b-q4_k.gguf",
+        "approx_size_mb": 700
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "PLACEHOLDER",
+      "expected_transcript_source": "TODO"
+    },
+    {
+      "name": "gemma4-e2b-it",
+      "backend_id": "gemma4-e2b",
+      "skip_diff": true,
+      "skip_preflight": true,
+      "gguf": {
+        "repo": "cstr/gemma4-e2b-it-GGUF",
+        "revision": "0afc0beb5bff9f4352f0fb09ca02a6e2a08a7ada",
+        "file": "gemma4-e2b-it-q4_k.gguf",
+        "approx_size_mb": 2500
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "PLACEHOLDER",
+      "expected_transcript_source": "TODO"
+    },
+    {
+      "name": "funasr-nano",
+      "backend_id": "funasr",
+      "skip_diff": true,
+      "skip_preflight": true,
+      "gguf": {
+        "repo": "cstr/funasr-nano-GGUF",
+        "revision": "5d4346e47c268ba91a332a148a1fd39b766408ac",
+        "file": "funasr-nano-2512-q8_0.gguf",
+        "approx_size_mb": 1060
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "PLACEHOLDER",
+      "expected_transcript_source": "TODO"
+    },
+    {
+      "name": "funasr-mlt-nano",
+      "backend_id": "fun-asr-mlt-nano",
+      "skip_diff": true,
+      "skip_preflight": true,
+      "gguf": {
+        "repo": "cstr/funasr-mlt-nano-GGUF",
+        "revision": "5ba2e21029b7d88eceb6e4214530eca8e00b9fc6",
+        "file": "funasr-mlt-nano-2512-f16.gguf",
+        "approx_size_mb": 1980
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "PLACEHOLDER",
+      "expected_transcript_source": "TODO"
+    },
+    {
+      "name": "granite-4.1-plus",
+      "backend_id": "granite",
+      "skip_diff": true,
+      "skip_preflight": true,
+      "gguf": {
+        "repo": "cstr/granite-speech-4.1-2b-plus-GGUF",
+        "revision": "6e815300427226d6c18708d696a4d276aa8aa0fe",
+        "file": "granite-speech-4.1-2b-plus-q4_k.gguf",
+        "approx_size_mb": 2960
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "PLACEHOLDER",
+      "expected_transcript_source": "TODO"
+    },
+    {
+      "name": "granite-4.1-nar",
+      "backend_id": "granite",
+      "skip_diff": true,
+      "skip_preflight": true,
+      "gguf": {
+        "repo": "cstr/granite-speech-4.1-2b-nar-GGUF",
+        "revision": "c9bc0d62852d150b0589ec0997bf5384ce4c2a26",
+        "file": "granite-speech-4.1-2b-nar-q4_k.gguf",
+        "approx_size_mb": 3200
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "PLACEHOLDER",
+      "expected_transcript_source": "TODO"
+    },
+    {
+      "name": "voxtral4b-realtime",
+      "backend_id": "voxtral4b",
+      "skip_diff": true,
+      "skip_preflight": true,
+      "gguf": {
+        "repo": "cstr/voxtral-mini-4b-realtime-GGUF",
+        "revision": "38f0e025ff6091079acad38502f376dc03b6818e",
+        "file": "voxtral-mini-4b-realtime-q4_k.gguf",
+        "approx_size_mb": 2500
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "PLACEHOLDER",
+      "expected_transcript_source": "TODO"
     }
   ],
 
@@ -518,6 +743,124 @@
       "wer_max": 0.10,
       "wer_max_note": "Local roundtrip lands at WER 0.0 (parakeet adds a trailing '.' which normalisation strips). The Q8_0 model is used here; Q4_K has a documented quality regression on this same repo (see its README) so we pin Q8_0 explicitly. Total download per nightly slot: 970 MB talker + 360 MB tokenizer + 466 MB parakeet = ~1.8 GB.",
       "_total_download_mb": 1796
+    },
+    {
+      "name": "bark-small",
+      "backend_id": "bark",
+      "gguf": {
+        "repo": "cstr/bark-small-GGUF",
+        "revision": "6afdd08822226a8a0c96e2235477af67c17d15aa",
+        "file": "bark-small-q8_0.gguf",
+        "approx_size_mb": 500
+      },
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.20,
+      "wer_max_note": "Bark is a generative audio model with variable output quality. 20% WER headroom for prosody artefacts."
+    },
+    {
+      "name": "csm-1b",
+      "backend_id": "csm",
+      "gguf": {
+        "repo": "cstr/csm-1b-GGUF",
+        "revision": "5abf936b9d17a839fca69e09baf31e0ea5068f97",
+        "file": "csm-1b-q4_k.gguf",
+        "approx_size_mb": 1100
+      },
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.15,
+      "wer_max_note": "CSM-1B Q4_K conversational TTS. 15% WER headroom."
+    },
+    {
+      "name": "speecht5-tts-en",
+      "backend_id": "speecht5",
+      "gguf": {
+        "repo": "cstr/speecht5-tts-GGUF",
+        "revision": "1816c99e668528ea8286a8bc6b9d3f4591a4a07d",
+        "file": "speecht5-tts-f16.gguf",
+        "approx_size_mb": 301
+      },
+      "voice": {
+        "repo": "cstr/speecht5-tts-GGUF",
+        "revision": "1816c99e668528ea8286a8bc6b9d3f4591a4a07d",
+        "file": "speaker.bin"
+      },
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.15,
+      "wer_max_note": "SpeechT5 80M deterministic TTS. Needs x-vector for speaker conditioning."
+    },
+    {
+      "name": "piper-lessac-en",
+      "backend_id": "piper",
+      "gguf": {
+        "repo": "cstr/piper-en_US-lessac-medium-GGUF",
+        "revision": "d1f0ee3fcb185ed88c9831bcb7a770ad36592aa0",
+        "file": "piper-en_US-lessac-medium-f16.gguf",
+        "approx_size_mb": 16
+      },
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.15,
+      "wer_max_note": "Piper VITS ~30MB deterministic TTS. 22 kHz output."
+    },
+    {
+      "name": "pocket-tts-en",
+      "backend_id": "pocket-tts",
+      "gguf": {
+        "repo": "cstr/pocket-tts-GGUF",
+        "revision": "2fdc64f362287f3c5676cd76b65511c942e4e072",
+        "file": "pocket-tts-english-novc-f16.gguf",
+        "approx_size_mb": 381
+      },
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.15,
+      "wer_max_note": "Kyutai Pocket TTS 100M, continuous-latent AR at 12.5 Hz, CC-BY-4.0."
+    },
+    {
+      "name": "f5-tts-v1-base",
+      "backend_id": "f5-tts",
+      "gguf": {
+        "repo": "cstr/f5-tts-GGUF",
+        "revision": "cccc0919c098975c79add6e18c6f0aed9a8c1fc3",
+        "file": "f5-tts-v1-base-f16.gguf",
+        "approx_size_mb": 953
+      },
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.15,
+      "wer_max_note": "F5-TTS DiT flow-matching. Needs reference audio for voice cloning; without --voice uses built-in default."
+    },
+    {
+      "name": "parler-tts-mini-v1.1",
+      "backend_id": "parler-tts",
+      "gguf": {
+        "repo": "cstr/parler-tts-mini-v1.1-GGUF",
+        "revision": "534c5b0f8ad18fa4d927e1fe81047175836544c5",
+        "file": "parler-mini-v1.1-q8_0.gguf",
+        "approx_size_mb": 1000
+      },
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.20,
+      "wer_max_note": "Parler TTS Mini v1.1 (~900M). T5 encoder + DAC decoder. Prompt-conditioned voice via --instruct."
+    },
+    {
+      "name": "dia-1.6b",
+      "backend_id": "dia",
+      "gguf": {
+        "repo": "cstr/dia-1.6b-GGUF",
+        "revision": "3233fbcb32be47761d2e736857b6d1a075b9ba7e",
+        "file": "dia-1.6b-q8_0.gguf",
+        "approx_size_mb": 1600
+      },
+      "tts_phrase": "[S1] The quick brown fox jumps over the lazy dog.",
+      "_tts_phrase_note": "Dia requires [S1] or [S2] speaker tags. Prompts under ~100 chars may produce poor output.",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.20,
+      "wer_max_note": "Dia 1.6B dialogue TTS with CFG. 20% WER headroom for stochastic decode."
     }
   ]
 }

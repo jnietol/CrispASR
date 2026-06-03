@@ -481,7 +481,7 @@ REGISTRY: tuple[Backend, ...] = (
     # piper: Piper VITS TTS. Deterministic, ~30 MB. No auto-download yet
     # (community voices on rhasspy/piper, not HuggingFace GGUF).
     Backend("piper",     "Piper VITS (TTS)",     "piper-en_US-lessac-medium-f16.gguf",
-            "", "piper-en_US-lessac-medium-f16.gguf",
+            "cstr/piper-en_US-lessac-medium-GGUF", "piper-en_US-lessac-medium-f16.gguf",
             timeout_s=120, approx_size_mb=30,
             capabilities=("tts-roundtrip",)),
     # pocket-tts: Kyutai Pocket TTS 100M. Continuous-latent AR TTS at 12.5 Hz,
@@ -499,19 +499,11 @@ REGISTRY: tuple[Backend, ...] = (
     # parler-tts: Parler TTS Mini v1.1 — T5 encoder + DAC-based AR decoder.
     # 44.1 kHz output. Voice described via natural-language --instruct.
     Backend("parler-tts", "Parler TTS Mini v1.1 (TTS)", "parler-mini-v1.1-q8_0.gguf",
-            "cstr/parler-mini-v1.1-GGUF", "parler-mini-v1.1-q8_0.gguf",
+            "cstr/parler-tts-mini-v1.1-GGUF", "parler-mini-v1.1-q8_0.gguf",
             timeout_s=600, approx_size_mb=1000,
             capabilities=("tts-roundtrip", "temperature")),
-    # zonos: Zyphra Zonos v0.1 transformer TTS — 500M param GPT-style AR
-    # with DAC 44.1 kHz codec. Prefix conditioning (speaker, emotion,
-    # pitch, rate). Needs separate DAC companion GGUF.
-    Backend("zonos",     "Zonos v0.1 (TTS)",     "zonos-v0.1-transformer-f16.gguf",
-            "cstr/zonos-v0.1-transformer-GGUF", "zonos-v0.1-transformer-f16.gguf",
-            timeout_s=600, approx_size_mb=1000,
-            capabilities=("tts-roundtrip", "temperature", "voice-cloning"),
-            extra_files=(("dac-44khz.gguf",
-                          "cstr/dia-1.6b-GGUF",
-                          "dac-44khz.gguf"),)),
+    # zonos: Zyphra Zonos v0.1 — GGUF repo not yet uploaded to HF.
+    # TODO: add entry once cstr/zonos-v0.1-transformer-GGUF is created.
     # M2M-100 multilingual text-to-text translation (facebook/m2m100_418M).
     # NOT an ASR or TTS backend — input is text, not audio. The test
     # script's test_translate runs `--translate -tl de samples/jfk.wav`
