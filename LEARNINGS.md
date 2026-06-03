@@ -8992,3 +8992,75 @@ the math is correct.
 - Converter: `models/convert-pocket-tts-to-gguf.py`
 - Reference: `tools/reference_backends/pocket_tts_reference.py`
 - GGUFs: `cstr/pocket-tts-GGUF` (F16/Q8_0/Q4_K × with/without encoder)
+
+## Pocket TTS — manual CPU → ggml compute graph rewrite
+
+The original pocket-tts runtime used ~38 hand-written C++ functions (`linear_f32`,
+`layer_norm`, `conv1d_eager`, `conv_transpose1d_eager`, `apply_rope_inplace`, etc.)
+operating on raw `float*` buffers via `ggml_backend_tensor_get`. No SIMD matmul,
+no GPU offload, no `ggml_backend_sched`.
+
+### What was converted
+
+| Stage | Before | After | Validation |
+|-------|--------|-------|------------|
+| Backbone (6L, 1024D, 16H AR transformer) | Manual per-element loops, manual KV cache | `ggml_mul_mat` + `ggml_rope_ext` + `ggml_flash_attn_ext`, host-side KV cache upload/download | cos=1.000000 backbone_out, cos=0.999999 PCM |
+| Mimi decoder transformer (2L, 512D, 8H) | Manual attention + GELU FFN | `ggml_flash_attn_ext` + `ggml_norm` + `ggml_gelu`, causal mask with context=250 window | cos=1.000000 (max_diff=0.025) |
+| Mimi SEANet decoder (3-stage CNN) | `conv1d_eager` / `conv_transpose1d_eager` element loops | `ggml_conv_1d` + `ggml_conv_transpose_1d` + `ggml_elu` + `ggml_pad_ext` | cos=1.000000 PCM (max_diff=2.3e-5) |
+| Flow net (512D, 6 ResBlocks) | Manual (kept) | Manual (kept) | N/A — custom RMSNorm (Bessel-corrected variance) incompatible with ggml_rms_norm |
+| Mimi encoder (voice cloning) | Manual (kept) | Manual (kept) | N/A — same architecture, convert when needed |
+
+### Path selection
+
+`--no-gpu` / `-ng` forces the legacy manual CPU path for both backbone and Mimi
+decoder. Default (`use_gpu=true`) uses ggml compute graphs. Env var overrides for
+per-stage debugging:
+
+| Switch | Effect |
+|--------|--------|
+| (default) | ggml graphs for backbone + Mimi decoder |
+| `--no-gpu` | Legacy manual CPU for all stages |
+| `POCKET_MANUAL_BACKBONE=1` | Manual backbone only |
+| `POCKET_MANUAL_MIMI=1` | Manual Mimi decoder only |
+
+### Key implementation patterns
+
+**Backbone AR KV cache (host-side upload/download pattern):**
+Each AR step builds a fresh ggml graph. Past K/V are stored in `std::vector<float>`
+on the host, uploaded as `ggml_set_input` tensors at the start of each step, then
+new K/V are read back via `ggml_backend_tensor_get` after compute. Layout requires
+reordering from host `[pos][head][dim]` to ggml `(HD, pos, NH)`.
+
+**Causal conv1d with ggml_pad_ext:**
+`ggml_conv_1d` only supports symmetric padding. For causal (left-only) padding:
+```
+x = ggml_pad_ext(ctx, x, pad_left, 0, 0, 0, 0, 0, 0, 0);
+x = ggml_reshape_2d(ctx, x, x->ne[0], x->ne[1]); // pad_ext emits 4D
+x = ggml_conv_1d(ctx, w, x, stride, 0, dilation);
+```
+
+**Causal ConvTranspose1d trim:**
+`ggml_conv_transpose_1d` with `padding=0` produces full output. Trim right to
+`T_in * stride` for causal (keep earliest samples):
+```
+out = ggml_conv_transpose_1d(ctx, w, x, stride, 0, 1);
+out = ggml_view_2d(ctx, out, T_want, Cout, out->nb[1], 0);
+out = ggml_cont(ctx, out);
+```
+
+**Flash attention for single-query AR decode:**
+With Q having T=1, `ggml_flash_attn_ext` needs no causal mask (`nullptr`). Q/K/V
+layout: `(HD, T, NH)` after `ggml_permute(0, 2, 1, 3)` from `(HD, NH, T)`.
+
+**Depthwise ConvTranspose1d (not in ggml):**
+ggml lacks grouped transposed convolution. The Mimi upsample (`groups=512`,
+`stride=16`) stays CPU-side: per-channel scalar loop, then feed into the ggml
+graph as an input tensor.
+
+### Why the flow net stays manual
+
+The flow net's "RMSNorm" uses `var(x)` with Bessel's correction (`N-1` divisor)
+and does NOT subtract the mean — unlike `ggml_rms_norm` which computes
+`x / sqrt(mean(x²) + eps)`. For non-zero-mean vectors, these differ. The flow
+net is small (512-dim, 6 depth, called once per AR step with `lsd_steps=1`) so
+the speedup from ggml graphs would be minimal.
