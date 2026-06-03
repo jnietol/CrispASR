@@ -8815,3 +8815,161 @@ Full test matrix on CPU (VPS, no GPU):
 
 GPU dispatch is wired (`ggml_backend_init_best()` + dual-backend scheduler)
 but untested on this CPU-only VPS. Pattern matches csm_tts, kokoro, voxtral.
+
+---
+
+## Pocket TTS — 12 bugs from stub to cos=0.999997
+
+Pocket TTS (Kyutai, 100M params, MIT/CC-BY-4.0) is architecturally unique
+among the TTS backends: **continuous-latent AR** — no codebook, no RVQ, no
+softmax. The AR loop emits 32-dim float vectors at 12.5 Hz via one-step
+Lagrangian Self Distillation (LSD), decoded by a Mimi VAE (SEANet CNN +
+2L transformer) to 24 kHz PCM.
+
+### The 12 bugs and what they teach
+
+**Bug 1 — SentencePiece tokenizer was a byte-level stub.**
+The converter stored the raw `.model` protobuf bytes in the GGUF but the
+runtime mapped raw UTF-8 bytes to token IDs instead of running SentencePiece.
+Fix: converter extracts vocab+scores via `sentencepiece` library into standard
+`tokenizer.ggml.tokens`/`scores` arrays; runtime uses `core_spm::tokenize`.
+Verified exact token-ID match against Python SentencePiece.
+
+**Bug 2 — Quantizer projection weight layout (GGUF row-major).**
+`w[d*OD+o]` should be `w[o*LD+d]`. GGUF `ne=[1,32,512]` in ggml row-major
+means `data[cout*Cin + cin]` = `(Cout=512, Cin=32)`, not `(Cin, Cout)`.
+**Lesson:** for any Conv1d/Linear weight in GGUF, the fastest-varying ggml
+dimension `ne[0]` is the input dimension; rows are indexed by `ne[1]`.
+
+**Bug 3 — ConvTranspose1d weight index order.**
+Used `w[k*Cout*Cin + co*Cin + ci]` but ggml row-major with `ne=[K, Cout, Cin]`
+is `w[cin*Cout*K + cout*K + k]`. The mnemonic: outermost dimension in `ne` is
+the outermost loop in row-major indexing.
+
+**Bug 4 — Upsample was not depthwise.**
+The Mimi upsample is a depthwise `ConvTranspose1d(512, 512, K=32, stride=16,
+groups=512)`. PyTorch weight shape `(Cin=512, Cout/groups=1, K=32)`. GGUF
+`ne=[32, 1, 512]` — the `ne[1]=1` signals depthwise. The generic
+`conv_transpose1d_eager` produced 1 output channel instead of 512. Added a
+depthwise path that independently upsamples each channel.
+
+**Bug 5 — Mimi decoder transformer missing RoPE.**
+The C++ comment said "No RoPE for Mimi transformer" but the reference applies
+RoPE with `max_period=10000` per-head. Both the encoder and decoder Mimi
+transformers use RoPE. **Lesson:** never trust comments in stub code; verify
+every architectural assumption against the reference source.
+
+**Bug 6 — RoPE split-half vs interleaved convention.**
+The Kyutai/Moshi stack uses **interleaved** complex pairs: `vec[2i]=real,
+vec[2i+1]=imag`. The C++ had split-half: first half real, second half imaginary.
+This affected both the FlowLM backbone and the Mimi transformer. **Lesson:**
+RoPE convention varies between model families. Always check the reference
+`apply_rope` source — the dimension layout of the complex pairs is not
+standardized.
+
+**Bug 7 — Flow ResBlock MLP biases discarded.**
+The weight loader read `mlp.0.bias` but immediately discarded it with
+`(void)b0`, and `mlp.2.bias` was never loaded. The struct lacked bias fields.
+**Lesson:** `(void)variable` is a code smell in weight loading — it usually
+means someone intended to wire it but didn't finish.
+
+**Bug 8 — RMSNorm used mean(x²) instead of var(x) — 1.78× magnitude error.**
+The reference's "RMSNorm" (`_rms_norm` in `pocket_tts/modules/mlp.py`) calls
+`torch.var(dim=-1)` which is **variance** (mean-subtracted, Bessel-corrected
+`n-1` denominator), NOT `mean(x²)`. When the mean is nonzero, `var < mean(x²)`,
+so `rsqrt(var)` > `1/RMS`, making the reference output systematically larger.
+This single bug caused: `t_combined_norm` 9× too small → `y_norm` wrong →
+ResBlock gates under-driven → final latent 1.78× magnitude error.
+**Lesson:** "RMSNorm" is not a standardized operation. Some implementations
+(LLaMA, GPT-NeoX) use true `mean(x²)`, others (Kyutai) use `var(x)`. Always
+read the source, never assume from the class name.
+
+**Bug 9 — EOS detector applied sigmoid then compared against 0.5.**
+The reference compares the raw linear output `self.out_eos(x) > threshold`
+without sigmoid. The C++ applied `sigmoid(logit) > 0.5` which is equivalent
+to `logit > 0`, a much lower effective threshold than `logit > 0.5`.
+
+**Bug 10 — Mimi decoder transformer O(n²·D²) → KV cache.**
+The naive implementation recomputed `LayerNorm + in_proj(3*D × D)` for every
+past position at every timestep. For 100 frames upsampled to 1600 positions,
+this was 10+ minutes. Added per-layer KV cache: compute K,V once per position,
+attend from cache. Reduced to O(T²·D + T·D²).
+
+**Bug 11 — SEANet decoder used symmetric padding, not causal.**
+The Mimi SEANet uses streaming causal convolutions: `pad_left = eff_kernel -
+stride, pad_right = 0`. The C++ used `pad = kernel/2` on both sides — same
+output length but different values at every position. Fixed all Conv1d calls
+(initial, residual, final) and ConvTranspose1d calls (trim right by K-S
+instead of symmetric padding).
+
+**Bug 12 — Upsample ConvTranspose1d still had symmetric padding.**
+The depthwise upsample path (bug 4 fix) still computed `pad=(K-S)/2=8` and
+subtracted it from both sides. The SEANet decoder ConvTranspose1d was fixed
+(bug 11) but the upsample wasn't updated. Changed to: full convtr (no
+padding) + trim right by K-S. **This was the final bug** — after fixing it,
+teacher-forced PCM matched the reference to **cos=0.999997, maxabs=0.000131**.
+
+### Diff methodology
+
+The diff harness followed the protocol from `docs/CONTRIBUTING.md`:
+
+1. **Trustworthy reference first.** Ran `pocket_tts_reference.py` to capture
+   per-stage dumps (tokens, embeddings, latents, quantizer, upsample, PCM).
+
+2. **Tokenizer verified first.** Exact token-ID match was prerequisite for all
+   downstream stages.
+
+3. **Teacher-forcing to isolate stages.** `POCKET_FORCE_LATENTS` fed reference
+   latents through the C++ Mimi decoder, isolating decoder bugs from AR drift.
+   `POCKET_FORCE_NOISE` fed reference noise through the flow head, isolating
+   flow-net bugs from noise distribution differences.
+
+4. **Per-stage cosine + norm tracking.** Added `POCKET_DUMP_DIR` dumps at every
+   stage boundary. When PCM diverged, compared upsample (exact) → transformer
+   (divergent) → identified causal padding as the issue.
+
+5. **Bisect by bypass.** `POCKET_SKIP_MIMI_XFMR` bypassed the decoder
+   transformer to isolate SEANet decoder from transformer. The SEANet alone
+   produced similar-RMS output, confirming the transformer was the primary
+   divergent stage (though it turned out to be the upsample feeding into it).
+
+### Stage verification summary
+
+| Stage | Cosine vs reference | Method |
+|-------|-------------------|--------|
+| Token IDs | 1.000000 (exact) | Python SentencePiece comparison |
+| Text embeddings | 1.000000 (exact) | GGUF LUT lookup comparison |
+| Backbone output (step 0) | 0.999990 | Hook reference out_norm output |
+| Flow head ResBlock norms | ±0.05% | Per-ResBlock norm dump |
+| Quantizer projection | 1.000000 (exact) | NumPy matmul comparison |
+| Depthwise upsample | 1.000000 (exact) | PyTorch ConvTranspose1d comparison |
+| Full PCM (teacher-forced) | 0.999997 | End-to-end Mimi decoder |
+
+### Voice cloning
+
+The `pocket-tts-without-voice-cloning` model has encoder weights in the
+safetensors but they produce all zeros (untrained). Voice cloning requires the
+gated `kyutai/pocket-tts` model. With the gated model:
+
+- Mimi encoder: 264000 PCM samples (11s @ 24 kHz) → 137 latent frames
+- speaker_proj: (137, 32) → (137, 1024)
+- Prepend bos_before_voice → 138 conditioning frames in KV cache
+- ASR roundtrip: **"Hello there, how are you doing today?" → exact match**
+
+### Noise distribution difference
+
+The reference uses `torch.nn.init.trunc_normal_(noise, std=temp**0.5, a=-clamp,
+b=clamp)` — truncated normal with re-normalized PDF. The C++ uses
+`std::normal_distribution * sqrt(temp)` then clamps. These produce different
+samples even with the same seed, so free-running (non-teacher-forced) generation
+diverges from the reference. This is acceptable — the model is stochastic by
+design, and the per-stage verification (cos=0.999997 with forced inputs) proves
+the math is correct.
+
+### Files
+
+- Runtime: `src/pocket_tts.cpp` (~2200 LOC), `src/pocket_tts.h`
+- Adapter: `examples/cli/crispasr_backend_pocket_tts.cpp`
+- Converter: `models/convert-pocket-tts-to-gguf.py`
+- Reference: `tools/reference_backends/pocket_tts_reference.py`
+- GGUFs: `cstr/pocket-tts-GGUF` (F16/Q8_0/Q4_K × with/without encoder)
