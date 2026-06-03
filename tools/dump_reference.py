@@ -230,6 +230,12 @@ REGISTERED_BACKENDS: Dict[str, str] = {
     # Audio arg unused (text-driven). Text from PARLER_TEXT / PARLER_DESC
     # env vars. See reference_backends/parler_tts.py for the full list.
     "parler-tts": "reference_backends.parler_tts",
+    # MOSS-Audio-4B-Instruct: Whisper encoder + DeepStack 3-tap adapter +
+    # Qwen3-4B LM. First audio-understanding (not just ASR) backend.
+    # model_dir = OpenMOSS-Team/MOSS-Audio-4B-Instruct HF snapshot or local
+    # dir. GitHub source (modeling code) expected at ref/moss_audio/github/
+    # or via MOSS_AUDIO_GITHUB env. Prompt from MOSS_AUDIO_PROMPT env.
+    "moss-audio":  "reference_backends.moss_audio",
 }
 
 DEFAULT_STAGES_BY_BACKEND: Dict[str, List[str]] = {}  # populated at import

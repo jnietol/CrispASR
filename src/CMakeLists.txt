@@ -797,6 +797,18 @@ if(NOT MSVC)
 endif()
 
 # ---------------------------------------------------------------------------
+# moss_audio — OpenMOSS-Team/MOSS-Audio-4B-Instruct (Whisper encoder + DeepStack + Qwen3 LLM)
+# ---------------------------------------------------------------------------
+add_library(moss_audio STATIC moss_audio.h moss_audio.cpp)
+set_target_properties(moss_audio PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(moss_audio PUBLIC .)
+target_compile_features   (moss_audio PUBLIC cxx_std_17)
+target_link_libraries     (moss_audio PUBLIC crispasr-core ggml ggml-base ggml-cpu)
+if(NOT MSVC)
+    target_compile_options(moss_audio PRIVATE -O3)
+endif()
+
+# ---------------------------------------------------------------------------
 # qwen3_tts — Qwen/Qwen3-TTS (Qwen3 talker + 16-codebook RVQ output)
 # ---------------------------------------------------------------------------
 add_library(qwen3_tts STATIC qwen3_tts.h qwen3_tts.cpp)
