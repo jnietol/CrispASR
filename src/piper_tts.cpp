@@ -396,6 +396,7 @@ struct piper_tts_context {
 
     ggml_backend_t backend = nullptr;
     ggml_backend_t backend_cpu = nullptr;
+    ggml_backend_sched_t sched = nullptr;
 
     // Weight storage
     ggml_context* w_ctx = nullptr;
@@ -442,19 +443,15 @@ static void dump_stage_i64(const piper_tts_context* ctx, const char* label, cons
 namespace {
 struct mini_graph {
     ggml_context* ctx = nullptr;
-    ggml_gallocr_t alloc = nullptr;
-    ggml_backend_t backend = nullptr;
+    ggml_backend_sched_t sched = nullptr;
 
-    mini_graph(ggml_backend_t be, size_t ctx_size = 16 * 1024 * 1024) : backend(be) {
+    mini_graph(ggml_backend_sched_t sched_, size_t ctx_size = 16 * 1024 * 1024) : sched(sched_) {
         struct ggml_init_params params = {
             ctx_size, nullptr, true /* no_alloc */
         };
         ctx = ggml_init(params);
-        alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(be));
     }
     ~mini_graph() {
-        if (alloc)
-            ggml_gallocr_free(alloc);
         if (ctx)
             ggml_free(ctx);
     }
@@ -464,11 +461,12 @@ struct mini_graph {
         ggml_cgraph* gf = ggml_new_graph_custom(ctx, 16384, false);
         ggml_build_forward_expand(gf, output);
 
-        if (!ggml_gallocr_alloc_graph(alloc, gf)) {
+        ggml_backend_sched_reset(sched);
+        if (!ggml_backend_sched_alloc_graph(sched, gf)) {
             fprintf(stderr, "piper_tts: graph alloc failed\n");
             return {};
         }
-        ggml_backend_graph_compute(backend, gf);
+        ggml_backend_sched_graph_compute(sched, gf);
 
         int n = (int)ggml_nelements(output);
         std::vector<float> result(n);
@@ -481,11 +479,12 @@ struct mini_graph {
         ggml_cgraph* gf = ggml_new_graph_custom(ctx, 16384, false);
         ggml_build_forward_expand(gf, output);
 
-        if (!ggml_gallocr_alloc_graph(alloc, gf)) {
+        ggml_backend_sched_reset(sched);
+        if (!ggml_backend_sched_alloc_graph(sched, gf)) {
             fprintf(stderr, "piper_tts: graph alloc failed\n");
             return false;
         }
-        ggml_backend_graph_compute(backend, gf);
+        ggml_backend_sched_graph_compute(sched, gf);
         ggml_backend_tensor_get(output, dst, 0, nbytes);
         return true;
     }
@@ -777,7 +776,7 @@ static void text_encoder_forward(piper_tts_context* ctx, const std::vector<int64
 
         // FFN via ggml graph (conv k=3 pad=1 → ReLU → conv k=3 pad=1)
         {
-            mini_graph mg(ctx->backend_cpu, 4 * 1024 * 1024);
+            mini_graph mg(ctx->sched, 4 * 1024 * 1024);
             auto* gc = mg.ctx;
 
             ggml_tensor* x_in = ggml_new_tensor_2d(gc, GGML_TYPE_F32, C, T);
@@ -790,12 +789,13 @@ static void text_encoder_forward(piper_tts_context* ctx, const std::vector<int64
 
             ggml_cgraph* gf = ggml_new_graph_custom(gc, 1024, false);
             ggml_build_forward_expand(gf, ff);
-            if (!ggml_gallocr_alloc_graph(mg.alloc, gf)) {
+            ggml_backend_sched_reset(mg.sched);
+            if (!ggml_backend_sched_alloc_graph(mg.sched, gf)) {
                 fprintf(stderr, "piper_tts: FFN graph alloc failed\n");
                 return;
             }
             ggml_backend_tensor_set(x_in, x.data(), 0, C * T * sizeof(float));
-            ggml_backend_graph_compute(ctx->backend_cpu, gf);
+            ggml_backend_sched_graph_compute(mg.sched, gf);
 
             std::vector<float> ff_out(C * T);
             ggml_backend_tensor_get(ff, ff_out.data(), 0, C * T * sizeof(float));
@@ -819,7 +819,7 @@ static void text_encoder_forward(piper_tts_context* ctx, const std::vector<int64
 
     // ── Final projection for mean/logvar via ggml ──
     {
-        mini_graph mg(ctx->backend_cpu, 4 * 1024 * 1024);
+        mini_graph mg(ctx->sched, 4 * 1024 * 1024);
         auto* gc = mg.ctx;
 
         ggml_tensor* x_in = ggml_new_tensor_2d(gc, GGML_TYPE_F32, C, T);
@@ -830,12 +830,13 @@ static void text_encoder_forward(piper_tts_context* ctx, const std::vector<int64
 
         ggml_cgraph* gf = ggml_new_graph_custom(gc, 256, false);
         ggml_build_forward_expand(gf, proj);
-        if (!ggml_gallocr_alloc_graph(mg.alloc, gf)) {
+        ggml_backend_sched_reset(mg.sched);
+        if (!ggml_backend_sched_alloc_graph(mg.sched, gf)) {
             fprintf(stderr, "piper_tts: proj graph alloc failed\n");
             return;
         }
         ggml_backend_tensor_set(x_in, x.data(), 0, C * T * sizeof(float));
-        ggml_backend_graph_compute(ctx->backend_cpu, gf);
+        ggml_backend_sched_graph_compute(mg.sched, gf);
 
         int proj_size = 2 * half * T;
         std::vector<float> proj_data(proj_size);
@@ -1601,7 +1602,7 @@ static bool hifigan_decode(piper_tts_context* pctx,
     const auto& w = pctx->w;
     int C_in = (int)hp.inter_channels;
 
-    mini_graph mg(pctx->backend_cpu);
+    mini_graph mg(pctx->sched);
     auto* gc = mg.ctx;
 
     // Input tensor
@@ -1680,7 +1681,8 @@ static bool hifigan_decode(piper_tts_context* pctx,
     ggml_build_forward_expand(gf, probe_conv_pre);
     ggml_build_forward_expand(gf, probe_mrf_last);
 
-    if (!ggml_gallocr_alloc_graph(mg.alloc, gf)) {
+    ggml_backend_sched_reset(mg.sched);
+    if (!ggml_backend_sched_alloc_graph(mg.sched, gf)) {
         fprintf(stderr, "piper_tts: HiFi-GAN graph alloc failed\n");
         return false;
     }
@@ -1688,7 +1690,7 @@ static bool hifigan_decode(piper_tts_context* pctx,
     // Set input
     ggml_backend_tensor_set(x_input, z.data(), 0, z.size() * sizeof(float));
 
-    ggml_backend_graph_compute(pctx->backend_cpu, gf);
+    ggml_backend_sched_graph_compute(mg.sched, gf);
 
     // Dump decoder probes
     if (!pctx->dump_dir.empty()) {
@@ -1824,7 +1826,7 @@ static bool load_weights(piper_tts_context* ctx, const char* path) {
 
     // Pass 2: load weights
     core_gguf::WeightLoad wl;
-    if (!core_gguf::load_weights(path, ctx->backend_cpu, "piper", wl)) {
+    if (!core_gguf::load_weights(path, ctx->backend, "piper", wl)) {
         return false;
     }
     ctx->w_ctx = wl.ctx;
@@ -1983,11 +1985,24 @@ struct piper_tts_context* piper_tts_init_from_file(const char* path_model, struc
         return nullptr;
     }
     ggml_backend_cpu_set_n_threads(ctx->backend_cpu, params.n_threads);
-    ctx->backend = ctx->backend_cpu; // TODO: GPU support
+
+    ctx->backend = params.use_gpu ? ggml_backend_init_best() : ctx->backend_cpu;
+    if (!ctx->backend)
+        ctx->backend = ctx->backend_cpu;
 
     if (!load_weights(ctx, path_model)) {
         piper_tts_free(ctx);
         return nullptr;
+    }
+
+    // Create backend scheduler
+    {
+        ggml_backend_t backends[2];
+        int n_be = 0;
+        backends[n_be++] = ctx->backend;
+        if (ctx->backend_cpu != ctx->backend)
+            backends[n_be++] = ctx->backend_cpu;
+        ctx->sched = ggml_backend_sched_new(backends, nullptr, n_be, 16384, false, false);
     }
 
     // Apply params (use model defaults if -1)
@@ -2011,10 +2026,14 @@ struct piper_tts_context* piper_tts_init_from_file(const char* path_model, struc
 void piper_tts_free(struct piper_tts_context* ctx) {
     if (!ctx)
         return;
+    if (ctx->sched)
+        ggml_backend_sched_free(ctx->sched);
     if (ctx->w_buf)
         ggml_backend_buffer_free(ctx->w_buf);
     if (ctx->w_ctx)
         ggml_free(ctx->w_ctx);
+    if (ctx->backend && ctx->backend != ctx->backend_cpu)
+        ggml_backend_free(ctx->backend);
     if (ctx->backend_cpu)
         ggml_backend_free(ctx->backend_cpu);
     delete ctx;

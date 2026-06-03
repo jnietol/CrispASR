@@ -26,7 +26,6 @@
 #include "core/gguf_loader.h"
 #include "core/hifigan.h"
 
-#include "ggml-alloc.h"
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
 #include "ggml.h"
@@ -72,46 +71,15 @@ static void read_tensor_f32(ggml_tensor* t, std::vector<float>& out) {
 
 struct mini_graph {
     ggml_context* ctx = nullptr;
-    ggml_gallocr_t alloc = nullptr;
-    ggml_backend_t backend = nullptr;
+    ggml_backend_sched_t sched = nullptr;
 
-    mini_graph(ggml_backend_t be, size_t ctx_size = 32 * 1024 * 1024) : backend(be) {
+    mini_graph(ggml_backend_sched_t s, size_t ctx_size = 32 * 1024 * 1024) : sched(s) {
         struct ggml_init_params params = {ctx_size, nullptr, true};
         ctx = ggml_init(params);
-        alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(be));
     }
     ~mini_graph() {
-        if (alloc)
-            ggml_gallocr_free(alloc);
         if (ctx)
             ggml_free(ctx);
-    }
-
-    std::vector<float> compute(ggml_tensor* output) {
-        ggml_cgraph* gf = ggml_new_graph_custom(ctx, 32768, false);
-        ggml_build_forward_expand(gf, output);
-        if (!ggml_gallocr_alloc_graph(alloc, gf)) {
-            fprintf(stderr, "speecht5: graph alloc failed\n");
-            return {};
-        }
-        ggml_backend_graph_compute(backend, gf);
-        int n = (int)ggml_nelements(output);
-        std::vector<float> result(n);
-        ggml_backend_tensor_get(output, result.data(), 0, n * sizeof(float));
-        return result;
-    }
-
-    bool compute_multi(ggml_tensor** outputs, int n_out) {
-        ggml_cgraph* gf = ggml_new_graph_custom(ctx, 32768, false);
-        for (int i = 0; i < n_out; i++) {
-            ggml_build_forward_expand(gf, outputs[i]);
-        }
-        if (!ggml_gallocr_alloc_graph(alloc, gf)) {
-            fprintf(stderr, "speecht5: graph alloc failed\n");
-            return false;
-        }
-        ggml_backend_graph_compute(backend, gf);
-        return true;
     }
 
     void set_input(ggml_tensor* t, const void* data, size_t nbytes) { ggml_backend_tensor_set(t, data, 0, nbytes); }
@@ -222,6 +190,7 @@ struct speecht5_tts_context {
 
     ggml_backend_t backend = nullptr;
     ggml_backend_t backend_cpu = nullptr;
+    ggml_backend_sched_t sched = nullptr;
     core_gguf::WeightLoad wl;
     std::map<std::string, ggml_tensor*>& tensors() { return wl.tensors; }
 
@@ -256,6 +225,9 @@ struct speecht5_tts_context {
 
     ~speecht5_tts_context() {
         core_gguf::free_weights(wl);
+        if (sched) {
+            ggml_backend_sched_free(sched);
+        }
         if (backend && backend != backend_cpu) {
             ggml_backend_free(backend);
         }
@@ -290,7 +262,7 @@ static std::vector<float> run_encoder(speecht5_tts_context* ctx, const std::vect
     const int T = (int)token_ids.size();
     *out_T = T;
 
-    mini_graph mg(ctx->backend);
+    mini_graph mg(ctx->sched);
     auto* gc = mg.ctx;
 
     // Input token IDs
@@ -489,7 +461,8 @@ static std::vector<float> run_encoder(speecht5_tts_context* ctx, const std::vect
     // Set up graph inputs and compute
     ggml_cgraph* gf = ggml_new_graph_custom(gc, 32768, false);
     ggml_build_forward_expand(gf, x);
-    if (!ggml_gallocr_alloc_graph(mg.alloc, gf)) {
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
         fprintf(stderr, "speecht5: encoder graph alloc failed\n");
         return {};
     }
@@ -534,7 +507,7 @@ static std::vector<float> run_encoder(speecht5_tts_context* ctx, const std::vect
     }
 
     // Compute
-    ggml_backend_graph_compute(mg.backend, gf);
+    ggml_backend_sched_graph_compute(ctx->sched, gf);
 
     // Read encoder output
     int n = (int)ggml_nelements(x);
@@ -563,7 +536,7 @@ static decoder_step_result run_decoder_step(speecht5_tts_context* ctx,
     decoder_step_result result;
     result.mel_frame.resize(hp.reduction_factor * hp.num_mel_bins, 0.0f);
 
-    mini_graph mg(ctx->backend);
+    mini_graph mg(ctx->sched);
     auto* gc = mg.ctx;
 
     // Inputs
@@ -924,7 +897,8 @@ static decoder_step_result run_decoder_step(speecht5_tts_context* ctx,
         ggml_build_forward_expand(gf, layer_kv[i].cur_k_out);
         ggml_build_forward_expand(gf, layer_kv[i].cur_v_out);
     }
-    if (!ggml_gallocr_alloc_graph(mg.alloc, gf)) {
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
         fprintf(stderr, "speecht5: decoder graph alloc failed\n");
         return result;
     }
@@ -966,7 +940,7 @@ static decoder_step_result run_decoder_step(speecht5_tts_context* ctx,
         }
     }
 
-    ggml_backend_graph_compute(mg.backend, gf);
+    ggml_backend_sched_graph_compute(ctx->sched, gf);
 
     // ── SPEECHT5_DUMP_DIR: per-step intermediate dumps ──
     {
@@ -1034,7 +1008,7 @@ static std::vector<float> run_postnet(speecht5_tts_context* ctx,
     const auto& hp = ctx->hp;
     const auto& ts = ctx->tensors();
 
-    mini_graph mg(ctx->backend);
+    mini_graph mg(ctx->sched);
     auto* gc = mg.ctx;
 
     // Input: (T_mel, num_mel_bins) -- ggml conv_1d expects (T, C_in)
@@ -1119,7 +1093,8 @@ static std::vector<float> run_postnet(speecht5_tts_context* ctx,
 
     ggml_cgraph* gf = ggml_new_graph_custom(gc, 32768, false);
     ggml_build_forward_expand(gf, h);
-    if (!ggml_gallocr_alloc_graph(mg.alloc, gf)) {
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
         fprintf(stderr, "speecht5: postnet graph alloc failed\n");
         return {};
     }
@@ -1142,7 +1117,7 @@ static std::vector<float> run_postnet(speecht5_tts_context* ctx,
         mg.set_input(bn.shift_t, bn.shift_data.data(), bn.shift_data.size() * sizeof(float));
     }
 
-    ggml_backend_graph_compute(mg.backend, gf);
+    ggml_backend_sched_graph_compute(ctx->sched, gf);
 
     // Read output and transpose back from ggml column-major to row-major (T_mel, num_mel_bins)
     int n = (int)ggml_nelements(h);
@@ -1165,7 +1140,7 @@ static std::vector<float> run_vocoder(speecht5_tts_context* ctx,
     const auto& ts = ctx->tensors();
     const auto& vhp = ctx->voc_hp;
 
-    mini_graph mg(ctx->backend, 64 * 1024 * 1024);
+    mini_graph mg(ctx->sched, 64 * 1024 * 1024);
     auto* gc = mg.ctx;
 
     // Input mel: (T_mel, num_mel_bins) — ggml conv_1d expects (T, C_in) directly
@@ -1181,7 +1156,8 @@ static std::vector<float> run_vocoder(speecht5_tts_context* ctx,
     // Build and compute
     ggml_cgraph* gf = ggml_new_graph_custom(gc, 65536, false);
     ggml_build_forward_expand(gf, waveform);
-    if (!ggml_gallocr_alloc_graph(mg.alloc, gf)) {
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
         fprintf(stderr, "speecht5: vocoder graph alloc failed\n");
         return {};
     }
@@ -1198,7 +1174,7 @@ static std::vector<float> run_vocoder(speecht5_tts_context* ctx,
         mg.set_input(mel_in, transposed.data(), T_mel * C * sizeof(float));
     }
 
-    ggml_backend_graph_compute(mg.backend, gf);
+    ggml_backend_sched_graph_compute(ctx->sched, gf);
 
     int n = (int)ggml_nelements(waveform);
     std::vector<float> result(n);
@@ -1242,6 +1218,22 @@ struct speecht5_tts_context* speecht5_tts_init(const char* path, struct speecht5
     }
     if (ggml_backend_is_cpu(ctx->backend)) {
         ggml_backend_cpu_set_n_threads(ctx->backend, params.n_threads);
+    }
+
+    // Create backend scheduler
+    {
+        ggml_backend_t backends[2];
+        int n_be = 0;
+        backends[n_be++] = ctx->backend;
+        if (ctx->backend_cpu && ctx->backend_cpu != ctx->backend) {
+            backends[n_be++] = ctx->backend_cpu;
+        }
+        ctx->sched = ggml_backend_sched_new(backends, nullptr, n_be, 65536, false, false);
+        if (!ctx->sched) {
+            fprintf(stderr, "speecht5: failed to create backend scheduler\n");
+            delete ctx;
+            return nullptr;
+        }
     }
 
     // Load GGUF metadata

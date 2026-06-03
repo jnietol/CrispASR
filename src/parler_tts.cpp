@@ -687,11 +687,17 @@ struct parler_tts_context* parler_tts_init_from_file(const char* path_model, str
     // Pass 2: allocate backend buffer and load weights
     ctx->backend_cpu = ggml_backend_cpu_init();
     ggml_backend_cpu_set_n_threads(ctx->backend_cpu, params.n_threads);
-    ctx->backend = ctx->backend_cpu;
+    ctx->backend = params.use_gpu ? ggml_backend_init_best() : ctx->backend_cpu;
+    if (!ctx->backend)
+        ctx->backend = ctx->backend_cpu;
+    if (ggml_backend_is_cpu(ctx->backend))
+        ggml_backend_cpu_set_n_threads(ctx->backend, params.n_threads);
 
     core_gguf::WeightLoad wl;
-    if (!core_gguf::load_weights(path_model, ctx->backend_cpu, "parler_tts", wl)) {
+    if (!core_gguf::load_weights(path_model, ctx->backend, "parler_tts", wl)) {
         fprintf(stderr, "parler_tts: failed to load weights from '%s'\n", path_model);
+        if (ctx->backend && ctx->backend != ctx->backend_cpu)
+            ggml_backend_free(ctx->backend);
         ggml_backend_free(ctx->backend_cpu);
         delete ctx;
         return nullptr;
@@ -714,6 +720,16 @@ struct parler_tts_context* parler_tts_init_from_file(const char* path_model, str
                 dc.num_layers, dc.ffn_dim, dc.num_codebooks, dc.vocab_size);
         fprintf(stderr, "parler_tts: DAC     cb=%d cbsz=%d sr=%d hop=%d\n", ctx->model.dac_cfg.n_codebooks,
                 ctx->model.dac_cfg.codebook_size, ctx->model.dac_cfg.sample_rate, ctx->model.dac_cfg.hop_length);
+    }
+
+    // Create backend scheduler
+    {
+        int n_be = 0;
+        ggml_backend_t backends[2];
+        backends[n_be++] = ctx->backend;
+        if (ctx->backend_cpu && ctx->backend_cpu != ctx->backend)
+            backends[n_be++] = ctx->backend_cpu;
+        ctx->sched = ggml_backend_sched_new(backends, nullptr, n_be, 65536, false, false);
     }
 
     return ctx;
@@ -893,10 +909,9 @@ int parler_tts_set_description(struct parler_tts_context* ctx, const char* descr
 
     // Build and run T5 encoder graph
     ggml_cgraph* gf = build_t5_encoder_graph(ctx, T);
-    ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_cpu_buffer_type());
-    if (!ggml_gallocr_alloc_graph(galloc, gf)) {
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
         fprintf(stderr, "parler_tts: T5 encoder graph alloc failed\n");
-        ggml_gallocr_free(galloc);
         return -1;
     }
 
@@ -914,9 +929,8 @@ int parler_tts_set_description(struct parler_tts_context* ctx, const char* descr
                             buckets.size() * sizeof(int32_t));
 
     // Compute
-    if (ggml_backend_graph_compute(ctx->backend_cpu, gf) != GGML_STATUS_SUCCESS) {
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
         fprintf(stderr, "parler_tts: T5 encoder compute failed\n");
-        ggml_gallocr_free(galloc);
         return -1;
     }
 
@@ -925,7 +939,6 @@ int parler_tts_set_description(struct parler_tts_context* ctx, const char* descr
     ctx->enc_hidden.resize(T * D);
     ggml_backend_tensor_get(ggml_graph_get_tensor(gf, "enc_out"), ctx->enc_hidden.data(), 0,
                             ctx->enc_hidden.size() * sizeof(float));
-    ggml_gallocr_free(galloc);
     ctx->enc_cached = true;
 
     if (ctx->params.verbosity >= 1) {
@@ -1106,10 +1119,9 @@ float* parler_tts_synthesize(struct parler_tts_context* ctx, const char* text, i
     ggml_free(ctx0);
 
     // Allocate and compute
-    ggml_gallocr_t dac_alloc = ggml_gallocr_new(ggml_backend_cpu_buffer_type());
-    if (!ggml_gallocr_alloc_graph(dac_alloc, gf)) {
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
         fprintf(stderr, "parler_tts: DAC graph alloc failed\n");
-        ggml_gallocr_free(dac_alloc);
         parler_tts_codes_free(codes);
         return nullptr;
     }
@@ -1127,9 +1139,8 @@ float* parler_tts_synthesize(struct parler_tts_context* ctx, const char* text, i
         ggml_backend_tensor_set(ggml_graph_get_tensor(gf, buf), cb_codes.data(), 0, T_audio * sizeof(int32_t));
     }
 
-    if (ggml_backend_graph_compute(ctx->backend_cpu, gf) != GGML_STATUS_SUCCESS) {
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
         fprintf(stderr, "parler_tts: DAC compute failed\n");
-        ggml_gallocr_free(dac_alloc);
         parler_tts_codes_free(codes);
         return nullptr;
     }
@@ -1143,7 +1154,6 @@ float* parler_tts_synthesize(struct parler_tts_context* ctx, const char* text, i
     }
     ggml_backend_tensor_get(ggml_graph_get_tensor(gf, "pcm_out"), pcm, 0, n_samples * sizeof(float));
     *out_n_samples = n_samples;
-    ggml_gallocr_free(dac_alloc);
 
     if (ctx->params.verbosity >= 1)
         fprintf(stderr, "parler_tts: DAC decode -> %d samples (%.2fs @ %d Hz)\n", n_samples,
@@ -1243,7 +1253,7 @@ static ggml_cgraph* build_decoder_step_graph(parler_tts_context* c, int T_dec, i
         ggml_tensor* V_new = ggml_mul_mat(ctx0, l.self_attn_v, cur); // (D, T_dec)
 
         // Output new K/V for cache update — mark as output to prevent
-        // gallocr from reusing their memory before we read them post-compute
+        // the scheduler from reusing their memory before we read them post-compute
         snprintf(name_buf, sizeof(name_buf), "new_k_%d", il);
         ggml_set_name(K_new, name_buf);
         ggml_set_output(K_new);
@@ -1439,17 +1449,15 @@ int32_t* parler_tts_synthesize_codes(struct parler_tts_context* ctx, const char*
 
         ggml_free(ctx0);
 
-        ggml_gallocr_t xkv_alloc = ggml_gallocr_new(ggml_backend_cpu_buffer_type());
-        if (!ggml_gallocr_alloc_graph(xkv_alloc, gf)) {
+        ggml_backend_sched_reset(ctx->sched);
+        if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
             fprintf(stderr, "parler_tts: cross-KV alloc failed\n");
-            ggml_gallocr_free(xkv_alloc);
             return nullptr;
         }
         ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "enc_for_cross"), ctx->enc_hidden.data(), 0,
                                 (size_t)D * T_enc * sizeof(float));
-        if (ggml_backend_graph_compute(ctx->backend_cpu, gf) != GGML_STATUS_SUCCESS) {
+        if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
             fprintf(stderr, "parler_tts: cross-KV compute failed\n");
-            ggml_gallocr_free(xkv_alloc);
             return nullptr;
         }
 
@@ -1464,7 +1472,6 @@ int32_t* parler_tts_synthesize_codes(struct parler_tts_context* ctx, const char*
             ggml_backend_tensor_get(ggml_graph_get_tensor(gf, buf), cross_v_cache[il].data(), 0,
                                     (size_t)D * T_enc * sizeof(float));
         }
-        ggml_gallocr_free(xkv_alloc);
     }
 
     if (ctx->params.verbosity >= 1)
@@ -1588,10 +1595,9 @@ int32_t* parler_tts_synthesize_codes(struct parler_tts_context* ctx, const char*
 
     {
         ggml_cgraph* gf = build_decoder_step_graph(ctx, prefill_len, 0, T_enc);
-        ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_cpu_buffer_type());
-        if (!ggml_gallocr_alloc_graph(galloc, gf)) {
+        ggml_backend_sched_reset(ctx->sched);
+        if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
             fprintf(stderr, "parler_tts: prefill alloc failed\n");
-            ggml_gallocr_free(galloc);
             return nullptr;
         }
 
@@ -1606,9 +1612,8 @@ int32_t* parler_tts_synthesize_codes(struct parler_tts_context* ctx, const char*
             safe_set(gf, buf, cross_v_cache[il].data(), (size_t)D * T_enc * sizeof(float));
         }
 
-        if (ggml_backend_graph_compute(ctx->backend_cpu, gf) != GGML_STATUS_SUCCESS) {
+        if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
             fprintf(stderr, "parler_tts: prefill compute failed\n");
-            ggml_gallocr_free(galloc);
             return nullptr;
         }
 
@@ -1669,18 +1674,11 @@ int32_t* parler_tts_synthesize_codes(struct parler_tts_context* ctx, const char*
                 fprintf(stderr, " %d", delayed_codes[last_idx + k]);
             fprintf(stderr, "\n");
         }
-
-        ggml_gallocr_free(galloc);
     }
 
     int past_len = prefill_len; // KV cache now has prefill_len entries
 
     // ── Incremental AR decode loop ──
-    ggml_gallocr_t inc_galloc = ggml_gallocr_new(ggml_backend_cpu_buffer_type());
-    {
-        ggml_cgraph* max_gf = build_decoder_step_graph(ctx, 1, kv_capacity - 1, T_enc);
-        ggml_gallocr_reserve(inc_galloc, max_gf);
-    }
     for (int gen_step = 1; gen_step < max_gen; gen_step++) {
         // Input embedding: sum of codebook embeddings for previous step's tokens + pos embed
         std::vector<float> inp_embed(D, 0.0f);
@@ -1709,7 +1707,8 @@ int32_t* parler_tts_synthesize_codes(struct parler_tts_context* ctx, const char*
 
         // Build incremental step graph
         ggml_cgraph* gf = build_decoder_step_graph(ctx, 1, past_len, T_enc);
-        if (!ggml_gallocr_alloc_graph(inc_galloc, gf)) {
+        ggml_backend_sched_reset(ctx->sched);
+        if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
             fprintf(stderr, "parler_tts: gen step %d alloc failed\n", gen_step);
             break;
         }
@@ -1728,7 +1727,7 @@ int32_t* parler_tts_synthesize_codes(struct parler_tts_context* ctx, const char*
             safe_set(gf, buf, cross_v_cache[il].data(), (size_t)D * T_enc * sizeof(float));
         }
 
-        if (ggml_backend_graph_compute(ctx->backend_cpu, gf) != GGML_STATUS_SUCCESS) {
+        if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
             fprintf(stderr, "parler_tts: gen step %d compute failed\n", gen_step);
             break;
         }
@@ -1795,8 +1794,6 @@ int32_t* parler_tts_synthesize_codes(struct parler_tts_context* ctx, const char*
             break;
         }
     }
-    ggml_gallocr_free(inc_galloc);
-
     fprintf(stderr, "parler_tts: decoder loop done. delayed_codes size=%zu\n", delayed_codes.size());
     if (delayed_codes.empty()) {
         fprintf(stderr, "parler_tts: no audio codes generated\n");
@@ -1840,6 +1837,8 @@ void parler_tts_free(struct parler_tts_context* ctx) {
         ggml_backend_buffer_free(ctx->buf_w);
     if (ctx->ctx_w)
         ggml_free(ctx->ctx_w);
+    if (ctx->backend && ctx->backend != ctx->backend_cpu)
+        ggml_backend_free(ctx->backend);
     if (ctx->backend_cpu)
         ggml_backend_free(ctx->backend_cpu);
     delete ctx;

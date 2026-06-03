@@ -2020,6 +2020,7 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
         speecht5_tts_params p = speecht5_tts_default_params();
         p.n_threads = s->n_threads;
         p.verbosity = g_open_verbosity_tls;
+        p.use_gpu = g_open_use_gpu_tls;
         s->speecht5_ctx = speecht5_tts_init(model_path, p);
         if (!s->speecht5_ctx) {
             delete s;
