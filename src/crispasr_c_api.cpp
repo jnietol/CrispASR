@@ -1140,6 +1140,8 @@ static thread_local bool g_open_use_gpu_tls = true;
 static thread_local int g_open_verbosity_tls = 0;
 static thread_local bool g_open_flash_attn_tls = true;
 static thread_local int g_open_n_gpu_layers_tls = -1;
+static thread_local float g_open_temperature_tls = 0.0f;
+static thread_local uint64_t g_open_seed_tls = 0;
 
 struct crispasr_session {
     std::string backend; // "whisper", "parakeet", ...
@@ -1165,6 +1167,8 @@ struct crispasr_session {
     int best_of = 1;
     int max_new_tokens = 0;
     float frequency_penalty = 0.0f;
+    float temperature = 0.0f;  // 0 = greedy / backend default
+    uint64_t seed = 0;         // 0 = time-based
 
     // ── §90 session-level beam-search width ──────────────────────────────
     // beam_size > 1 activates beam search for backends that support it:
@@ -5777,6 +5781,8 @@ CA_EXPORT int crispasr_session_set_ask(crispasr_session* s, const char* prompt) 
 CA_EXPORT int crispasr_session_set_temperature(crispasr_session* s, float temperature, uint64_t seed) {
     if (!s)
         return -1;
+    s->temperature = temperature;
+    s->seed = seed;
     int touched = 0;
 #ifdef CA_HAVE_CANARY
     if (s->canary_ctx) {
