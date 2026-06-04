@@ -41,6 +41,7 @@ std::unique_ptr<CrispasrBackend> crispasr_make_sensevoice_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_voxcpm2_tts_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_cosyvoice3_tts_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_piper_backend();
+std::unique_ptr<CrispasrBackend> crispasr_make_melotts_backend();
 #ifdef CRISPASR_HAVE_OUTETTS
 std::unique_ptr<CrispasrBackend> crispasr_make_outetts_backend();
 #endif
@@ -119,6 +120,8 @@ std::unique_ptr<CrispasrBackend> crispasr_create_backend(const std::string& name
         return crispasr_make_kokoro_backend();
     if (name == "piper" || name == "piper-tts" || name == "piper-vits")
         return crispasr_make_piper_backend();
+    if (name == "melotts" || name == "melo-tts" || name == "melo")
+        return crispasr_make_melotts_backend();
 #ifdef CRISPASR_HAVE_OUTETTS
     if (name == "outetts" || name == "outetts-tts" || name == "oute-tts" || name == "outetts-0.3-1b")
         return crispasr_make_outetts_backend();
@@ -217,6 +220,7 @@ std::vector<std::string> crispasr_list_backends() {
         "pocket-tts",
         "fastpitch",
         "kokoro",
+        "melotts",
         "piper",
         "outetts",
         "voxcpm2-tts",
@@ -479,6 +483,8 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
         return "pocket-tts";
     if (contains_ci("fastpitch"))
         return "fastpitch";
+    if (contains_ci("melotts") || contains_ci("melo-tts") || contains_ci("melo_tts"))
+        return "melotts";
     if (contains_ci("piper") && !contains_ci("piper-phonemize"))
         return "piper";
     if (contains_ci("chatterbox") || contains_ci("kartoffelbox") || contains_ci("lahgtna"))
@@ -577,6 +583,8 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
                 result = "fastpitch";
             else if (a == "piper" || a == "piper-tts" || a == "piper_tts" || a == "vits")
                 result = "piper";
+            else if (a == "melotts" || a == "melo-tts" || a == "melo_tts" || a == "vits2")
+                result = "melotts";
             else if (a == "f5-tts" || a == "f5_tts" || a == "f5tts")
                 result = "f5-tts";
             else if (a == "chatterbox" || a == "chatterbox_turbo" || a == "kartoffelbox")

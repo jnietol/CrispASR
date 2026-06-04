@@ -1935,7 +1935,7 @@ class Session:
 
         Works with any TTS-capable backend — ``vibevoice``, ``qwen3-tts``,
         ``kokoro``, ``orpheus``, ``chatterbox``, ``indextts``, ``voxcpm2-tts``,
-        ``csm``, ``dia``, ``fastpitch``, ``speecht5``, ``piper``,
+        ``csm``, ``dia``, ``fastpitch``, ``speecht5``, ``melotts``, ``piper``,
         ``parler-tts``, ``outetts``, ``cosyvoice3-tts``, ``pocket-tts``,
         ``f5-tts``, ``bark``.
         For qwen3-tts call :meth:`set_codec_path` and one of:
