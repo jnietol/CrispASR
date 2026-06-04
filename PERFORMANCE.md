@@ -34,7 +34,7 @@ and where the gaps are. Last refresh: **2026-05-04** (after PLAN §79 —
 | backend | KV_QUANT | KV_QUANT_K/_V | KV_ON_CPU | N_GPU_LAYERS | notes |
 |---|:-:|:-:|:-:|:-:|---|
 | canary (1B) | ✓ | ✓ | ✓ | · | flash_attn_ext default, -17 % on JFK with q8_0/q4_0 |
-| cohere (2B) | ✓ | ✓ | ✓ | · | flash default; -26 % win at 300 s, +13 % regression at 60 s — crossover between 1-5 min (see §5 below) |
+| cohere (2B) | ✓ | ✓ | ✓ | · | cast-on-read default (13 % faster on 30 s chunks); `CRISPASR_COHERE_FLASH=1` for unchunked long-form (-26 % win at 300 s) — see §5 |
 | kyutai-stt (1B) | ✓ | ✓ | ✓ | · | flash_attn_ext native, quant-safe |
 | firered-asr (900M) | — | — | — | — | inline AED, no exposed transformer KV |
 | moonshine-tiny / streaming | — | — | — | — | tiny decoder, no exposed KV |
@@ -93,11 +93,11 @@ and where the gaps are. Last refresh: **2026-05-04** (after PLAN §79 —
    | 300 s | 820.37 | 1114.96 | flash **-26% faster** |
 
    Crossover is between 60 s and 300 s. Flash wins decisively on
-   long-form (5+ min) due to O(n) vs O(n²) attention scaling.
-   Short-form (<2 min) should use cast-on-read (`-nfa`).
-   **Recommendation:** flash is now the default (`-fa`, already true
-   since cli.cpp:96); users transcribing only short clips can opt
-   out with `-nfa` for ~13% gain on sub-minute audio.
+   unchunked long-form (5+ min) due to O(n) vs O(n²) attention scaling.
+   But with default 30 s auto-chunking, each decode pass is short-form.
+   **Recommendation:** cast-on-read is now the cohere default (13%
+   faster on the chunked path that all normal users hit). For unchunked
+   long-form, set `CRISPASR_COHERE_FLASH=1`.
 
 ### Stacking the four knobs
 
