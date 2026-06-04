@@ -13,27 +13,58 @@
 #include <vector>
 
 // Read a mono WAV file into float PCM + sample rate.
+// Handles WAVs with extra chunks before the data chunk.
 static bool read_wav_mono(const char * path, std::vector<float> & pcm, int & sr) {
     FILE * f = fopen(path, "rb");
     if (!f) return false;
-    uint8_t hdr[44];
-    if (fread(hdr, 1, 44, f) != 44) { fclose(f); return false; }
-    // Parse basic WAV header
-    sr = *(int32_t *)(hdr + 24);
-    int bits = *(int16_t *)(hdr + 34);
-    int data_size = *(int32_t *)(hdr + 40);
-    int n_samples = data_size / (bits / 8);
-    pcm.resize(n_samples);
-    if (bits == 16) {
-        std::vector<int16_t> buf(n_samples);
-        fread(buf.data(), 2, n_samples, f);
-        for (int i = 0; i < n_samples; i++)
-            pcm[i] = buf[i] / 32768.0f;
-    } else if (bits == 32) {
-        fread(pcm.data(), 4, n_samples, f);
+
+    // Read RIFF header (12 bytes)
+    uint8_t riff[12];
+    if (fread(riff, 1, 12, f) != 12) { fclose(f); return false; }
+    if (memcmp(riff, "RIFF", 4) != 0 || memcmp(riff + 8, "WAVE", 4) != 0) {
+        fclose(f); return false;
     }
+
+    int bits = 16;
+    sr = 16000;
+
+    // Walk chunks until we find "data"
+    while (!feof(f)) {
+        uint8_t chunk_hdr[8];
+        if (fread(chunk_hdr, 1, 8, f) != 8) break;
+        uint32_t chunk_size = *(uint32_t *)(chunk_hdr + 4);
+
+        if (memcmp(chunk_hdr, "fmt ", 4) == 0) {
+            uint8_t fmt[40] = {};
+            size_t to_read = chunk_size < 40 ? chunk_size : 40;
+            if (fread(fmt, 1, to_read, f) != to_read) { fclose(f); return false; }
+            sr   = *(int32_t *)(fmt + 4);
+            bits = *(int16_t *)(fmt + 14);
+            if (chunk_size > to_read)
+                fseek(f, (long)(chunk_size - to_read), SEEK_CUR);
+        } else if (memcmp(chunk_hdr, "data", 4) == 0) {
+            int n_samples = (int)(chunk_size / (bits / 8));
+            pcm.resize(n_samples);
+            if (bits == 16) {
+                std::vector<int16_t> buf(n_samples);
+                size_t got = fread(buf.data(), 2, n_samples, f);
+                pcm.resize(got);
+                for (size_t i = 0; i < got; i++)
+                    pcm[i] = buf[i] / 32768.0f;
+            } else if (bits == 32) {
+                size_t got = fread(pcm.data(), 4, n_samples, f);
+                pcm.resize(got);
+            }
+            fclose(f);
+            return !pcm.empty();
+        } else {
+            // Skip unknown chunk
+            fseek(f, (long)chunk_size, SEEK_CUR);
+        }
+    }
+
     fclose(f);
-    return true;
+    return false;
 }
 
 class MelottsBackend : public CrispasrBackend {

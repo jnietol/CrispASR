@@ -41,8 +41,19 @@
 // ── Helpers ──────────────────────────────────────────────────────────
 
 static void read_f32(const ggml_tensor * t, std::vector<float> & out) {
-    out.resize(ggml_nelements(t));
-    ggml_backend_tensor_get(t, out.data(), 0, out.size() * sizeof(float));
+    int64_t n = ggml_nelements(t);
+    out.resize(n);
+    if (t->type == GGML_TYPE_F32) {
+        ggml_backend_tensor_get(t, out.data(), 0, n * sizeof(float));
+    } else if (t->type == GGML_TYPE_F16) {
+        std::vector<ggml_fp16_t> tmp(n);
+        ggml_backend_tensor_get(t, tmp.data(), 0, n * sizeof(ggml_fp16_t));
+        for (int64_t i = 0; i < n; i++)
+            out[i] = ggml_fp16_to_fp32(tmp[i]);
+    } else {
+        fprintf(stderr, "openvoice2: unsupported tensor type %d for read_f32\n", t->type);
+        std::fill(out.begin(), out.end(), 0.0f);
+    }
 }
 
 // Local conv1d_cf helper (channels-first conv1d via ggml)
@@ -381,7 +392,7 @@ extern "C" struct openvoice2_context * openvoice2_init_from_file(
     dec.conv_pre_w = require_tensor(tensors, "dec.conv_pre.weight");
     dec.conv_pre_b = require_tensor(tensors, "dec.conv_pre.bias");
     dec.conv_post_w = require_tensor(tensors, "dec.conv_post.weight");
-    dec.conv_post_b = require_tensor(tensors, "dec.conv_post.bias");
+    dec.conv_post_b = find_tensor(tensors, "dec.conv_post.bias"); // optional
     dec.cond_w = find_tensor(tensors, "dec.cond.weight");
     dec.cond_b = find_tensor(tensors, "dec.cond.bias");
 
