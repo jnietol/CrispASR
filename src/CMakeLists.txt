@@ -912,6 +912,15 @@ target_compile_features   (vibevoice PUBLIC cxx_std_17)
 target_link_libraries     (vibevoice PUBLIC crispasr-core ggml ggml-base ggml-cpu)
 
 # ---------------------------------------------------------------------------
+# kugelaudio — KugelAudio-0-Open TTS (Qwen2.5-7B + DiT diffusion + VAE)
+# ---------------------------------------------------------------------------
+add_library(kugelaudio STATIC kugelaudio.h kugelaudio.cpp)
+set_target_properties(kugelaudio PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(kugelaudio PUBLIC .)
+target_compile_features   (kugelaudio PUBLIC cxx_std_17)
+target_link_libraries     (kugelaudio PUBLIC crispasr-core ggml ggml-base ggml-cpu)
+
+# ---------------------------------------------------------------------------
 # voxcpm2_tts — openbmb/VoxCPM2 (diffusion AR TTS, 30 languages, 48kHz)
 # ---------------------------------------------------------------------------
 add_library(voxcpm2_tts STATIC voxcpm2_tts.h voxcpm2_tts.cpp)
@@ -1438,6 +1447,9 @@ if (TARGET omniasr)
 endif()
 if (TARGET vibevoice)
     target_link_libraries(crispasr-lib PUBLIC vibevoice)
+endif()
+if (TARGET kugelaudio)
+    target_link_libraries(crispasr-lib PUBLIC kugelaudio)
 endif()
 if (TARGET ecapa-lid)
     target_link_libraries(crispasr-lib PUBLIC ecapa-lid)

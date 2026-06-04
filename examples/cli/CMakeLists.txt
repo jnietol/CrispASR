@@ -26,6 +26,7 @@ add_executable(${TARGET}
     crispasr_backend_fastconformer_ctc.cpp
     crispasr_backend_wav2vec2.cpp
     crispasr_backend_vibevoice.cpp
+    crispasr_backend_kugelaudio.cpp
     crispasr_backend_qwen3_tts.cpp
     crispasr_backend_orpheus.cpp
     crispasr_backend_chatterbox.cpp

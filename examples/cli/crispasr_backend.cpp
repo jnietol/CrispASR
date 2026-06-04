@@ -19,6 +19,7 @@ std::unique_ptr<CrispasrBackend> crispasr_make_fastconformer_ctc_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_wav2vec2_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_vibevoice_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_vibevoice_1p5b_backend();
+std::unique_ptr<CrispasrBackend> crispasr_make_kugelaudio_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_qwen3_tts_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_qwen3_tts_base_backend();
 std::unique_ptr<CrispasrBackend> crispasr_make_orpheus_backend();
@@ -95,6 +96,8 @@ std::unique_ptr<CrispasrBackend> crispasr_create_backend(const std::string& name
         return crispasr_make_wav2vec2_backend();
     if (name == "vibevoice" || name == "vibevoice-tts")
         return crispasr_make_vibevoice_backend();
+    if (name == "kugelaudio" || name == "kugelaudio-tts" || name == "kugelaudio-0-open")
+        return crispasr_make_kugelaudio_backend();
     if (name == "vibevoice-1.5b" || name == "vibevoice-tts-1.5b" || name == "vibevoice-tts-base")
         return crispasr_make_vibevoice_1p5b_backend();
     if (name == "qwen3-tts" || name == "qwen3_tts" || name == "qwen3tts" || name == "qwen3-tts-1.7b-base" ||
@@ -201,6 +204,7 @@ std::vector<std::string> crispasr_list_backends() {
         "hubert",
         "data2vec",
         "vibevoice",
+        "kugelaudio",
         "qwen3-tts",
         "vibevoice-1.5b",
         "qwen3-tts-customvoice",
@@ -459,6 +463,8 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
         return "wav2vec2";
     if (contains_ci("vibevoice"))
         return "vibevoice";
+    if (contains_ci("kugelaudio"))
+        return "kugelaudio";
     if (contains_ci("fireredpunc"))
         return "fireredpunc";
     if (contains_ci("canary"))
@@ -603,6 +609,8 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
                 result = "wav2vec2";
             else if (a == "vibevoice" || a == "vibevoice-asr" || a == "vibevoice_asr")
                 result = "vibevoice";
+            else if (a == "kugelaudio" || a == "kugelaudio-tts" || a == "kugelaudio_tts")
+                result = "kugelaudio";
             else if (a == "fastconformer-ctc" || a == "stt-fastconformer-ctc" || a == "stt_fastconformer_ctc")
                 result = "fastconformer-ctc";
             else if (a == "glmasr" || a == "glm-asr" || a == "glm_asr")
