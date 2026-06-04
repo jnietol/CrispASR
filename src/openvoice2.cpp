@@ -45,6 +45,17 @@ static void read_f32(const ggml_tensor * t, std::vector<float> & out) {
     ggml_backend_tensor_get(t, out.data(), 0, out.size() * sizeof(float));
 }
 
+// Local conv1d_cf helper (channels-first conv1d via ggml)
+static ggml_tensor * conv1d_cf(ggml_context * ctx, ggml_tensor * x,
+                               ggml_tensor * w, ggml_tensor * b,
+                               int stride = 1, int pad = 0, int dilation = 1) {
+    ggml_tensor * xT = ggml_cont(ctx, ggml_transpose(ctx, x));
+    ggml_tensor * y = ggml_conv_1d(ctx, w, xT, stride, pad, dilation);
+    y = ggml_cont(ctx, ggml_transpose(ctx, y));
+    if (b) y = ggml_add(ctx, y, b);
+    return y;
+}
+
 // ── Hyperparameters ──────────────────────────────────────────────────
 
 struct openvoice2_hparams {
@@ -160,9 +171,11 @@ struct openvoice2_context {
 
     ggml_backend_t backend;
     ggml_backend_t backend_cpu;
-    ggml_backend_buffer_t buf;
     ggml_backend_sched_t sched;
-    std::vector<uint8_t> compute_meta;
+
+    // Owned by core_gguf::WeightLoad
+    ggml_context * w_ctx = nullptr;
+    ggml_backend_buffer_t w_buf = nullptr;
 
     int verbosity;
     float tau;
@@ -216,85 +229,77 @@ extern "C" struct openvoice2_context * openvoice2_init_from_file(
     ctx->tau = params.tau;
     ctx->rng.seed(42);
 
-    // Load GGUF
-    std::map<std::string, ggml_tensor *> tensors;
-    gguf_context * gguf = nullptr;
-    ggml_context * gctx = nullptr;
-
-    // Use core GGUF loader
-    gguf = gguf_init_from_file(path, {/*.no_alloc=*/true, /*.ctx=*/&gctx});
-    if (!gguf) {
+    // Pass 1: metadata
+    gguf_context * meta = core_gguf::open_metadata(path);
+    if (!meta) {
         fprintf(stderr, "openvoice2: failed to load '%s'\n", path);
         delete ctx;
         return nullptr;
     }
 
-    // Read hyperparameters
     auto & hp = ctx->hp;
-    auto get_u32 = [&](const char * key, int def) -> int {
-        int idx = gguf_find_key(gguf, key);
-        return idx >= 0 ? (int)gguf_get_val_u32(gguf, idx) : def;
-    };
-    auto get_bool = [&](const char * key, bool def) -> bool {
-        int idx = gguf_find_key(gguf, key);
-        return idx >= 0 ? gguf_get_val_bool(gguf, idx) : def;
-    };
+    hp.inter_channels    = core_gguf::kv_u32(meta, "openvoice2.inter_channels", 192);
+    hp.hidden_channels   = core_gguf::kv_u32(meta, "openvoice2.hidden_channels", 192);
+    hp.filter_channels   = core_gguf::kv_u32(meta, "openvoice2.filter_channels", 768);
+    hp.gin_channels      = core_gguf::kv_u32(meta, "openvoice2.gin_channels", 256);
+    hp.sample_rate       = core_gguf::kv_u32(meta, "openvoice2.sample_rate", 22050);
+    hp.hop_length        = core_gguf::kv_u32(meta, "openvoice2.hop_length", 256);
+    hp.win_length        = core_gguf::kv_u32(meta, "openvoice2.win_length", 1024);
+    hp.filter_length     = core_gguf::kv_u32(meta, "openvoice2.filter_length", 1024);
+    hp.spec_channels     = core_gguf::kv_u32(meta, "openvoice2.spec_channels", 513);
+    hp.n_mels            = core_gguf::kv_u32(meta, "openvoice2.n_mels", 80);
+    hp.n_wn_layers_enc_q = core_gguf::kv_u32(meta, "openvoice2.n_wn_layers_enc_q", 16);
+    hp.n_flow_blocks     = core_gguf::kv_u32(meta, "openvoice2.n_flow_blocks", 4);
+    hp.n_wn_layers_flow  = core_gguf::kv_u32(meta, "openvoice2.n_wn_layers_flow", 4);
+    hp.n_upsample_stages = core_gguf::kv_u32(meta, "openvoice2.n_upsample_stages", 4);
+    hp.n_resblocks       = core_gguf::kv_u32(meta, "openvoice2.n_resblocks", 12);
+    hp.n_ref_convs       = core_gguf::kv_u32(meta, "openvoice2.n_ref_convs", 6);
 
-    hp.inter_channels    = get_u32("openvoice2.inter_channels", 192);
-    hp.hidden_channels   = get_u32("openvoice2.hidden_channels", 192);
-    hp.filter_channels   = get_u32("openvoice2.filter_channels", 768);
-    hp.gin_channels      = get_u32("openvoice2.gin_channels", 256);
-    hp.sample_rate       = get_u32("openvoice2.sample_rate", 22050);
-    hp.hop_length        = get_u32("openvoice2.hop_length", 256);
-    hp.win_length        = get_u32("openvoice2.win_length", 1024);
-    hp.filter_length     = get_u32("openvoice2.filter_length", 1024);
-    hp.spec_channels     = get_u32("openvoice2.spec_channels", 513);
-    hp.n_mels            = get_u32("openvoice2.n_mels", 80);
-    hp.zero_g            = get_bool("openvoice2.zero_g", true);
-    hp.n_wn_layers_enc_q = get_u32("openvoice2.n_wn_layers_enc_q", 16);
-    hp.n_flow_blocks     = get_u32("openvoice2.n_flow_blocks", 4);
-    hp.n_wn_layers_flow  = get_u32("openvoice2.n_wn_layers_flow", 4);
-    hp.n_upsample_stages = get_u32("openvoice2.n_upsample_stages", 4);
-    hp.n_resblocks       = get_u32("openvoice2.n_resblocks", 12);
-    hp.n_ref_convs       = get_u32("openvoice2.n_ref_convs", 6);
-
-    // Read arrays
+    // Read arrays from metadata
     {
-        int idx = gguf_find_key(gguf, "openvoice2.upsample_rates");
+        int idx = gguf_find_key(meta, "openvoice2.upsample_rates");
         if (idx >= 0) {
-            int n = (int)gguf_get_arr_n(gguf, idx);
+            int n = (int)gguf_get_arr_n(meta, idx);
             hp.upsample_rates.resize(n);
             for (int i = 0; i < n; i++)
-                hp.upsample_rates[i] = (int)((const int32_t *)gguf_get_arr_data(gguf, idx))[i];
+                hp.upsample_rates[i] = (int)((const int32_t *)gguf_get_arr_data(meta, idx))[i];
         }
     }
     {
-        int idx = gguf_find_key(gguf, "openvoice2.upsample_kernel_sizes");
+        int idx = gguf_find_key(meta, "openvoice2.upsample_kernel_sizes");
         if (idx >= 0) {
-            int n = (int)gguf_get_arr_n(gguf, idx);
+            int n = (int)gguf_get_arr_n(meta, idx);
             hp.upsample_kernel_sizes.resize(n);
             for (int i = 0; i < n; i++)
-                hp.upsample_kernel_sizes[i] = (int)((const int32_t *)gguf_get_arr_data(gguf, idx))[i];
+                hp.upsample_kernel_sizes[i] = (int)((const int32_t *)gguf_get_arr_data(meta, idx))[i];
         }
     }
     {
-        int idx = gguf_find_key(gguf, "openvoice2.resblock_kernel_sizes");
+        int idx = gguf_find_key(meta, "openvoice2.resblock_kernel_sizes");
         if (idx >= 0) {
-            int n = (int)gguf_get_arr_n(gguf, idx);
+            int n = (int)gguf_get_arr_n(meta, idx);
             hp.resblock_kernel_sizes.resize(n);
             for (int i = 0; i < n; i++)
-                hp.resblock_kernel_sizes[i] = (int)((const int32_t *)gguf_get_arr_data(gguf, idx))[i];
+                hp.resblock_kernel_sizes[i] = (int)((const int32_t *)gguf_get_arr_data(meta, idx))[i];
         }
     }
     {
-        int idx = gguf_find_key(gguf, "openvoice2.resblock_dilation_sizes");
+        int idx = gguf_find_key(meta, "openvoice2.resblock_dilation_sizes");
         if (idx >= 0) {
-            int n = (int)gguf_get_arr_n(gguf, idx);
+            int n = (int)gguf_get_arr_n(meta, idx);
             hp.resblock_dilation_sizes.resize(n);
             for (int i = 0; i < n; i++)
-                hp.resblock_dilation_sizes[i] = (int)((const int32_t *)gguf_get_arr_data(gguf, idx))[i];
+                hp.resblock_dilation_sizes[i] = (int)((const int32_t *)gguf_get_arr_data(meta, idx))[i];
         }
     }
+
+    // zero_g flag
+    {
+        int idx = gguf_find_key(meta, "openvoice2.zero_g");
+        hp.zero_g = (idx >= 0) ? gguf_get_val_bool(meta, idx) : true;
+    }
+
+    gguf_free(meta);
 
     if (ctx->verbosity >= 1) {
         fprintf(stderr, "openvoice2: loaded — inter=%d hidden=%d gin=%d sr=%d\n",
@@ -305,39 +310,31 @@ extern "C" struct openvoice2_context * openvoice2_init_from_file(
                 hp.n_upsample_stages, hp.n_resblocks, hp.n_ref_convs);
     }
 
-    // Allocate backend buffer
+    // Pass 2: load weights via core_gguf
     ctx->backend_cpu = ggml_backend_cpu_init();
     ctx->backend = ctx->backend_cpu;
 
-    size_t buf_size = 0;
-    for (int i = 0; i < ggml_ctx_ntensors(gctx); i++) {
-        ggml_tensor * t = ggml_ctx_get_tensor_by_idx(gctx, i);
-        buf_size += ggml_nbytes(t) + 512; // alignment
+    core_gguf::WeightLoad wl;
+    if (!core_gguf::load_weights(path, ctx->backend, "openvoice2", wl)) {
+        fprintf(stderr, "openvoice2: failed to load weights\n");
+        ggml_backend_free(ctx->backend_cpu);
+        delete ctx;
+        return nullptr;
     }
-    ctx->buf = ggml_backend_alloc_buffer(ctx->backend, buf_size);
-    ggml_tallocr alloc = ggml_tallocr_new(ctx->buf);
-
-    for (int i = 0; i < ggml_ctx_ntensors(gctx); i++) {
-        ggml_tensor * t = ggml_ctx_get_tensor_by_idx(gctx, i);
-        ggml_tallocr_alloc(&alloc, t);
-        // Read data from GGUF file
-        size_t offset = gguf_get_data_offset(gguf) + gguf_get_tensor_offset(gguf, gguf_find_tensor(gguf, t->name));
-        FILE * f = fopen(path, "rb");
-        if (f) {
-            fseek(f, (long)offset, SEEK_SET);
-            size_t nb = ggml_nbytes(t);
-            std::vector<uint8_t> tmp(nb);
-            if (fread(tmp.data(), 1, nb, f) == nb) {
-                ggml_backend_tensor_set(t, tmp.data(), 0, nb);
-            }
-            fclose(f);
-        }
-        tensors[t->name] = t;
-    }
+    ctx->w_ctx = wl.ctx;
+    ctx->w_buf = wl.buf;
+    auto & tensors = wl.tensors;
 
     if (ctx->verbosity >= 1)
-        fprintf(stderr, "openvoice2: loaded %zu tensors (%.1f MB)\n",
-                tensors.size(), (float)buf_size / (1024 * 1024));
+        fprintf(stderr, "openvoice2: loaded %zu tensors\n", tensors.size());
+
+    // Set up scheduler
+    ggml_backend_t backends[2];
+    int n_be = 0;
+    backends[n_be++] = ctx->backend;
+    if (ctx->backend_cpu != ctx->backend)
+        backends[n_be++] = ctx->backend_cpu;
+    ctx->sched = ggml_backend_sched_new(backends, nullptr, n_be, 32768, false, false);
 
     // ── Map tensors to weight structures ──
 
@@ -407,13 +404,6 @@ extern "C" struct openvoice2_context * openvoice2_init_from_file(
             dec.resblocks[i].convs2_b[j] = require_tensor(tensors, c2 + ".bias");
         }
     }
-
-    // Set up scheduler
-    ctx->compute_meta.resize(16 * 1024 * 1024);
-    ctx->sched = ggml_backend_sched_new(&ctx->backend, nullptr, 1, 16 * 1024 * 1024, false);
-
-    gguf_free(gguf);
-    // Note: gctx is kept alive — tensors reference it
 
     return ctx;
 }
@@ -916,20 +906,119 @@ static void resample_linear(const float * in, int n_in, int sr_in,
     }
 }
 
-// ── HiFi-GAN decode (CPU, replicating melotts pattern) ───────────────
+// ── HiFi-GAN decode (ggml graph, same pattern as melotts.cpp) ────────
 
 static bool hifigan_decode_cpu(openvoice2_context * ctx,
                                 const std::vector<float> & z,
                                 const std::vector<float> & g_vec,
                                 int T_latent,
                                 std::vector<float> & pcm_out) {
-    (void)ctx; (void)z; (void)g_vec; (void)T_latent; (void)pcm_out;
-    // TODO: implement HiFi-GAN decode using ggml graph (reuse melotts pattern)
-    // For now, this is a placeholder. The actual implementation will use
-    // mini_graph + conv1d_cf + transposed conv + resblocks, identical to
-    // melotts.cpp:hifigan_decode() but with openvoice2 weight pointers.
-    fprintf(stderr, "openvoice2: hifigan_decode not yet implemented\n");
-    return false;
+    const auto & hp = ctx->hp;
+    const auto & dec = ctx->w.dec;
+    int C_in = hp.inter_channels;
+    int gin = hp.gin_channels;
+
+    // Allocate ggml context for the graph
+    ggml_init_params gp = {64 * 1024 * 1024, nullptr, true};
+    ggml_context * gc = ggml_init(gp);
+    if (!gc) return false;
+
+    // Input tensor
+    ggml_tensor * x_input = ggml_new_tensor_2d(gc, GGML_TYPE_F32, C_in, T_latent);
+    ggml_set_name(x_input, "dec_input");
+    ggml_set_input(x_input);
+
+    // Speaker conditioning (zero for zero_g mode)
+    ggml_tensor * g_input = nullptr;
+    if (dec.cond_w && !g_vec.empty()) {
+        g_input = ggml_new_tensor_1d(gc, GGML_TYPE_F32, gin);
+        ggml_set_name(g_input, "dec_g");
+        ggml_set_input(g_input);
+    }
+
+    // conv_pre: (inter_channels, T) → (upsample_initial_ch=512, T)
+    ggml_tensor * x = conv1d_cf(gc, x_input, dec.conv_pre_w,
+                                dec.conv_pre_b, 1, 3, 1);
+
+    // Speaker conditioning: x += cond(g)
+    if (g_input && dec.cond_w) {
+        ggml_tensor * g_2d = ggml_reshape_2d(gc, g_input, gin, 1);
+        ggml_tensor * g_proj = conv1d_cf(gc, g_2d, dec.cond_w, dec.cond_b);
+        x = ggml_add(gc, x, g_proj);
+    }
+
+    // Upsample stages
+    int n_rk = (int)hp.resblock_kernel_sizes.size();
+    int rb_idx = 0;
+
+    for (int us = 0; us < hp.n_upsample_stages; us++) {
+        x = ggml_leaky_relu(gc, x, 0.1f, false);
+
+        int stride = hp.upsample_rates[us];
+        int kernel = hp.upsample_kernel_sizes[us];
+        int crop_each = (kernel - stride) / 2;
+
+        x = core_convt::convt1d_crop(gc, x, dec.ups[us].w,
+                                     dec.ups[us].b, stride,
+                                     crop_each, crop_each);
+
+        // MRF: average of resblocks
+        ggml_tensor * sum_rb = nullptr;
+
+        for (int ri = 0; ri < n_rk; ri++) {
+            const auto & rb = dec.resblocks[rb_idx + ri];
+            int rk = hp.resblock_kernel_sizes[ri];
+
+            ggml_tensor * y = x;
+            // 3 dilated conv pairs per ResBlock1
+            for (int di = 0; di < 3; di++) {
+                int d = hp.resblock_dilation_sizes[ri * 3 + di];
+                int p = (rk * d - d) / 2;
+
+                ggml_tensor * yt = ggml_leaky_relu(gc, y, 0.1f, false);
+                yt = conv1d_cf(gc, yt, rb.convs1[di], rb.convs1_b[di], 1, p, d);
+                yt = ggml_leaky_relu(gc, yt, 0.1f, false);
+                yt = conv1d_cf(gc, yt, rb.convs2[di], rb.convs2_b[di], 1,
+                               (rk - 1) / 2, 1);
+                y = ggml_add(gc, y, yt);
+            }
+
+            if (sum_rb == nullptr) sum_rb = y;
+            else sum_rb = ggml_add(gc, sum_rb, y);
+        }
+
+        x = ggml_scale(gc, sum_rb, 1.0f / (float)n_rk);
+        rb_idx += n_rk;
+    }
+
+    // Final: LeakyReLU → conv_post → tanh
+    x = ggml_leaky_relu(gc, x, 0.1f, false);
+    x = conv1d_cf(gc, x, dec.conv_post_w, dec.conv_post_b, 1, 3, 1);
+    x = ggml_tanh(gc, x);
+
+    // Build and compute graph
+    ggml_cgraph * gf = ggml_new_graph_custom(gc, 32768, false);
+    ggml_build_forward_expand(gf, x);
+
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
+        fprintf(stderr, "openvoice2: HiFi-GAN graph alloc failed\n");
+        ggml_free(gc);
+        return false;
+    }
+
+    ggml_backend_tensor_set(x_input, z.data(), 0, z.size() * sizeof(float));
+    if (g_input && !g_vec.empty())
+        ggml_backend_tensor_set(g_input, g_vec.data(), 0, gin * sizeof(float));
+
+    ggml_backend_sched_graph_compute(ctx->sched, gf);
+
+    int T_audio = (int)ggml_nelements(x);
+    pcm_out.resize(T_audio);
+    ggml_backend_tensor_get(x, pcm_out.data(), 0, T_audio * sizeof(float));
+
+    ggml_free(gc);
+    return true;
 }
 
 // ── Main voice conversion API ────────────────────────────────────────
@@ -1048,7 +1137,8 @@ extern "C" bool openvoice2_extract_speaker_embedding(
 extern "C" void openvoice2_free(struct openvoice2_context * ctx) {
     if (!ctx) return;
     if (ctx->sched) ggml_backend_sched_free(ctx->sched);
-    if (ctx->buf) ggml_backend_buffer_free(ctx->buf);
+    if (ctx->w_buf) ggml_backend_buffer_free(ctx->w_buf);
+    if (ctx->w_ctx) ggml_free(ctx->w_ctx);
     if (ctx->backend_cpu) ggml_backend_free(ctx->backend_cpu);
     delete ctx;
 }
