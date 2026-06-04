@@ -165,11 +165,28 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
     )
 
     # ---- Prepare inputs ----
-    audio_tensor = torch.from_numpy(audio).float()
-    inputs = processor(text=prompt, audios=[audio_tensor.numpy()], return_tensors="pt")
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-    if inputs.get("audio_data") is not None:
-        inputs["audio_data"] = inputs["audio_data"].to(device=device, dtype=dtype)
+    # Use WhisperFeatureExtractor directly to avoid _np_extract_fbank_features
+    # compatibility issues across transformers versions.
+    from transformers import WhisperFeatureExtractor
+    fe = WhisperFeatureExtractor(
+        feature_size=128, sampling_rate=16000, hop_length=160, n_fft=400,
+    )
+    mel_features = fe(audio, sampling_rate=16000, return_tensors="pt")
+    mel_input = mel_features.input_features  # (1, 128, T)
+
+    # Build prompt with the processor (text-only path — no audio mel)
+    audio_seq_len = processor._conv3_downsample_len(mel_input.shape[-1])
+    prompt_text = processor._build_default_prompt(prompt, has_audio=True)
+    input_ids = processor._build_input_from_prompt(prompt_text, [audio_seq_len])
+    input_ids_tensor = torch.tensor([input_ids], dtype=torch.long)
+    attention_mask = torch.ones_like(input_ids_tensor)
+
+    inputs = {
+        "input_ids": input_ids_tensor.to(device),
+        "attention_mask": attention_mask.to(device),
+        "audio_data": mel_input.to(device=device, dtype=dtype),
+        "audio_data_seqlens": torch.tensor([mel_input.shape[-1]], dtype=torch.long, device=device),
+    }
 
     audio_input_mask = inputs["input_ids"] == processor.audio_token_id
     inputs["audio_input_mask"] = audio_input_mask
