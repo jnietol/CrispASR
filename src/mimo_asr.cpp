@@ -968,9 +968,6 @@ static ggml_cgraph* mimo_asr_build_step_graph(mimo_asr_context* ctx, int n_past,
     // By making it a plain input, run_lm_step computes the embed lookup on
     // CPU, then feeds the F32 result via ggml_backend_tensor_set which
     // handles host→device copies transparently.
-    ggml_tensor* text_ids = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, T);
-    ggml_set_input(text_ids);
-    ggml_set_name(text_ids, "text_input_ids");
     const int d = (int)hp.llm_hidden;
     ggml_tensor* inputs_embeds = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, d, T);
     ggml_set_input(inputs_embeds);
@@ -1491,8 +1488,10 @@ static float* mimo_asr_run_lm_step(mimo_asr_context* ctx, int32_t next_token, in
 
     int32_t tok = next_token;
     int32_t pos = n_past_groups;
-    if (!set_t("text_input_ids", &tok, sizeof(tok)))
-        return nullptr;
+    // text_input_ids is no longer in the step graph (PLAN #115 option B
+    // replaced the in-graph get_rows with an external CPU embed lookup),
+    // so we don't set it here. The token is used only by the mini CPU
+    // graph below to compute the embed.
     if (!set_t("lm_positions", &pos, sizeof(pos)))
         return nullptr;
 
