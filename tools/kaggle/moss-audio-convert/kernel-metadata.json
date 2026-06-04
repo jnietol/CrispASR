@@ -1,7 +1,7 @@
 {
   "id": "chr1str/crispasr-moss-audio-convert",
   "title": "crispasr-moss-audio-convert",
-  "code_file": "crispasr-moss-audio-convert.ipynb",
+  "code_file": "crispasr-moss-audio-convert.py",
   "language": "python",
   "kernel_type": "notebook",
   "is_private": "true",
