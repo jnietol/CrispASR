@@ -2954,7 +2954,7 @@ silently fall back to the default voice on a load failure).
 
 ### The build-target trap that masked it
 
-`cmake --build build-ninja-compile --target crispasr` only relinks
+`cmake --build build-ninja-compile --target crispasr-lib` only relinks
 the **shared library** `libcrispasr.dylib` and stops there — the CLI
 executable lives in target `crispasr-cli`. So edits to
 `examples/cli/crispasr_backend_*.cpp` need an explicit
@@ -3056,7 +3056,7 @@ works with no python at runtime. Module 2 only — modules 3
 ### Build target nits (still relevant)
 
 CLI changes need `--target crispasr-cli`; library-only changes work
-with `--target crispasr` (or `--target chatterbox` for the static
+with `--target crispasr-lib` (or `--target chatterbox` for the static
 sublib). The diff harness needs `--target crispasr-diff`.
 
 ### Diff stages added

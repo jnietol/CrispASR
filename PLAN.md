@@ -16,7 +16,7 @@ effort estimate. Completed items have been moved to `HISTORY.md`.
 > `VOXCPM2_USE_GRAPH=1` — default flip still pending), and **#56** Mandarin tone strip which
 > landed (`strip_cmn_tone_numbers` + CJK warnings `5257e33d`). Still open: #52 perf pass,
 > #96 graph-default flip, #51c F16 (RAM-blocked), #56 JA kanji (needs MeCab/KaKaSi), #58 MOSS,
-> #115 Option C, #73 FA benchmark, #75 server round 2, #61j translate, #93 CMake rename,
+> #115 Option C, #73 FA benchmark, #75 server round 2, #61j translate, #93 CMake rename, (DONE `11148b23`)
 > #94 Go auto-gen, #66 wrapper publishing, #103 Silero v6, O5/O6/O7 optimizations,
 > #100 MeloTTS, #101 OmniVoice, #102 RapidTP.
 
@@ -3034,8 +3034,7 @@ delay PR feedback.
 
 ## 93. CMake target rename: `crispasr` → `crispasr-lib`
 
-**Status:** open, low-risk mechanical rename. Recommended after
-the next release cycle so external consumers can absorb it.
+**Status:** DONE (commit `11148b23`).
 
 **Why:** the CMake target `crispasr` produces the **library**
 (`libcrispasr.so`), while the CLI **binary** is produced by target
@@ -3071,7 +3070,7 @@ distinction explicit.
      target name `crispasr` — needs a 1-line update).
    - `.github/workflows/{ci,release,regression}.yml` `--target`
      args (mostly already use `crispasr-cli` for the CLI binary,
-     but any `--target crispasr` referring to the library needs
+     but any `--target crispasr-lib` referring to the library needs
      the rename).
    - `tools/kaggle/crispasr-regression.py` similarly.
 4. Add a CMake alias for one release cycle:

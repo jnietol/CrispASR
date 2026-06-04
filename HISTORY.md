@@ -81,7 +81,7 @@ moshi-codebook-cluster-usage in LEARNINGS.
 The benchmark failed three Kaggle runs in a row; the harness `.log`
 (fetchable via `kaggle kernels output --file-pattern`) finally showed
 why: the build completed to `[452/453]` (libcrispasr.so) then asserted
-`bin/crispasr not found`. The kernel built `--target crispasr` — which
+`bin/crispasr not found`. The kernel built `--target crispasr-lib` — which
 builds only the **library**; the CLI binary comes from target
 `crispasr-cli` (it carries `OUTPUT_NAME crispasr`, see
 examples/cli/CMakeLists.txt:12,232). All three failures were this, not
@@ -97,7 +97,7 @@ voxtral 3B/4B, granite 1B/4.1, kyutai, mimo (0.3× RT, CPU-forced per
 transcript, a real GPU-path backend bug, consistent with its noted
 Blackwell `!`-loop caveat; surfaces on P100 too). Two non-fatal HF
 pre-download 401s (auth API was flaking) fell back to the C++ downloader.
-Note: `issue126`/`fusion-ab` keep `--target crispasr` correctly — they
+Note: `issue126`/`fusion-ab` keep `--target crispasr-lib` correctly — they
 consume libcrispasr.so, not the CLI binary.
 
 ## 2026-05-31 Kaggle kernels: shared `kaggle_harness.py` (one gold standard)
