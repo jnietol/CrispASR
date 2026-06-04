@@ -126,7 +126,9 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
         deepstack_num_inject_layers=cfg_dict.get("deepstack_num_inject_layers"),
     )
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # Use CPU — Kaggle may assign a P100 (sm_60) incompatible with
+    # current PyTorch CUDA. bfloat16 on CPU requires PyTorch >=2.0.
+    device = "cpu"
     dtype = torch.bfloat16
     # Load weights with the manually-built config — no auto_map lookup
     model = MossAudioModel(config)
@@ -150,9 +152,12 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
         proc_cfg = _json.load(f)
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(str(model_dir), trust_remote_code=True)
+    # Override mel_dtype to float32 for CPU compatibility
+    mel_cfg = dict(proc_cfg.get("mel_config", {}))
+    mel_cfg["mel_dtype"] = "float32"
     processor = MossAudioProcessor(
         tokenizer=tokenizer,
-        mel_config=proc_cfg.get("mel_config"),
+        mel_config=mel_cfg,
         enable_time_marker=True,
         audio_token_id=proc_cfg.get("audio_token_id", 151654),
         audio_start_id=proc_cfg.get("audio_start_id", 151669),
@@ -164,7 +169,7 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
     inputs = processor(text=prompt, audios=[audio_tensor.numpy()], return_tensors="pt")
     inputs = {k: v.to(device) for k, v in inputs.items()}
     if inputs.get("audio_data") is not None:
-        inputs["audio_data"] = inputs["audio_data"].to(dtype)
+        inputs["audio_data"] = inputs["audio_data"].to(device=device, dtype=dtype)
 
     audio_input_mask = inputs["input_ids"] == processor.audio_token_id
     inputs["audio_input_mask"] = audio_input_mask
