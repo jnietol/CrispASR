@@ -1266,6 +1266,7 @@ extern "C" float* moss_audio_embed_tokens(struct moss_audio_context* ctx,
     ggml_set_output(emb);
     ggml_build_forward_expand(gf, emb);
 
+    ggml_backend_sched_reset(ctx->sched);
     if (ggml_backend_sched_alloc_graph(ctx->sched, gf) != true) {
         ggml_free(ctx0);
         return nullptr;
@@ -1305,6 +1306,7 @@ extern "C" float* moss_audio_run_llm_kv(struct moss_audio_context* ctx,
     ggml_cgraph* gf = moss_audio_build_llm_kv_graph(ctx, n_tokens, n_past,
                                                       /*last_token_only=*/true,
                                                       0, false);
+    ggml_backend_sched_reset(ctx->sched);
     if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
         fprintf(stderr, "moss_audio: llm graph alloc failed\n");
         return nullptr;
