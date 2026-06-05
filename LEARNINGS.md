@@ -9172,3 +9172,88 @@ and does NOT subtract the mean — unlike `ggml_rms_norm` which computes
 `x / sqrt(mean(x²) + eps)`. For non-zero-mean vectors, these differ. The flow
 net is small (512-dim, 6 depth, called once per AR step with `lsd_steps=1`) so
 the speedup from ggml graphs would be minimal.
+
+## MeloTTS (VITS2) — from zero to BERT conditioning (June 2026)
+
+### Architecture
+
+MeloTTS (myshell-ai) is a VITS2 model: 6-layer relative-position
+transformer text encoder → dual duration predictor (SDP spline flows +
+deterministic DP, blended via `sdp_ratio`) → 4-block TransformerCouplingFlow
+(3 transformer layers per block, NOT WaveNet like Piper) → 5-stage HiFi-GAN
+vocoder at 44.1 kHz. 52M params, 4 English speakers (EN_V2), MIT license.
+
+### Key bugs found during implementation
+
+**GGUF dimension reversal (conv weights):** PyTorch Conv1d weights are
+`(Cout, Cin, K)`. The GGUF Python library reverses numpy dimensions to ggml
+ne[], so storing the PyTorch array as-is gives `ne[0]=K, ne[1]=Cin, ne[2]=Cout`
+— exactly what `ggml_conv_1d` expects. Initially I transposed them (like Piper's
+ONNX converter), giving `ne[0]=Cout` which made ggml think the kernel was 768
+elements wide. Fix: don't transpose conv weights for PyTorch→GGUF.
+
+**BERT projection bias with zero input:** Even with zero BERT embeddings
+(disable-bert mode), `Conv1d(zeros)` still produces the bias term. The combined
+`bert_proj.bias + ja_bert_proj.bias` contributes up to 21.9 amplitude after
+sqrt(192) scaling — this was the entire embedding mismatch. Fix: always add
+both biases regardless of whether BERT features are available.
+
+**Speaker injection order:** MeloTTS injects the speaker embedding BEFORE
+attention (in the Encoder.forward loop), not inside the attention function.
+Injecting inside attention meant the modified input was a working copy that
+didn't propagate back. Moving injection to the main encoder loop brought all
+6 layers to cos=1.0 vs Python reference.
+
+**Intersperse blanks — leading/trailing:** Python's `intersperse` produces
+`[0, e0, 0, e1, ..., eN, 0]` (blanks at both ends). My initial implementation
+only put blanks between elements. Also: blank positions must have `lang_id=0`,
+not the language ID.
+
+**Flow FFN kernel size:** The text encoder FFN uses k=3 but the flow encoder
+FFN uses k=5. Hardcoding pad=1 (correct for k=3) crashed the flow. Fix:
+auto-detect kernel size from `ffn_c1_w->ne[0]`.
+
+**v→V phoneme mapping:** MeloTTS uses uppercase "V" as a distinct phoneme for
+/v/ (the voiced labiodental fricative). The CMU dict returns lowercase "v"
+which must be mapped via `post_replace_ph`.
+
+### BERT conditioning
+
+bert-base-uncased (110M params, 12 layers) provides contextual phoneme
+embeddings. MeloTTS uses hidden_states[-3] (layer 9 output) projected through
+`ja_bert_proj` (768→192). For English, the 1024-dim `bert` input is zeros
+(only bias contributes); the 768-dim `ja_bert` carries actual features.
+
+**Implementation:** Standalone `bert_encoder.{h,cpp}` — 10-layer BERT
+transformer forward pass using ggml graphs, WordPiece tokenizer embedded in
+GGUF metadata, 238 MB GGUF. Loaded as companion model via `melotts_load_bert()`.
+
+**word2ph alignment:** BERT tokenizes "seashells" as `["seas","##hell","##s"]`
+(3 subwords) but G2P treats it as 1 word. The word2ph must map BERT subword
+tokens to phoneme counts. Initial uniform distribution caused "seashore"→"Sichuan"
+regression. Fix: `bert_encoder_word_subtokens()` counts BERT subwords per word,
+then `distribute_phone` splits each word's phonemes evenly across its subwords.
+
+**Quality impact:**
+- Without BERT: "I enjoy reading books..." → "Send your reading books..."
+- With BERT: "I enjoy reading books in the evening." → exact match
+- ASR roundtrip: 4/6 perfect (up from 3/6 without BERT)
+- Diff: enc_output cos=0.990 vs Python reference
+
+### Weight precision
+
+VITS2 tensors are mostly small (192-d embeddings, 192×192 attention). F16 is
+the recommended storage format (93 MB GGUF). Q4_K/Q8 quantization is
+ineffective — only 9/853 tensors meet the block-size threshold, and those
+happen to be the most sensitive embeddings. Storing SDP/DP weights as F32
+prevents spline transform instability but doesn't affect audio quality
+(the real quality lever is BERT conditioning, not weight precision).
+
+### OpenVoice2 ref_enc H/W swap
+
+OpenVoice V2 TCC (voice cloning) uses the same VITS architecture for
+voice conversion. The ref_enc (speaker embedding extractor) has 6 Conv2d
+layers + GRU. Python processes the spectrogram as `(1, 1, T, freq)` but
+the C++ was transposing to `(1, 1, freq, T)` before Conv2d — convolving
+along the wrong spatial axes. Speaker embedding cos went from 0.17 to
+0.999999 after fixing to match Python's layout.

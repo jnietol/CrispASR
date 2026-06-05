@@ -6,7 +6,7 @@ trade-off:
 
 | Backend | Why pick it | Voice cloning | First-run download |
 |---|---|---|---|
-| **`melotts`** | Multilingual VITS2 (MeloTTS). 4 English speakers (US/BR/India/AU). 44.1 kHz output, ~97 MB GGUF. Built-in CMU dict G2P. | No (per-speaker ID) | Manual `wget` |
+| **`melotts`** | Multilingual VITS2 (MeloTTS). 4 English speakers (US/BR/India/AU). 44.1 kHz output, ~97 MB GGUF. Built-in CMU dict G2P. Optional BERT conditioning via companion GGUF (238 MB) for improved quality. | No (per-speaker ID) | ~97 MB via `-m auto` |
 | **`piper`** | Tiniest footprint (30 MB). rhasspy/piper VITS; 250+ community voices across 30+ languages via espeak-ng phonemizer. 22 kHz output. | No (per-voice GGUF) | Manual `wget` |
 | **`kokoro`** | Smallest + fastest. 82 M-param StyleTTS2-derived model. Multilingual via espeak-ng + native German backbone. | No (preset voice packs) | Manual `wget` (no `-m auto`) |
 | **`qwen3-tts`** | Highest fidelity / strongest cloning. Speech-LLM (talker + code predictor + 12 Hz codec). | Yes (WAV + ref-text or baked voice GGUF) | ~1.3 GB via `-m auto` |

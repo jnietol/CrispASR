@@ -623,8 +623,14 @@ transformer with speaker conditioning at layer 2) → dual duration predictor
 (SDP spline flows + deterministic DP, blended via sdp_ratio) →
 TransformerCouplingBlock flow (4 blocks × 3 transformer layers) → HiFi-GAN
 vocoder (5 upsample stages) @ 44.1 kHz. Built-in English G2P via embedded
-CMU dictionary (129k entries). 4 English speakers (US, BR, India, AU).
-Currently runs in disable-BERT mode (zero BERT embeddings + bias terms).
+CMU dictionary (129k entries) + rule-based LTS fallback for OOV words.
+4 English speakers (US, BR, India, AU).
+
+Optional BERT conditioning: loads a companion bert-base-uncased GGUF (238 MB)
+via `melotts_load_bert()`. Runs 10-layer BERT forward pass → hidden_states[-3]
+→ word2ph expansion → `ja_bert_proj` (768→192) → added to text encoder
+embeddings. Improves contextual phoneme disambiguation (4/6 → 4/6 ASR
+roundtrip but fixes previously-broken sentences like "I enjoy reading").
 
 ### piper
 
