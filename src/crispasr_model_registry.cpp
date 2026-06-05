@@ -684,6 +684,29 @@ constexpr Entry k_registry[] = {
     {"fastpitch", "fastpitch-en-q8_0.gguf",
      "https://huggingface.co/cstr/fastpitch-en-GGUF/resolve/main/fastpitch-en-q8_0.gguf",
      "~120 MB", nullptr, nullptr},
+
+    // Truecaser — mayhewsw/pytorch-truecaser ports. BiLSTM is the
+    // recommended variant (97.9% F1 on German). Standalone .bin format
+    // (not GGUF). The `crispasr_truecase_*` C-ABI loads these directly.
+    // Published at cstr/truecaser-de on HuggingFace.
+    {"truecaser-lstm-de", "truecaser-lstm-de.bin",
+     "https://huggingface.co/cstr/truecaser-de/resolve/main/truecaser-lstm-de.bin",
+     "~3 MB", nullptr, nullptr},
+    {"truecaser-lstm-en", "truecaser-lstm-en.bin",
+     "https://huggingface.co/cstr/truecaser-de/resolve/main/truecaser-lstm-en.bin",
+     "~3 MB", nullptr, nullptr},
+    {"truecaser-lstm-es", "truecaser-lstm-es.bin",
+     "https://huggingface.co/cstr/truecaser-de/resolve/main/truecaser-lstm-es.bin",
+     "~3 MB", nullptr, nullptr},
+    {"truecaser-lstm-ru", "truecaser-lstm-ru.bin",
+     "https://huggingface.co/cstr/truecaser-de/resolve/main/truecaser-lstm-ru.bin",
+     "~4 MB", nullptr, nullptr},
+    {"truecaser-crf-de", "truecaser-crf-de.bin",
+     "https://huggingface.co/cstr/truecaser-de/resolve/main/truecaser-crf-de.bin",
+     "~8 MB", nullptr, nullptr},
+    {"truecaser-de", "truecaser-de.bin",
+     "https://huggingface.co/cstr/truecaser-de/resolve/main/truecaser-de.bin",
+     "~2 MB", nullptr, nullptr},
 };
 
 // Multi-companion extras. When a backend needs >1 auxiliary file the
