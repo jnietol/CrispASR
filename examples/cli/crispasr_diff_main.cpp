@@ -63,6 +63,10 @@
 #include "sensevoice.h"
 #include "cosyvoice3_tts.h"
 #include "parler_tts.h"
+#if __has_include("kugelaudio.h")
+#include "kugelaudio.h"
+#define CA_HAVE_KUGELAUDIO 1
+#endif
 
 #include "common-crispasr.h"
 
@@ -4699,13 +4703,99 @@ int main(int argc, char** argv) {
 
         parler_tts_free(ctx);
 
+    } else if (backend_name == "kugelaudio") {
+        // ── KugelAudio-0-Open TTS diff ──────────────────────────────────
+        // Stages: text_token_ids, lm_hidden_last, pred_t_emb_step0,
+        //   pred_cond_step0, pred_output_step0, diff_step0_noisy,
+        //   diff_step0_denoised, diffusion_latent, scaled_latent, decoded_audio
+#ifdef CA_HAVE_KUGELAUDIO
+        auto kp = kugelaudio_context_default_params();
+        kp.n_threads = 4;
+        kp.verbosity = 0;
+        kp.use_gpu = true;
+        kp.flash_attn = true;
+        if (std::getenv("KUGELAUDIO_CPU_ONLY"))
+            kp.use_gpu = false;
+
+        kugelaudio_context* ctx = kugelaudio_init_from_file(model_path.c_str(), kp);
+        if (!ctx) {
+            fprintf(stderr, "failed to load kugelaudio model\n");
+            return 4;
+        }
+
+        std::string syn_text = ref.meta("kugelaudio_syn_text");
+        if (syn_text.empty())
+            syn_text = "Hello, this is a test of the speech synthesis system.";
+
+        const float COS_TTS_AUDIO = 0.90f;  // Lower threshold for Q4_K + audio
+
+        static const char* diff_stages[] = {
+            "text_token_ids",
+            "lm_hidden_last",
+            "pred_t_emb_step0",
+            "pred_cond_step0",
+            "pred_output_step0",
+            "diff_step0_noisy",
+            "diff_step0_denoised",
+            "diffusion_latent",
+            "scaled_latent",
+            "decoded_audio",
+        };
+
+        // Run full synthesis and capture audio
+        int n_audio = 0;
+        float* audio_out = kugelaudio_synthesize(ctx, syn_text.c_str(), &n_audio);
+
+        for (const char* stage : diff_stages) {
+            auto ref_shape = ref.shape(stage);
+            if (ref_shape.empty()) {
+                printf("[SKIP] %-22s (not in reference archive)\n", stage);
+                n_skip++;
+                continue;
+            }
+
+            // For stages we can compare directly from reference:
+            if (strcmp(stage, "decoded_audio") == 0 && audio_out && n_audio > 0) {
+                int ref_n = 1;
+                for (auto s : ref_shape) ref_n *= s;
+                int cmp_n = std::min(n_audio, ref_n);
+                auto r = compare_with_row_width(ref, stage, audio_out, cmp_n, cmp_n);
+                float threshold = COS_TTS_AUDIO;
+                print_row(stage, r, threshold);
+                if (r.found) {
+                    if (r.is_pass(threshold)) n_pass++; else n_fail++;
+                } else n_skip++;
+            } else if (strcmp(stage, "text_token_ids") == 0) {
+                // Token IDs: exact match check, not cosine
+                auto pair = ref.get_f32(stage);
+                if (pair.first && pair.second > 0) {
+                    printf("[INFO] %-22s ref has %zu tokens\n", stage, pair.second);
+                    n_skip++;
+                } else n_skip++;
+            } else {
+                // Stages that need per-stage C++ API (not yet wired for all):
+                // lm_hidden_last, pred_*, diff_step0_*, diffusion_latent, scaled_latent
+                // These require kugelaudio_run_diffusion_step etc.
+                // For now, skip with a note
+                printf("[SKIP] %-22s (C++ stage API not wired yet)\n", stage);
+                n_skip++;
+            }
+        }
+
+        if (audio_out) free(audio_out);
+        kugelaudio_free(ctx);
+#else
+        fprintf(stderr, "crispasr-diff: kugelaudio backend not compiled in\n");
+        return 4;
+#endif
+
     } else {
         fprintf(stderr,
                 "crispasr-diff: backend '%s' is not recognised. "
                 "Supported: voxtral, voxtral4b, qwen3, qwen3-tts, qwen3-tts-codec, kokoro, granite, granite-4.1, "
                 "granite-nle, parakeet, canary, cohere, gemma4, mimo-tokenizer, mimo-asr, orpheus, moonshine, "
                 "moonshine-streaming, lid-cld3, glm-asr, firered-asr, voxcpm2-tts, funasr, paraformer, sensevoice, "
-                "cosyvoice3-tts, parler-tts.\n",
+                "cosyvoice3-tts, parler-tts, kugelaudio.\n",
                 backend_name.c_str());
         return 5;
     }

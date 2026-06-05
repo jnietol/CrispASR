@@ -135,6 +135,10 @@ REGISTERED_BACKENDS: Dict[str, str] = {
     # NOTE: audio must be 16 kHz on entry (shared loader); the backend
     # resamples to 24 kHz internally.
     "vibevoice":  "reference_backends.vibevoice",
+    # KugelAudio-0-Open TTS (Qwen2.5-7B + diffusion + acoustic VAE).
+    # model_dir = kugelaudio/kugelaudio-0-open (HF id) or local snapshot.
+    # audio arg is unused (TTS). Text from KUGELAUDIO_TEXT env.
+    "kugelaudio": "reference_backends.kugelaudio",
     # MiMo-Audio-Tokenizer encoder (PCM → 8-channel RVQ codes).
     # model_dir = the MiMo-Audio-Tokenizer HF snapshot. 16 kHz mono PCM is
     # resampled to 24 kHz internally.
