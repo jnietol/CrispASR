@@ -88,12 +88,15 @@
 static char* portable_mkdtemp(char* tpl) {
     // Replace trailing XXXXXX with a unique suffix
     char tmp_path[MAX_PATH];
-    if (GetTempPathA(MAX_PATH, tmp_path) == 0) return nullptr;
+    if (GetTempPathA(MAX_PATH, tmp_path) == 0)
+        return nullptr;
     char unique[MAX_PATH];
-    if (GetTempFileNameA(tmp_path, "cd", 0, unique) == 0) return nullptr;
+    if (GetTempFileNameA(tmp_path, "cd", 0, unique) == 0)
+        return nullptr;
     // GetTempFileName creates a file — remove it, make a directory instead
     _unlink(unique);
-    if (_mkdir(unique) != 0) return nullptr;
+    if (_mkdir(unique) != 0)
+        return nullptr;
     strncpy(tpl, unique, strlen(tpl));
     tpl[strlen(unique)] = '\0';
     return tpl;
