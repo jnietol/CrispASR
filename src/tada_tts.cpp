@@ -738,27 +738,68 @@ static void run_fm_step(tada_context* c, const float* noisy_z, float timestep,
     ggml_backend_tensor_get(vel, velocity_out, 0, (size_t)lat * sizeof(float));
 }
 
-// Euler ODE solver for flow matching.
-static void fm_euler_solve(tada_context* c, float* speech, const float* cond,
-                            int num_steps, float /*cfg_scale*/) {
-    const int lat = (int)c->hp.fm_latent;
-
-    // Uniform time schedule [0, 1]
-    std::vector<float> t_span(num_steps + 1);
-    for (int i = 0; i <= num_steps; i++) {
-        t_span[i] = (float)i / (float)num_steps;
+// Cosine CFG schedule: scale decays from base at t=0 to 1.0 at t=1.
+static float scheduled_cfg(float base_scale, float t, const char* schedule) {
+    if (base_scale == 1.0f) return 1.0f;
+    if (strcmp(schedule, "cosine") == 0) {
+        return 1.0f + (base_scale - 1.0f) * 0.5f * (1.0f + std::cos((float)M_PI * t));
     }
+    if (strcmp(schedule, "linear") == 0) {
+        return 1.0f + (base_scale - 1.0f) * (1.0f - t);
+    }
+    return base_scale; // constant
+}
 
-    std::vector<float> velocity(lat);
+// LogSNR time schedule: uniform in log-SNR space, denser near t=0.
+static void build_logsnr_schedule(std::vector<float>& t_span, int num_steps) {
+    t_span.resize(num_steps + 1);
+    for (int i = 0; i <= num_steps; i++) {
+        float log_snr = 5.0f - 10.0f * (float)i / (float)num_steps; // [5, -5]
+        t_span[i] = 1.0f / (1.0f + std::exp(log_snr / 2.0f));      // sigmoid(-log_snr/2)
+    }
+    t_span[0] = 0.0f;
+    t_span[num_steps] = 1.0f;
+}
+
+// Euler ODE solver for flow matching with CFG.
+static void fm_euler_solve(tada_context* c, float* speech, const float* cond,
+                            int num_steps, float cfg_scale) {
+    const int lat = (int)c->hp.fm_latent;
+    const int ad = (int)c->hp.acoustic_dim;
+
+    // LogSNR time schedule (matches Python time_schedule="logsnr")
+    std::vector<float> t_span;
+    build_logsnr_schedule(t_span, num_steps);
+
+    std::vector<float> vel_pos(lat), vel_neg(lat);
+    std::vector<float> zero_cond(c->hp.fm_hidden, 0.0f); // negative condition = zeros
+
     for (int i = 0; i < num_steps; i++) {
         float dt = t_span[i + 1] - t_span[i];
+        float t_val = t_span[i];
 
-        // No CFG for now (cfg_scale == 1.0)
-        run_fm_step(c, speech, t_span[i], cond, velocity.data());
+        // Scheduled CFG (cosine decay from cfg_scale at t=0 to 1.0 at t=1)
+        float a_cfg = scheduled_cfg(cfg_scale, t_val, "cosine");
 
-        // Euler step: speech += dt * velocity
-        for (int j = 0; j < lat; j++) {
-            speech[j] += dt * velocity[j];
+        if (a_cfg != 1.0f) {
+            // CFG: velocity = v_neg + cfg * (v_pos - v_neg)
+            // Separate acoustic and duration CFG (duration_cfg = 1.0)
+            run_fm_step(c, speech, t_val, cond, vel_pos.data());
+            run_fm_step(c, speech, t_val, zero_cond.data(), vel_neg.data());
+
+            for (int j = 0; j < ad; j++) {
+                // Acoustic dims: apply acoustic CFG
+                speech[j] += dt * (vel_neg[j] + a_cfg * (vel_pos[j] - vel_neg[j]));
+            }
+            for (int j = ad; j < lat; j++) {
+                // Time dims: duration CFG = 1.0 (no guidance)
+                speech[j] += dt * (vel_neg[j] + 1.0f * (vel_pos[j] - vel_neg[j]));
+            }
+        } else {
+            run_fm_step(c, speech, t_val, cond, vel_pos.data());
+            for (int j = 0; j < lat; j++) {
+                speech[j] += dt * vel_pos[j];
+            }
         }
     }
 }
@@ -792,8 +833,8 @@ struct tada_context_params tada_context_default_params(void) {
     p.max_tokens   = 0;
     p.flash_attn   = false;
     p.num_fm_steps = 0;
-    p.acoustic_cfg = 1.0f;
-    p.noise_temp   = 0.0f;
+    p.acoustic_cfg = 1.6f;   // match Python InferenceOptions default
+    p.noise_temp   = 0.9f;   // match Python InferenceOptions default
     return p;
 }
 
