@@ -187,6 +187,10 @@
 #include "mimo_asr.h"
 #define CA_HAVE_MIMO_ASR 1
 #endif
+#if __has_include("moss_audio.h")
+#include "moss_audio.h"
+#define CA_HAVE_MOSS_AUDIO 1
+#endif
 #if __has_include("glm_asr.h")
 #include "glm_asr.h"
 #define CA_HAVE_GLMASR 1
@@ -1097,6 +1101,8 @@ CA_EXPORT int crispasr_detect_backend_from_gguf(const char* path, char* out_name
         backend = "parler-tts";
     else if (strcmp(arch, "t5") == 0)
         backend = "madlad";
+    else if (strcmp(arch, "moss_audio") == 0 || strcmp(arch, "moss-audio") == 0)
+        backend = "moss-audio";
 
     std::strncpy(out_name, backend, out_cap - 1);
     out_name[out_cap - 1] = '\0';
@@ -1405,6 +1411,9 @@ struct crispasr_session {
 #endif
 #ifdef CA_HAVE_MIMO_ASR
     mimo_asr_context* mimo_asr_ctx = nullptr;
+#endif
+#ifdef CA_HAVE_MOSS_AUDIO
+    moss_audio_context* moss_audio_ctx = nullptr;
 #endif
 };
 
@@ -2421,6 +2430,21 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
         return s;
     }
 #endif
+#ifdef CA_HAVE_MOSS_AUDIO
+    if (s->backend == "moss-audio" || s->backend == "moss_audio" || s->backend == "mossaudio") {
+        s->backend = "moss-audio";
+        moss_audio_context_params p = moss_audio_context_default_params();
+        p.n_threads = s->n_threads;
+        p.verbosity = g_open_verbosity_tls;
+        p.use_gpu = g_open_use_gpu_tls;
+        s->moss_audio_ctx = moss_audio_init_from_file(model_path, p);
+        if (!s->moss_audio_ctx) {
+            delete s;
+            return nullptr;
+        }
+        return s;
+    }
+#endif
 
     // Unknown or unsupported-in-this-build backend.
     delete s;
@@ -2683,6 +2707,9 @@ CA_EXPORT int crispasr_session_available_backends(char* out_csv, int out_cap) {
 #endif
 #ifdef CA_HAVE_MIMO_ASR
     list += ",mimo-asr";
+#endif
+#ifdef CA_HAVE_MOSS_AUDIO
+    list += ",moss-audio";
 #endif
 #ifdef CA_HAVE_QWEN3
     // mega-asr is a Qwen3-ASR variant (LoRA merged offline) — dispatch
@@ -4250,6 +4277,13 @@ static crispasr_session_result* transcribe_single(crispasr_session* s, const flo
                 mimo_asr_result_free(mr);
         }
 #endif
+#ifdef CA_HAVE_MOSS_AUDIO
+        if (!text && s->moss_audio_ctx) {
+            const char* prompt = s->ask.empty() ? "Transcribe this audio." : s->ask.c_str();
+            text = moss_audio_process(s->moss_audio_ctx, pcm, n_samples, prompt);
+            need_free = true;
+        }
+#endif
         if (text)
             return package_text_only(text, need_free);
     }
@@ -5815,6 +5849,10 @@ CA_EXPORT void crispasr_session_close(crispasr_session* s) {
     if (s->mimo_asr_ctx)
         mimo_asr_free(s->mimo_asr_ctx);
 #endif
+#ifdef CA_HAVE_MOSS_AUDIO
+    if (s->moss_audio_ctx)
+        moss_audio_free(s->moss_audio_ctx);
+#endif
     delete s;
 }
 
@@ -6191,6 +6229,12 @@ CA_EXPORT int crispasr_session_set_tts_seed(crispasr_session* s, uint64_t seed) 
 #ifdef CA_HAVE_MELOTTS
     if (s->melotts_ctx) {
         melotts_set_seed(s->melotts_ctx, (uint32_t)seed);
+        touched++;
+    }
+#endif
+#ifdef CA_HAVE_MOSS_AUDIO
+    if (s->moss_audio_ctx) {
+        moss_audio_set_seed(s->moss_audio_ctx, (uint32_t)seed);
         touched++;
     }
 #endif
