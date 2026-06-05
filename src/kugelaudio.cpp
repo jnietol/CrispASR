@@ -1280,15 +1280,27 @@ extern "C" float* kugelaudio_synthesize(struct kugelaudio_context* ctx,
         if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) return false;
         fprintf(stderr, "kugelaudio: alloc_graph OK, setting inputs...\n");
 
-        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "lm_input"), embeds_data, 0,
-                                (size_t)hp.d_lm * n_toks * sizeof(float));
-        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "positions"), pos.data(), 0,
-                                pos.size() * sizeof(int32_t));
-        if (n_toks > 1)
-            ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "causal_mask"), mask.data(), 0,
-                                    mask.size() * sizeof(ggml_fp16_t));
+        ggml_tensor* t_inp = ggml_graph_get_tensor(gf, "lm_input");
+        fprintf(stderr, "kugelaudio: lm_input tensor=%p\n", (void*)t_inp);
+        ggml_backend_tensor_set(t_inp, embeds_data, 0, (size_t)hp.d_lm * n_toks * sizeof(float));
+        fprintf(stderr, "kugelaudio: lm_input set OK\n");
 
+        ggml_tensor* t_pos = ggml_graph_get_tensor(gf, "positions");
+        fprintf(stderr, "kugelaudio: positions tensor=%p\n", (void*)t_pos);
+        ggml_backend_tensor_set(t_pos, pos.data(), 0, pos.size() * sizeof(int32_t));
+        fprintf(stderr, "kugelaudio: positions set OK\n");
+
+        if (n_toks > 1) {
+            ggml_tensor* t_mask = ggml_graph_get_tensor(gf, "causal_mask");
+            fprintf(stderr, "kugelaudio: causal_mask tensor=%p shape=[%lld,%lld]\n",
+                    (void*)t_mask, t_mask?(long long)t_mask->ne[0]:-1, t_mask?(long long)t_mask->ne[1]:-1);
+            ggml_backend_tensor_set(t_mask, mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
+            fprintf(stderr, "kugelaudio: causal_mask set OK\n");
+        }
+
+        fprintf(stderr, "kugelaudio: graph_compute...\n");
         if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) return false;
+        fprintf(stderr, "kugelaudio: graph_compute OK\n");
 
         logits.resize(hp.vocab_size);
         ggml_backend_tensor_get(ggml_graph_get_tensor(gf, "logits"), logits.data(), 0,
