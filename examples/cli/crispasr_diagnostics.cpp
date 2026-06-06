@@ -219,7 +219,7 @@ void crispasr_print_runtime_env(FILE* out) {
     {
         DIR* d = ::opendir("/etc/ld.so.conf.d");
         if (d) {
-            int cuda_majors_seen = 0;  // bitmask-ish: track distinct major versions
+            int cuda_majors_seen = 0; // bitmask-ish: track distinct major versions
             int first_major = 0, second_major = 0;
             struct dirent* e;
             while ((e = ::readdir(d)) != nullptr) {
@@ -247,12 +247,12 @@ void crispasr_print_runtime_env(FILE* out) {
             ::closedir(d);
             if (cuda_majors_seen >= 2) {
                 std::fprintf(out,
-                    "\n  *** WARNING: mixed CUDA versions detected (CUDA %d and CUDA %d) ***\n"
-                    "  Multiple CUDA major-version ld.so.conf.d entries can cause library\n"
-                    "  mismatches, heap corruption, and crashes (see issue #152).\n"
-                    "  Fix: remove the stale cuda-*.conf entry, run `sudo ldconfig`, and rebuild.\n"
-                    "  Alternatively, rebuild with -DGGML_STATIC=ON to statically link CUDA.\n\n",
-                    first_major, second_major);
+                             "\n  *** WARNING: mixed CUDA versions detected (CUDA %d and CUDA %d) ***\n"
+                             "  Multiple CUDA major-version ld.so.conf.d entries can cause library\n"
+                             "  mismatches, heap corruption, and crashes (see issue #152).\n"
+                             "  Fix: remove the stale cuda-*.conf entry, run `sudo ldconfig`, and rebuild.\n"
+                             "  Alternatively, rebuild with -DGGML_STATIC=ON to statically link CUDA.\n\n",
+                             first_major, second_major);
             }
         }
     }

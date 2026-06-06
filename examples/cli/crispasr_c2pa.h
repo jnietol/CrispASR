@@ -57,9 +57,7 @@ inline const char* crispasr_c2pa_manifest_json() {
 //
 // cert_pem: path to X.509 certificate (PEM)
 // key_pem:  path to private key (PEM)
-inline bool crispasr_c2pa_sign_wav(std::string& wav,
-                                    const std::string& cert_pem,
-                                    const std::string& key_pem) {
+inline bool crispasr_c2pa_sign_wav(std::string& wav, const std::string& cert_pem, const std::string& key_pem) {
     if (cert_pem.empty() || key_pem.empty())
         return false;
 
@@ -84,8 +82,7 @@ inline bool crispasr_c2pa_sign_wav(std::string& wav,
     const char* manifest = crispasr_c2pa_manifest_json();
     int rc = c2pa_builder_set_manifest_json(builder, manifest);
     if (rc != 0) {
-        fprintf(stderr, "crispasr: C2PA set_manifest failed: %s\n",
-                c2pa_error() ? c2pa_error() : "unknown");
+        fprintf(stderr, "crispasr: C2PA set_manifest failed: %s\n", c2pa_error() ? c2pa_error() : "unknown");
         c2pa_builder_free(builder);
         return false;
     }
@@ -104,13 +101,11 @@ inline bool crispasr_c2pa_sign_wav(std::string& wav,
     close(fd_in);
     close(fd_out);
 
-    rc = c2pa_builder_sign_file(builder, tmp_in, tmp_out,
-                                 cert_pem.c_str(), key_pem.c_str());
+    rc = c2pa_builder_sign_file(builder, tmp_in, tmp_out, cert_pem.c_str(), key_pem.c_str());
     c2pa_builder_free(builder);
 
     if (rc != 0) {
-        fprintf(stderr, "crispasr: C2PA signing failed: %s\n",
-                c2pa_error() ? c2pa_error() : "unknown");
+        fprintf(stderr, "crispasr: C2PA signing failed: %s\n", c2pa_error() ? c2pa_error() : "unknown");
         unlink(tmp_in);
         unlink(tmp_out);
         return false;

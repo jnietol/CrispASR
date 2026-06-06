@@ -1158,9 +1158,9 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
 
         // Voice-cloning consent gate: when the voice is a .wav reference
         // (voice cloning), require an explicit consent_attestation field.
-        const bool is_voice_clone = voice_name.size() >= 4 &&
-                                    (voice_name.compare(voice_name.size() - 4, 4, ".wav") == 0 ||
-                                     voice_name.compare(voice_name.size() - 4, 4, ".WAV") == 0);
+        const bool is_voice_clone =
+            voice_name.size() >= 4 && (voice_name.compare(voice_name.size() - 4, 4, ".wav") == 0 ||
+                                       voice_name.compare(voice_name.size() - 4, 4, ".WAV") == 0);
         if (is_voice_clone && consent_attestation.empty()) {
             json_error(res, 400,
                        "voice cloning requires a 'consent_attestation' field in the request body. "
@@ -1175,8 +1175,8 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
             auto t = std::chrono::system_clock::to_time_t(now);
             char ts[64];
             std::strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S%z", std::localtime(&t));
-            fprintf(stderr, "[CONSENT] ts=%s voice=%s attestation=\"%s\"\n",
-                    ts, voice_name.c_str(), consent_attestation.c_str());
+            fprintf(stderr, "[CONSENT] ts=%s voice=%s attestation=\"%s\"\n", ts, voice_name.c_str(),
+                    consent_attestation.c_str());
         }
         std::string response_format = body.value("response_format", std::string("wav"));
         if (response_format != "wav" && response_format != "pcm" && response_format != "f32" &&

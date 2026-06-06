@@ -814,19 +814,18 @@ static crispasr_diff::Report compare_with_row_width(const crispasr_diff::Ref& re
 
 int main(int argc, char** argv) {
     if (argc < 5) {
-        fprintf(
-            stderr,
-            "usage: %s <backend> <model.gguf> <reference.gguf> <audio.wav>\n"
-            "\n"
-            "  backend       one of: voxtral, voxtral4b, qwen3, qwen3-tts, qwen3-tts-codec, kokoro, granite, "
-            "granite-4.1, "
-            "granite-nle, parakeet, chatterbox, voxcpm2-tts, "
-            "canary, cohere, gemma4, mimo-tokenizer, mimo-asr, orpheus, moonshine, moonshine-streaming, "
-            "parler-tts, moss-audio\n"
-            "  model.gguf    crispasr-compatible model weights\n"
-            "  reference.gguf  archive produced by tools/dump_reference.py\n"
-            "  audio.wav     16 kHz mono WAV\n",
-            argv[0]);
+        fprintf(stderr,
+                "usage: %s <backend> <model.gguf> <reference.gguf> <audio.wav>\n"
+                "\n"
+                "  backend       one of: voxtral, voxtral4b, qwen3, qwen3-tts, qwen3-tts-codec, kokoro, granite, "
+                "granite-4.1, "
+                "granite-nle, parakeet, chatterbox, voxcpm2-tts, "
+                "canary, cohere, gemma4, mimo-tokenizer, mimo-asr, orpheus, moonshine, moonshine-streaming, "
+                "parler-tts, moss-audio\n"
+                "  model.gguf    crispasr-compatible model weights\n"
+                "  reference.gguf  archive produced by tools/dump_reference.py\n"
+                "  audio.wav     16 kHz mono WAV\n",
+                argv[0]);
         return 1;
     }
     const std::string backend_name = argv[1];
@@ -4758,19 +4757,11 @@ int main(int argc, char** argv) {
         if (syn_text.empty())
             syn_text = "Hello, this is a test of the speech synthesis system.";
 
-        const float COS_TTS_AUDIO = 0.90f;  // Lower threshold for Q4_K + audio
+        const float COS_TTS_AUDIO = 0.90f; // Lower threshold for Q4_K + audio
 
         static const char* diff_stages[] = {
-            "text_token_ids",
-            "lm_hidden_last",
-            "pred_t_emb_step0",
-            "pred_cond_step0",
-            "pred_output_step0",
-            "diff_step0_noisy",
-            "diff_step0_denoised",
-            "diffusion_latent",
-            "scaled_latent",
-            "decoded_audio",
+            "text_token_ids",   "lm_hidden_last",      "pred_t_emb_step0", "pred_cond_step0", "pred_output_step0",
+            "diff_step0_noisy", "diff_step0_denoised", "diffusion_latent", "scaled_latent",   "decoded_audio",
         };
 
         // Run full synthesis and capture audio
@@ -4787,18 +4778,18 @@ int main(int argc, char** argv) {
                 // Default: step 0 of 20-step schedule = timestep 999
                 int timestep = 999;
                 int out_dim = 0;
-                float* cpp_out = kugelaudio_run_diffusion_step(ctx,
-                    noisy_pair.first, (int)noisy_pair.second,
-                    timestep,
-                    cond_pair.first, (int)cond_pair.second,
-                    &out_dim);
+                float* cpp_out = kugelaudio_run_diffusion_step(ctx, noisy_pair.first, (int)noisy_pair.second, timestep,
+                                                               cond_pair.first, (int)cond_pair.second, &out_dim);
                 if (cpp_out && out_dim > 0) {
-                    auto r = compare_with_row_width(ref, "pred_output_step0",
-                        cpp_out, out_dim, out_dim);
+                    auto r = compare_with_row_width(ref, "pred_output_step0", cpp_out, out_dim, out_dim);
                     print_row("pred_output_step0", r, COS_THRESHOLD);
                     if (r.found) {
-                        if (r.is_pass(COS_THRESHOLD)) n_pass++; else n_fail++;
-                    } else n_skip++;
+                        if (r.is_pass(COS_THRESHOLD))
+                            n_pass++;
+                        else
+                            n_fail++;
+                    } else
+                        n_skip++;
                     free(cpp_out);
                 } else {
                     printf("[SKIP] %-22s (C++ diffusion step returned null)\n", "pred_output_step0");
@@ -4815,11 +4806,10 @@ int main(int argc, char** argv) {
             auto lat_pair = ref.get_f32("scaled_latent");
             if (lat_pair.first && lat_pair.second > 0) {
                 int dec_n = 0;
-                float* dec_out = kugelaudio_run_acoustic_decoder(ctx,
-                    lat_pair.first, (int)lat_pair.second, &dec_n);
+                float* dec_out = kugelaudio_run_acoustic_decoder(ctx, lat_pair.first, (int)lat_pair.second, &dec_n);
                 if (dec_out && dec_n > 0) {
-                    printf("[INFO] vae_from_ref_latent  C++ produced %d samples from %zu-elem latent\n",
-                           dec_n, lat_pair.second);
+                    printf("[INFO] vae_from_ref_latent  C++ produced %d samples from %zu-elem latent\n", dec_n,
+                           lat_pair.second);
                     // Compare against dec_full_out (single-frame Python decode), NOT decoded_audio (full synthesis)
                     auto ref_vae = ref.get_f32("dec_full_out");
                     const char* ref_key = "dec_full_out";
@@ -4830,16 +4820,19 @@ int main(int argc, char** argv) {
                     }
                     if (ref_vae.first && ref_vae.second > 0) {
                         int cmp_n = std::min((size_t)dec_n, ref_vae.second);
-                        printf("[INFO] vae_from_ref_latent  comparing %d samples against %s (%zu samples)\n",
-                               cmp_n, ref_key, ref_vae.second);
-                        auto r = compare_with_row_width(ref, ref_key,
-                            dec_out, cmp_n, cmp_n);
-                        print_row("vae_from_ref_latent", r, COS_TTS_AUDIO,
-                            "  (C++ VAE fed Python's scaled_latent)");
+                        printf("[INFO] vae_from_ref_latent  comparing %d samples against %s (%zu samples)\n", cmp_n,
+                               ref_key, ref_vae.second);
+                        auto r = compare_with_row_width(ref, ref_key, dec_out, cmp_n, cmp_n);
+                        print_row("vae_from_ref_latent", r, COS_TTS_AUDIO, "  (C++ VAE fed Python's scaled_latent)");
                         if (r.found) {
-                            if (r.is_pass(COS_TTS_AUDIO)) n_pass++; else n_fail++;
-                        } else n_skip++;
-                    } else n_skip++;
+                            if (r.is_pass(COS_TTS_AUDIO))
+                                n_pass++;
+                            else
+                                n_fail++;
+                        } else
+                            n_skip++;
+                    } else
+                        n_skip++;
                     free(dec_out);
                 } else {
                     printf("[SKIP] %-22s (C++ decoder returned null)\n", "vae_from_ref_latent");
@@ -4858,14 +4851,17 @@ int main(int argc, char** argv) {
                 auto ref_audio_pair = ref.get_f32("decoded_audio");
                 if (ref_audio_pair.first && ref_audio_pair.second > 0) {
                     int cmp_n = std::min((size_t)n_audio, ref_audio_pair.second);
-                    auto r = compare_with_row_width(ref, "decoded_audio",
-                        audio_out, cmp_n, cmp_n);
-                    print_row("e2e_decoded_audio", r, COS_TTS_AUDIO,
-                        "  (full e2e, Q4_K no CFG vs F16+CFG)");
+                    auto r = compare_with_row_width(ref, "decoded_audio", audio_out, cmp_n, cmp_n);
+                    print_row("e2e_decoded_audio", r, COS_TTS_AUDIO, "  (full e2e, Q4_K no CFG vs F16+CFG)");
                     if (r.found) {
-                        if (r.is_pass(COS_TTS_AUDIO)) n_pass++; else n_fail++;
-                    } else n_skip++;
-                } else n_skip++;
+                        if (r.is_pass(COS_TTS_AUDIO))
+                            n_pass++;
+                        else
+                            n_fail++;
+                    } else
+                        n_skip++;
+                } else
+                    n_skip++;
                 free(audio_out);
             } else {
                 printf("[SKIP] %-22s (synthesis returned no audio)\n", "e2e_decoded_audio");
@@ -4898,7 +4894,10 @@ int main(int argc, char** argv) {
         cp.n_threads = 4;
         cp.verbosity = 1;
         moss_audio_context* ctx = moss_audio_init_from_file(model_path.c_str(), cp);
-        if (!ctx) { fprintf(stderr, "failed to load moss-audio model\n"); return 4; }
+        if (!ctx) {
+            fprintf(stderr, "failed to load moss-audio model\n");
+            return 4;
+        }
 
         // ---- mel_spectrogram ----
         int n_mels = 0, T_mel = 0;
@@ -4910,9 +4909,11 @@ int main(int argc, char** argv) {
                 fseek(mf, 0, SEEK_END);
                 size_t sz = (size_t)ftell(mf);
                 fseek(mf, 0, SEEK_SET);
-                n_mels = 128; T_mel = (int)(sz / sizeof(float) / n_mels);
+                n_mels = 128;
+                T_mel = (int)(sz / sizeof(float) / n_mels);
                 mel = (float*)malloc(sz);
-                fread(mel, 1, sz, mf); fclose(mf);
+                fread(mel, 1, sz, mf);
+                fclose(mf);
                 printf("  (mel override from %s: %d x %d)\n", mel_override, n_mels, T_mel);
             }
         }
@@ -4924,7 +4925,8 @@ int main(int argc, char** argv) {
             print_row("mel_spectrogram", rep, COS_THRESHOLD);
             record(rep);
         } else {
-            printf("[ERR ] mel_spectrogram         (compute failed)\n"); n_fail++;
+            printf("[ERR ] mel_spectrogram         (compute failed)\n");
+            n_fail++;
         }
 
         // ---- encoder + deepstack taps ----
@@ -4932,8 +4934,7 @@ int main(int argc, char** argv) {
             if (mel) {
                 int T_enc = 0, d_enc = 0;
                 float *ds0 = nullptr, *ds1 = nullptr, *ds2 = nullptr;
-                float* enc = moss_audio_run_encoder(ctx, mel, n_mels, T_mel,
-                                                     &T_enc, &d_enc, &ds0, &ds1, &ds2);
+                float* enc = moss_audio_run_encoder(ctx, mel, n_mels, T_mel, &T_enc, &d_enc, &ds0, &ds1, &ds2);
                 free(mel);
                 if (enc) {
                     auto rep = ref.compare("encoder_output", enc, (size_t)T_enc * d_enc);
@@ -4945,15 +4946,18 @@ int main(int argc, char** argv) {
                     int chunk_tokens = 50; // conv_out_len(conv_out_len(conv_out_len(400)))
                     if (ds0) {
                         auto r0 = ref.compare("enc_layer_8", ds0, (size_t)chunk_tokens * d_enc);
-                        print_row("enc_layer_8", r0, COS_THRESHOLD); record(r0);
+                        print_row("enc_layer_8", r0, COS_THRESHOLD);
+                        record(r0);
                     }
                     if (ds1) {
                         auto r1 = ref.compare("enc_layer_16", ds1, (size_t)chunk_tokens * d_enc);
-                        print_row("enc_layer_16", r1, COS_THRESHOLD); record(r1);
+                        print_row("enc_layer_16", r1, COS_THRESHOLD);
+                        record(r1);
                     }
                     if (ds2) {
                         auto r2 = ref.compare("enc_layer_24", ds2, (size_t)chunk_tokens * d_enc);
-                        print_row("enc_layer_24", r2, COS_THRESHOLD); record(r2);
+                        print_row("enc_layer_24", r2, COS_THRESHOLD);
+                        record(r2);
                     }
 
                     // ---- adapter_output ----
@@ -4961,14 +4965,18 @@ int main(int argc, char** argv) {
                     float* adapted = moss_audio_run_adapter(ctx, enc, T_enc, d_enc, &adapt_T, &adapt_d);
                     if (adapted) {
                         auto ra = ref.compare("adapter_output", adapted, (size_t)adapt_T * adapt_d);
-                        print_row("adapter_output", ra, COS_THRESHOLD); record(ra);
+                        print_row("adapter_output", ra, COS_THRESHOLD);
+                        record(ra);
                         free(adapted);
                     }
 
                     free(enc);
-                    free(ds0); free(ds1); free(ds2);
+                    free(ds0);
+                    free(ds1);
+                    free(ds2);
                 } else {
-                    printf("[ERR ] encoder_output         (encoder failed)\n"); n_fail++;
+                    printf("[ERR ] encoder_output         (encoder failed)\n");
+                    n_fail++;
                 }
             }
         }

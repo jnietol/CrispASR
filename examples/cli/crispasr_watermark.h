@@ -68,9 +68,7 @@ struct prng {
     }
 
     // Uniform in [0, bound)
-    uint32_t next_u32(uint32_t bound) {
-        return (uint32_t)(next() % bound);
-    }
+    uint32_t next_u32(uint32_t bound) { return (uint32_t)(next() % bound); }
 
 private:
     static uint64_t splitmix(uint64_t& x) {
@@ -137,8 +135,8 @@ struct wm_bin {
 
 inline std::vector<wm_bin> generate_bin_pattern(uint64_t key, int n_fft, int n_bins) {
     prng rng(key);
-    const int lo_bin = n_fft / 16;       // skip lowest ~6% (sub-bass)
-    const int hi_bin = n_fft / 2 - 1;    // below Nyquist
+    const int lo_bin = n_fft / 16;    // skip lowest ~6% (sub-bass)
+    const int hi_bin = n_fft / 2 - 1; // below Nyquist
     const int range = hi_bin - lo_bin;
     if (range <= 0 || n_bins <= 0)
         return {};

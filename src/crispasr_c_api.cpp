@@ -1875,9 +1875,8 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
     }
 #endif
 #ifdef CA_HAVE_VIBEVOICE
-    if (s->backend == "vibevoice" || s->backend == "vibevoice-tts" ||
-        s->backend == "vibevoice-1.5b" || s->backend == "vibevoice-tts-1.5b" ||
-        s->backend == "vibevoice-tts-base") {
+    if (s->backend == "vibevoice" || s->backend == "vibevoice-tts" || s->backend == "vibevoice-1.5b" ||
+        s->backend == "vibevoice-tts-1.5b" || s->backend == "vibevoice-tts-base") {
         s->backend = "vibevoice";
         vibevoice_context_params p = vibevoice_context_default_params();
         p.n_threads = s->n_threads;
@@ -6062,8 +6061,12 @@ CA_EXPORT void crispasr_truecase_free(void* ctx) {
     truecaser_free((truecaser_context*)ctx);
 }
 #else
-CA_EXPORT void* crispasr_truecase_init(const char*) { return nullptr; }
-CA_EXPORT const char* crispasr_truecase_process(void*, const char*) { return nullptr; }
+CA_EXPORT void* crispasr_truecase_init(const char*) {
+    return nullptr;
+}
+CA_EXPORT const char* crispasr_truecase_process(void*, const char*) {
+    return nullptr;
+}
 CA_EXPORT void crispasr_truecase_free_text(const char*) {}
 CA_EXPORT void crispasr_truecase_free(void*) {}
 #endif
@@ -6087,8 +6090,12 @@ CA_EXPORT void crispasr_pcs_free(void* ctx) {
     pcs_free((pcs_context*)ctx);
 }
 #else
-CA_EXPORT void* crispasr_pcs_init(const char*) { return nullptr; }
-CA_EXPORT const char* crispasr_pcs_process(void*, const char*) { return nullptr; }
+CA_EXPORT void* crispasr_pcs_init(const char*) {
+    return nullptr;
+}
+CA_EXPORT const char* crispasr_pcs_process(void*, const char*) {
+    return nullptr;
+}
 CA_EXPORT void crispasr_pcs_free_text(const char*) {}
 CA_EXPORT void crispasr_pcs_free(void*) {}
 #endif

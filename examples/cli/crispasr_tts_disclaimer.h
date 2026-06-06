@@ -45,9 +45,7 @@ inline cache& get_cache() {
 //
 // Thread-safe: multiple concurrent requests block on the first
 // synthesis, then all get the cached result.
-inline const std::vector<float>& crispasr_tts_get_disclaimer(
-    CrispasrBackend* backend, const whisper_params& params) {
-
+inline const std::vector<float>& crispasr_tts_get_disclaimer(CrispasrBackend* backend, const whisper_params& params) {
     auto& c = crispasr_disclaimer::get_cache();
     std::call_once(c.flag, [&]() {
         // Synthesize with no voice reference → default/neutral voice
@@ -64,9 +62,8 @@ inline const std::vector<float>& crispasr_tts_get_disclaimer(
                             "(backend may not support voiceless synthesis); "
                             "voice-cloned output will not have a spoken disclaimer\n");
         } else {
-            fprintf(stderr, "crispasr: disclaimer synthesized (%zu samples @ %d Hz, %.2fs)\n",
-                    c.pcm.size(), c.sample_rate,
-                    (double)c.pcm.size() / (double)c.sample_rate);
+            fprintf(stderr, "crispasr: disclaimer synthesized (%zu samples @ %d Hz, %.2fs)\n", c.pcm.size(),
+                    c.sample_rate, (double)c.pcm.size() / (double)c.sample_rate);
         }
     });
     return c.pcm;
@@ -74,10 +71,8 @@ inline const std::vector<float>& crispasr_tts_get_disclaimer(
 
 // Prepend disclaimer + silence gap to the given PCM vector. Modifies
 // `audio` in-place. No-op if disclaimer is empty (synthesis failed).
-inline void crispasr_tts_prepend_disclaimer(
-    std::vector<float>& audio, CrispasrBackend* backend,
-    const whisper_params& params) {
-
+inline void crispasr_tts_prepend_disclaimer(std::vector<float>& audio, CrispasrBackend* backend,
+                                            const whisper_params& params) {
     const auto& disclaimer = crispasr_tts_get_disclaimer(backend, params);
     if (disclaimer.empty())
         return;

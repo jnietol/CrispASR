@@ -18,7 +18,7 @@ struct Entry {
     const char* companion_file; // optional extra file (e.g. tokenizer.bin, primary voice). NULL if none.
     const char* companion_url;
     const char* companion_size; // size of the companion file; NULL = falls back to approx_size
-    const char* license; // NULL = permissive (MIT/Apache/etc.), non-NULL = printed to stderr on download
+    const char* license;        // NULL = permissive (MIT/Apache/etc.), non-NULL = printed to stderr on download
 };
 
 // Extra companion files beyond the single inline `companion_file/url` slot.

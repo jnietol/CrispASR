@@ -42,47 +42,47 @@
 
 struct moss_audio_hparams {
     // Audio encoder
-    uint32_t n_mels        = 128;
-    uint32_t n_fft         = 400;
-    uint32_t hop_length    = 160;
-    uint32_t sample_rate   = 16000;
-    uint32_t enc_layers    = 32;
-    uint32_t enc_d_model   = 1280;
-    uint32_t enc_n_heads   = 20;
-    uint32_t enc_head_dim  = 64;   // 1280 / 20
-    uint32_t enc_ffn_dim   = 5120;
-    uint32_t enc_ds_hidden = 480;  // downsample_hidden_size (Conv2d channels)
-    uint32_t enc_max_pos   = 1500;
+    uint32_t n_mels = 128;
+    uint32_t n_fft = 400;
+    uint32_t hop_length = 160;
+    uint32_t sample_rate = 16000;
+    uint32_t enc_layers = 32;
+    uint32_t enc_d_model = 1280;
+    uint32_t enc_n_heads = 20;
+    uint32_t enc_head_dim = 64; // 1280 / 20
+    uint32_t enc_ffn_dim = 5120;
+    uint32_t enc_ds_hidden = 480; // downsample_hidden_size (Conv2d channels)
+    uint32_t enc_max_pos = 1500;
     uint32_t enc_output_dim = 1280;
     uint32_t enc_attn_window = 100;
-    float    enc_ln_eps    = 1e-5f;
+    float enc_ln_eps = 1e-5f;
 
     // DeepStack
-    uint32_t ds_num_taps        = 3;
-    uint32_t ds_tap_layers[3]   = {8, 16, 24};
-    uint32_t ds_num_inject      = 3;
+    uint32_t ds_num_taps = 3;
+    uint32_t ds_tap_layers[3] = {8, 16, 24};
+    uint32_t ds_num_inject = 3;
 
     // Adapter
     uint32_t adapter_hidden = 8192;
 
     // LLM (Qwen3)
-    uint32_t llm_layers     = 36;
-    uint32_t llm_hidden     = 2560;
-    uint32_t llm_n_heads    = 32;
+    uint32_t llm_layers = 36;
+    uint32_t llm_hidden = 2560;
+    uint32_t llm_n_heads = 32;
     uint32_t llm_n_kv_heads = 8;
-    uint32_t llm_head_dim   = 128;
-    uint32_t llm_ff_dim     = 9728;
+    uint32_t llm_head_dim = 128;
+    uint32_t llm_ff_dim = 9728;
     uint32_t llm_vocab_size = 151936;
-    uint32_t llm_max_pos    = 40960;
-    float    llm_rope_theta = 1000000.0f;
-    float    llm_rms_eps    = 1e-6f;
+    uint32_t llm_max_pos = 40960;
+    float llm_rope_theta = 1000000.0f;
+    float llm_rms_eps = 1e-6f;
 
     // Special tokens
-    uint32_t bos_token_id     = 151643;
-    uint32_t eos_token_id     = 151645;
-    uint32_t audio_token_id   = 151654;
-    uint32_t audio_start_id   = 151669;
-    uint32_t audio_end_id     = 151670;
+    uint32_t bos_token_id = 151643;
+    uint32_t eos_token_id = 151645;
+    uint32_t audio_token_id = 151654;
+    uint32_t audio_start_id = 151669;
+    uint32_t audio_end_id = 151670;
 };
 
 // ===========================================================================
@@ -93,7 +93,7 @@ struct moss_audio_enc_block {
     // Pre-LN self-attention (Whisper-style)
     ggml_tensor *attn_norm_w = nullptr, *attn_norm_b = nullptr;
     ggml_tensor *attn_q_w = nullptr, *attn_q_b = nullptr;
-    ggml_tensor *attn_k_w = nullptr;  // no bias
+    ggml_tensor* attn_k_w = nullptr; // no bias
     ggml_tensor *attn_v_w = nullptr, *attn_v_b = nullptr;
     ggml_tensor *attn_o_w = nullptr, *attn_o_b = nullptr;
     // Pre-LN FFN (GELU)
@@ -117,9 +117,9 @@ struct moss_audio_encoder {
 
 // GatedMLP: gate_proj + up_proj + down_proj (SiLU gating)
 struct moss_audio_gated_mlp {
-    ggml_tensor *gate_w = nullptr;
-    ggml_tensor *up_w   = nullptr;
-    ggml_tensor *down_w = nullptr;
+    ggml_tensor* gate_w = nullptr;
+    ggml_tensor* up_w = nullptr;
+    ggml_tensor* down_w = nullptr;
 };
 
 struct moss_audio_llm_block {
@@ -210,27 +210,29 @@ static ggml_tensor* require(moss_audio_model& m, const char* name) {
 // Model loading
 // ===========================================================================
 
-static bool moss_audio_load_model(moss_audio_model& model, moss_audio_vocab& vocab,
-                                  const char* path, ggml_backend_t backend) {
+static bool moss_audio_load_model(moss_audio_model& model, moss_audio_vocab& vocab, const char* path,
+                                  ggml_backend_t backend) {
     // ---- pass 1: metadata + vocab ----
     {
         gguf_context* gctx = core_gguf::open_metadata(path);
-        if (!gctx) return false;
+        if (!gctx)
+            return false;
 
         auto& hp = model.hparams;
-        hp.n_mels      = core_gguf::kv_u32(gctx, "moss_audio.enc.num_mel_bins", hp.n_mels);
-        hp.enc_layers   = core_gguf::kv_u32(gctx, "moss_audio.enc.encoder_layers", hp.enc_layers);
-        hp.enc_d_model  = core_gguf::kv_u32(gctx, "moss_audio.enc.d_model", hp.enc_d_model);
-        hp.enc_n_heads  = core_gguf::kv_u32(gctx, "moss_audio.enc.encoder_attention_heads", hp.enc_n_heads);
-        hp.enc_ffn_dim  = core_gguf::kv_u32(gctx, "moss_audio.enc.encoder_ffn_dim", hp.enc_ffn_dim);
+        hp.n_mels = core_gguf::kv_u32(gctx, "moss_audio.enc.num_mel_bins", hp.n_mels);
+        hp.enc_layers = core_gguf::kv_u32(gctx, "moss_audio.enc.encoder_layers", hp.enc_layers);
+        hp.enc_d_model = core_gguf::kv_u32(gctx, "moss_audio.enc.d_model", hp.enc_d_model);
+        hp.enc_n_heads = core_gguf::kv_u32(gctx, "moss_audio.enc.encoder_attention_heads", hp.enc_n_heads);
+        hp.enc_ffn_dim = core_gguf::kv_u32(gctx, "moss_audio.enc.encoder_ffn_dim", hp.enc_ffn_dim);
         hp.enc_ds_hidden = core_gguf::kv_u32(gctx, "moss_audio.enc.downsample_hidden_size", hp.enc_ds_hidden);
-        hp.enc_max_pos  = core_gguf::kv_u32(gctx, "moss_audio.enc.max_source_positions", hp.enc_max_pos);
+        hp.enc_max_pos = core_gguf::kv_u32(gctx, "moss_audio.enc.max_source_positions", hp.enc_max_pos);
         hp.enc_output_dim = core_gguf::kv_u32(gctx, "moss_audio.enc.output_dim", hp.enc_output_dim);
-        hp.enc_attn_window = core_gguf::kv_u32(gctx, "moss_audio.enc.encoder_attention_window_size", hp.enc_attn_window);
-        hp.enc_ln_eps   = core_gguf::kv_f32(gctx, "moss_audio.enc.layer_norm_eps", hp.enc_ln_eps);
+        hp.enc_attn_window =
+            core_gguf::kv_u32(gctx, "moss_audio.enc.encoder_attention_window_size", hp.enc_attn_window);
+        hp.enc_ln_eps = core_gguf::kv_f32(gctx, "moss_audio.enc.layer_norm_eps", hp.enc_ln_eps);
         hp.enc_head_dim = hp.enc_d_model / hp.enc_n_heads;
 
-        hp.ds_num_taps  = core_gguf::kv_u32(gctx, "moss_audio.deepstack.num_taps", hp.ds_num_taps);
+        hp.ds_num_taps = core_gguf::kv_u32(gctx, "moss_audio.deepstack.num_taps", hp.ds_num_taps);
         for (uint32_t i = 0; i < hp.ds_num_taps && i < 3; i++) {
             char key[64];
             snprintf(key, sizeof(key), "moss_audio.deepstack.tap.%u", i);
@@ -240,22 +242,22 @@ static bool moss_audio_load_model(moss_audio_model& model, moss_audio_vocab& voc
 
         hp.adapter_hidden = core_gguf::kv_u32(gctx, "moss_audio.adapter.hidden_size", hp.adapter_hidden);
 
-        hp.llm_hidden    = core_gguf::kv_u32(gctx, "moss_audio.llm.hidden_size", hp.llm_hidden);
-        hp.llm_layers    = core_gguf::kv_u32(gctx, "moss_audio.llm.num_layers", hp.llm_layers);
-        hp.llm_n_heads   = core_gguf::kv_u32(gctx, "moss_audio.llm.num_heads", hp.llm_n_heads);
+        hp.llm_hidden = core_gguf::kv_u32(gctx, "moss_audio.llm.hidden_size", hp.llm_hidden);
+        hp.llm_layers = core_gguf::kv_u32(gctx, "moss_audio.llm.num_layers", hp.llm_layers);
+        hp.llm_n_heads = core_gguf::kv_u32(gctx, "moss_audio.llm.num_heads", hp.llm_n_heads);
         hp.llm_n_kv_heads = core_gguf::kv_u32(gctx, "moss_audio.llm.num_kv_heads", hp.llm_n_kv_heads);
-        hp.llm_head_dim  = core_gguf::kv_u32(gctx, "moss_audio.llm.head_dim", hp.llm_head_dim);
-        hp.llm_ff_dim    = core_gguf::kv_u32(gctx, "moss_audio.llm.intermediate_size", hp.llm_ff_dim);
+        hp.llm_head_dim = core_gguf::kv_u32(gctx, "moss_audio.llm.head_dim", hp.llm_head_dim);
+        hp.llm_ff_dim = core_gguf::kv_u32(gctx, "moss_audio.llm.intermediate_size", hp.llm_ff_dim);
         hp.llm_vocab_size = core_gguf::kv_u32(gctx, "moss_audio.llm.vocab_size", hp.llm_vocab_size);
-        hp.llm_max_pos   = core_gguf::kv_u32(gctx, "moss_audio.llm.max_position_embeddings", hp.llm_max_pos);
+        hp.llm_max_pos = core_gguf::kv_u32(gctx, "moss_audio.llm.max_position_embeddings", hp.llm_max_pos);
         hp.llm_rope_theta = core_gguf::kv_f32(gctx, "moss_audio.llm.rope_theta", hp.llm_rope_theta);
-        hp.llm_rms_eps   = core_gguf::kv_f32(gctx, "moss_audio.llm.rms_norm_eps", hp.llm_rms_eps);
+        hp.llm_rms_eps = core_gguf::kv_f32(gctx, "moss_audio.llm.rms_norm_eps", hp.llm_rms_eps);
 
-        hp.bos_token_id   = core_gguf::kv_u32(gctx, "moss_audio.bos_token_id", hp.bos_token_id);
-        hp.eos_token_id   = core_gguf::kv_u32(gctx, "moss_audio.eos_token_id", hp.eos_token_id);
+        hp.bos_token_id = core_gguf::kv_u32(gctx, "moss_audio.bos_token_id", hp.bos_token_id);
+        hp.eos_token_id = core_gguf::kv_u32(gctx, "moss_audio.eos_token_id", hp.eos_token_id);
         hp.audio_token_id = core_gguf::kv_u32(gctx, "moss_audio.audio_token_id", hp.audio_token_id);
         hp.audio_start_id = core_gguf::kv_u32(gctx, "moss_audio.audio_start_id", hp.audio_start_id);
-        hp.audio_end_id   = core_gguf::kv_u32(gctx, "moss_audio.audio_end_id", hp.audio_end_id);
+        hp.audio_end_id = core_gguf::kv_u32(gctx, "moss_audio.audio_end_id", hp.audio_end_id);
 
         // Vocab
         auto tokens = core_gguf::kv_str_array(gctx, "tokenizer.ggml.tokens");
@@ -268,9 +270,12 @@ static bool moss_audio_load_model(moss_audio_model& model, moss_audio_vocab& voc
         }
 
         // Patch special tokens
-        struct SpecialTok { int id; const char* text; };
+        struct SpecialTok {
+            int id;
+            const char* text;
+        };
         static const SpecialTok specials[] = {
-            {151643, "<|endoftext|>"}, {151644, "<|im_start|>"}, {151645, "<|im_end|>"},
+            {151643, "<|endoftext|>"}, {151644, "<|im_start|>"},  {151645, "<|im_end|>"},
             {151654, "<|AUDIO|>"},     {151669, "<|audio_bos|>"}, {151670, "<|audio_eos|>"},
         };
         for (const auto& sp : specials) {
@@ -343,7 +348,7 @@ static bool moss_audio_load_model(moss_audio_model& model, moss_audio_vocab& voc
 
     // Adapter
     model.adapter.gate_w = require(model, "adapter.gate.weight");
-    model.adapter.up_w   = require(model, "adapter.up.weight");
+    model.adapter.up_w = require(model, "adapter.up.weight");
     model.adapter.down_w = require(model, "adapter.down.weight");
 
     // DeepStack mergers
@@ -371,17 +376,17 @@ static bool moss_audio_load_model(moss_audio_model& model, moss_audio_vocab& voc
             snprintf(buf, sizeof(buf), "llm.blk.%u.%s", i, suf);
             return require(model, buf);
         };
-        b.attn_norm_w  = get("attn_norm.weight");
-        b.attn_q_w     = get("attn.q.weight");
-        b.attn_k_w     = get("attn.k.weight");
-        b.attn_v_w     = get("attn.v.weight");
-        b.attn_o_w     = get("attn.o.weight");
+        b.attn_norm_w = get("attn_norm.weight");
+        b.attn_q_w = get("attn.q.weight");
+        b.attn_k_w = get("attn.k.weight");
+        b.attn_v_w = get("attn.v.weight");
+        b.attn_o_w = get("attn.o.weight");
         b.attn_q_norm_w = get("attn.q_norm.weight");
         b.attn_k_norm_w = get("attn.k_norm.weight");
-        b.ffn_norm_w   = get("ffn_norm.weight");
-        b.ffn_gate_w   = get("ffn.gate.weight");
-        b.ffn_up_w     = get("ffn.up.weight");
-        b.ffn_down_w   = get("ffn.down.weight");
+        b.ffn_norm_w = get("ffn_norm.weight");
+        b.ffn_gate_w = get("ffn.gate.weight");
+        b.ffn_up_w = get("ffn.up.weight");
+        b.ffn_down_w = get("ffn.down.weight");
     }
 
     // ---- precompute sinusoidal position embeddings ----
@@ -405,10 +410,11 @@ static bool moss_audio_load_model(moss_audio_model& model, moss_audio_vocab& voc
     }
 
     const auto& hp = model.hparams;
-    fprintf(stderr, "moss_audio: loaded %u enc layers (d=%u), adapter (hidden=%u), "
+    fprintf(stderr,
+            "moss_audio: loaded %u enc layers (d=%u), adapter (hidden=%u), "
             "%u deepstack taps, %u LLM layers (d=%u), vocab=%u\n",
-            hp.enc_layers, hp.enc_d_model, hp.adapter_hidden,
-            hp.ds_num_taps, hp.llm_layers, hp.llm_hidden, hp.llm_vocab_size);
+            hp.enc_layers, hp.enc_d_model, hp.adapter_hidden, hp.ds_num_taps, hp.llm_layers, hp.llm_hidden,
+            hp.llm_vocab_size);
 
     return true;
 }
@@ -431,11 +437,21 @@ static void moss_audio_dft(const float* in, int N, float* out) {
 }
 
 static void moss_audio_fft(float* in, int N, float* out) {
-    if (N == 1) { out[0] = in[0]; out[1] = 0.0f; return; }
+    if (N == 1) {
+        out[0] = in[0];
+        out[1] = 0.0f;
+        return;
+    }
     int half_N = N / 2;
-    if (N - half_N * 2 == 1) { moss_audio_dft(in, N, out); return; }
+    if (N - half_N * 2 == 1) {
+        moss_audio_dft(in, N, out);
+        return;
+    }
     std::vector<float> even_in(half_N), odd_in(half_N);
-    for (int i = 0; i < half_N; i++) { even_in[i] = in[2 * i]; odd_in[i] = in[2 * i + 1]; }
+    for (int i = 0; i < half_N; i++) {
+        even_in[i] = in[2 * i];
+        odd_in[i] = in[2 * i + 1];
+    }
     std::vector<float> even_out(2 * half_N), odd_out(2 * half_N);
     moss_audio_fft(even_in.data(), half_N, even_out.data());
     moss_audio_fft(odd_in.data(), half_N, odd_out.data());
@@ -455,10 +471,10 @@ static void moss_audio_fft(float* in, int N, float* out) {
 // Mel spectrogram (Whisper-style, 128-bin)
 // ===========================================================================
 
-extern "C" float* moss_audio_compute_mel(struct moss_audio_context* ctx,
-                                         const float* samples, int n_samples,
+extern "C" float* moss_audio_compute_mel(struct moss_audio_context* ctx, const float* samples, int n_samples,
                                          int* out_n_mels, int* out_T_mel) {
-    if (!ctx || !samples || n_samples <= 0) return nullptr;
+    if (!ctx || !samples || n_samples <= 0)
+        return nullptr;
     const auto& hp = ctx->model.hparams;
     const int n_fft = (int)hp.n_fft;
     const int hop = (int)hp.hop_length;
@@ -473,9 +489,8 @@ extern "C" float* moss_audio_compute_mel(struct moss_audio_context* ctx,
     // Mel filterbank — Whisper uses slaney mel scale with slaney area norm
     // (librosa default: htk=False, norm='slaney'). core_mel::build_slaney_fb
     // matches this exactly.
-    std::vector<float> mel_filters = core_mel::build_slaney_fb(
-        (int)hp.sample_rate, n_fft, n_mels_val, 0.0f, -1.0f,
-        core_mel::FbLayout::MelsFreqs);
+    std::vector<float> mel_filters =
+        core_mel::build_slaney_fb((int)hp.sample_rate, n_fft, n_mels_val, 0.0f, -1.0f, core_mel::FbLayout::MelsFreqs);
 
     // STFT + mel + log via core_mel
     core_mel::FftR2C fft_fn = [](const float* in, int N, float* out) {
@@ -496,9 +511,8 @@ extern "C" float* moss_audio_compute_mel(struct moss_audio_context* ctx,
     mel_params.center_pad_reflect = true; // WhisperFeatureExtractor uses reflect padding
 
     int T_mel_actual = 0;
-    std::vector<float> mel_out = core_mel::compute(
-        samples, n_samples, hann.data(), n_fft,
-        mel_filters.data(), n_freqs, fft_fn, mel_params, T_mel_actual);
+    std::vector<float> mel_out = core_mel::compute(samples, n_samples, hann.data(), n_fft, mel_filters.data(), n_freqs,
+                                                   fft_fn, mel_params, T_mel_actual);
 
     // Pad to 3000 frames (30s Whisper convention) — WhisperFeatureExtractor
     // always pads to nb_max_frames=3000. The encoder chunks this into 400-frame
@@ -510,8 +524,7 @@ extern "C" float* moss_audio_compute_mel(struct moss_audio_context* ctx,
         std::vector<float> padded((size_t)n_mels_val * T_padded, 0.0f);
         // mel_out is (n_mels, T_mel_actual) row-major
         for (int f = 0; f < n_mels_val; f++) {
-            memcpy(padded.data() + (size_t)f * T_padded,
-                   mel_out.data() + (size_t)f * T_mel_actual,
+            memcpy(padded.data() + (size_t)f * T_padded, mel_out.data() + (size_t)f * T_mel_actual,
                    (size_t)T_mel_actual * sizeof(float));
         }
         mel_out = std::move(padded);
@@ -520,8 +533,10 @@ extern "C" float* moss_audio_compute_mel(struct moss_audio_context* ctx,
 
     float* result = (float*)malloc(mel_out.size() * sizeof(float));
     memcpy(result, mel_out.data(), mel_out.size() * sizeof(float));
-    if (out_n_mels) *out_n_mels = n_mels_val;
-    if (out_T_mel) *out_T_mel = T_mel_actual;
+    if (out_n_mels)
+        *out_n_mels = n_mels_val;
+    if (out_T_mel)
+        *out_T_mel = T_mel_actual;
     return result;
 }
 
@@ -530,13 +545,13 @@ extern "C" float* moss_audio_compute_mel(struct moss_audio_context* ctx,
 // ===========================================================================
 
 // Conv2d stride-2 downsampling: input (n_mels, T) → output shape after 3 convs
-static int conv_out_len(int L) { return (L - 1) / 2 + 1; }
+static int conv_out_len(int L) {
+    return (L - 1) / 2 + 1;
+}
 
-static ggml_cgraph* moss_audio_build_encoder_graph(
-    moss_audio_context* ctx, int T_mel,
-    // Output: encoder hidden states + deepstack taps
-    bool capture_deepstack)
-{
+static ggml_cgraph* moss_audio_build_encoder_graph(moss_audio_context* ctx, int T_mel,
+                                                   // Output: encoder hidden states + deepstack taps
+                                                   bool capture_deepstack) {
     const auto& hp = ctx->model.hparams;
     const auto& enc = ctx->model.enc;
     const int n_mels = (int)hp.n_mels;
@@ -551,8 +566,8 @@ static ggml_cgraph* moss_audio_build_encoder_graph(
     int T_down = conv_out_len(T2);
 
     // Estimate graph size
-     // 512 MB compute buffer estimate
-    struct ggml_init_params gparams = { ctx->compute_meta.size(), ctx->compute_meta.data(), true };
+    // 512 MB compute buffer estimate
+    struct ggml_init_params gparams = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
     ggml_context* ctx0 = ggml_init(gparams);
     ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 16384, false);
 
@@ -684,10 +699,12 @@ static ggml_cgraph* moss_audio_build_encoder_graph(
 
         // Q, K, V projections
         ggml_tensor* Q = ggml_mul_mat(ctx0, blk.attn_q_w, h);
-        if (blk.attn_q_b) Q = ggml_add(ctx0, Q, blk.attn_q_b);
+        if (blk.attn_q_b)
+            Q = ggml_add(ctx0, Q, blk.attn_q_b);
         ggml_tensor* K = ggml_mul_mat(ctx0, blk.attn_k_w, h);
         ggml_tensor* V = ggml_mul_mat(ctx0, blk.attn_v_w, h);
-        if (blk.attn_v_b) V = ggml_add(ctx0, V, blk.attn_v_b);
+        if (blk.attn_v_b)
+            V = ggml_add(ctx0, V, blk.attn_v_b);
 
         // Reshape to (head_dim, n_heads, T), then permute to (hd, T, n_h)
         Q = ggml_reshape_3d(ctx0, Q, head_dim, n_heads, T_down);
@@ -714,7 +731,8 @@ static ggml_cgraph* moss_audio_build_encoder_graph(
 
         // Output projection
         ggml_tensor* attn_out = ggml_mul_mat(ctx0, blk.attn_o_w, attn);
-        if (blk.attn_o_b) attn_out = ggml_add(ctx0, attn_out, blk.attn_o_b);
+        if (blk.attn_o_b)
+            attn_out = ggml_add(ctx0, attn_out, blk.attn_o_b);
 
         x = ggml_add(ctx0, residual, attn_out);
 
@@ -757,7 +775,8 @@ static ggml_cgraph* moss_audio_build_encoder_graph(
 
     // Also build forward for deepstack taps
     for (int t = 0; t < 3; t++) {
-        if (ds_taps[t]) ggml_build_forward_expand(gf, ds_taps[t]);
+        if (ds_taps[t])
+            ggml_build_forward_expand(gf, ds_taps[t]);
     }
 
     return gf;
@@ -767,13 +786,11 @@ static ggml_cgraph* moss_audio_build_encoder_graph(
 // Adapter + DeepStack projection graph
 // ===========================================================================
 
-static ggml_cgraph* moss_audio_build_adapter_graph(
-    moss_audio_context* ctx, int T_enc)
-{
+static ggml_cgraph* moss_audio_build_adapter_graph(moss_audio_context* ctx, int T_enc) {
     const auto& hp = ctx->model.hparams;
     const int d_enc = (int)hp.enc_d_model;
 
-    struct ggml_init_params gparams = { ctx->compute_meta.size(), ctx->compute_meta.data(), true };
+    struct ggml_init_params gparams = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
     ggml_context* ctx0 = ggml_init(gparams);
     ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 4096, false);
 
@@ -783,8 +800,8 @@ static ggml_cgraph* moss_audio_build_adapter_graph(
     ggml_set_input(enc_out);
 
     // Audio adapter: GatedMLP (SwiGLU)
-    ggml_tensor* adapted = core_ffn::swiglu(ctx0, enc_out,
-        ctx->model.adapter.gate_w, ctx->model.adapter.up_w, ctx->model.adapter.down_w);
+    ggml_tensor* adapted =
+        core_ffn::swiglu(ctx0, enc_out, ctx->model.adapter.gate_w, ctx->model.adapter.up_w, ctx->model.adapter.down_w);
     ggml_set_name(adapted, "adapter_output");
     ggml_set_output(adapted);
     ggml_build_forward_expand(gf, adapted);
@@ -797,9 +814,8 @@ static ggml_cgraph* moss_audio_build_adapter_graph(
         ggml_set_name(ds_in, name);
         ggml_set_input(ds_in);
 
-        ggml_tensor* ds_proj = core_ffn::swiglu(ctx0, ds_in,
-            ctx->model.deepstack[i].gate_w, ctx->model.deepstack[i].up_w,
-            ctx->model.deepstack[i].down_w);
+        ggml_tensor* ds_proj = core_ffn::swiglu(ctx0, ds_in, ctx->model.deepstack[i].gate_w,
+                                                ctx->model.deepstack[i].up_w, ctx->model.deepstack[i].down_w);
         snprintf(name, sizeof(name), "ds_proj_%u", i);
         ggml_set_name(ds_proj, name);
         ggml_set_output(ds_proj);
@@ -813,11 +829,11 @@ static ggml_cgraph* moss_audio_build_adapter_graph(
 // Encoder + Adapter execution
 // ===========================================================================
 
-extern "C" float* moss_audio_run_encoder(struct moss_audio_context* ctx,
-                                          const float* mel, int n_mels, int T_mel,
-                                          int* out_T_enc, int* out_d,
-                                          float** ds_tap_0, float** ds_tap_1, float** ds_tap_2) {
-    if (!ctx || !mel) return nullptr;
+extern "C" float* moss_audio_run_encoder(struct moss_audio_context* ctx, const float* mel, int n_mels, int T_mel,
+                                         int* out_T_enc, int* out_d, float** ds_tap_0, float** ds_tap_1,
+                                         float** ds_tap_2) {
+    if (!ctx || !mel)
+        return nullptr;
     const auto& hp = ctx->model.hparams;
     const int d = (int)hp.enc_d_model;
     const bool want_ds = (ds_tap_0 || ds_tap_1 || ds_tap_2);
@@ -832,7 +848,8 @@ extern "C" float* moss_audio_run_encoder(struct moss_audio_context* ctx,
     int num_chunks = (T_mel + chunk_frames - 1) / chunk_frames;
     std::vector<int> chunk_lengths(num_chunks, chunk_frames);
     int tail = T_mel % chunk_frames;
-    if (tail > 0) chunk_lengths[num_chunks - 1] = tail;
+    if (tail > 0)
+        chunk_lengths[num_chunks - 1] = tail;
     // If tail == 0, last chunk is full (chunk_frames)
 
     // For each chunk, compute valid output length after 3× stride-2 conv
@@ -847,7 +864,8 @@ extern "C" float* moss_audio_run_encoder(struct moss_audio_context* ctx,
     const int T_chunk_down = conv_out_len(conv_out_len(conv_out_len(chunk_frames)));
 
     if (ctx->params.verbosity >= 1)
-        fprintf(stderr, "moss_audio: encoder chunking: %d chunks of %d frames, "
+        fprintf(stderr,
+                "moss_audio: encoder chunking: %d chunks of %d frames, "
                 "total_valid=%d tokens (T_chunk_down=%d)\n",
                 num_chunks, chunk_frames, total_valid, T_chunk_down);
 
@@ -855,9 +873,12 @@ extern "C" float* moss_audio_run_encoder(struct moss_audio_context* ctx,
     float* result = (float*)malloc((size_t)d * total_valid * sizeof(float));
     float* ds_results[3] = {nullptr, nullptr, nullptr};
     if (want_ds) {
-        if (ds_tap_0) ds_results[0] = (float*)malloc((size_t)d * total_valid * sizeof(float));
-        if (ds_tap_1) ds_results[1] = (float*)malloc((size_t)d * total_valid * sizeof(float));
-        if (ds_tap_2) ds_results[2] = (float*)malloc((size_t)d * total_valid * sizeof(float));
+        if (ds_tap_0)
+            ds_results[0] = (float*)malloc((size_t)d * total_valid * sizeof(float));
+        if (ds_tap_1)
+            ds_results[1] = (float*)malloc((size_t)d * total_valid * sizeof(float));
+        if (ds_tap_2)
+            ds_results[2] = (float*)malloc((size_t)d * total_valid * sizeof(float));
     }
 
     int out_offset = 0; // write position in output buffers
@@ -875,8 +896,7 @@ extern "C" float* moss_audio_run_encoder(struct moss_audio_context* ctx,
         // data ne[0]=n_mels and KH (ne[1]) along data ne[1]=T.
         for (int t = 0; t < t_len; t++) {
             for (int f = 0; f < n_mels; f++) {
-                chunk_mel[(size_t)f + n_mels * (size_t)t] =
-                    mel[(size_t)f * T_mel + t_start + t];
+                chunk_mel[(size_t)f + n_mels * (size_t)t] = mel[(size_t)f * T_mel + t_start + t];
             }
         }
 
@@ -886,18 +906,18 @@ extern "C" float* moss_audio_run_encoder(struct moss_audio_context* ctx,
         if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
             fprintf(stderr, "moss_audio: encoder graph alloc failed (chunk %d)\n", c);
             free(result);
-            for (int t = 0; t < 3; t++) free(ds_results[t]);
+            for (int t = 0; t < 3; t++)
+                free(ds_results[t]);
             return nullptr;
         }
 
         // Set mel input
         ggml_tensor* mel_in = ggml_graph_get_tensor(gf, "mel_input");
-        ggml_backend_tensor_set(mel_in, chunk_mel.data(), 0,
-                                (size_t)n_mels * chunk_frames * sizeof(float));
+        ggml_backend_tensor_set(mel_in, chunk_mel.data(), 0, (size_t)n_mels * chunk_frames * sizeof(float));
         if (c == 0 && ctx->params.verbosity >= 1) {
             // Verify: chunk_mel[0] = mel(f=0,t=0), chunk_mel[T] = mel(f=1,t=0)
-            fprintf(stderr, "moss_audio: mel_pack check: [0]=%f [T=%d]=%f [1]=%f\n",
-                    chunk_mel[0], chunk_frames, chunk_mel[chunk_frames], chunk_mel[1]);
+            fprintf(stderr, "moss_audio: mel_pack check: [0]=%f [T=%d]=%f [1]=%f\n", chunk_mel[0], chunk_frames,
+                    chunk_mel[chunk_frames], chunk_mel[1]);
         }
 
         // Set padding mask: bidirectional, but mask out padded positions
@@ -912,12 +932,10 @@ extern "C" float* moss_audio_run_encoder(struct moss_audio_context* ctx,
                     // Mask: valid queries attend to valid keys only.
                     // Padded queries attend to ALL keys (avoid NaN softmax;
                     // their output is discarded anyway).
-                    mask_data[(size_t)q * T_chunk_down + k] =
-                        (q >= valid) ? 0.0f : (k < valid ? 0.0f : -INFINITY);
+                    mask_data[(size_t)q * T_chunk_down + k] = (q >= valid) ? 0.0f : (k < valid ? 0.0f : -INFINITY);
                 }
             }
-            ggml_backend_tensor_set(mask_t, mask_data.data(), 0,
-                                    mask_data.size() * sizeof(float));
+            ggml_backend_tensor_set(mask_t, mask_data.data(), 0, mask_data.size() * sizeof(float));
         }
 
         // Set positional embedding for this chunk
@@ -937,7 +955,8 @@ extern "C" float* moss_audio_run_encoder(struct moss_audio_context* ctx,
         if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
             fprintf(stderr, "moss_audio: encoder graph compute failed (chunk %d)\n", c);
             free(result);
-            for (int t = 0; t < 3; t++) free(ds_results[t]);
+            for (int t = 0; t < 3; t++)
+                free(ds_results[t]);
             return nullptr;
         }
 
@@ -947,11 +966,12 @@ extern "C" float* moss_audio_run_encoder(struct moss_audio_context* ctx,
             if (stem_t) {
                 std::vector<float> stem_buf(ggml_nelements(stem_t));
                 ggml_backend_tensor_get(stem_t, stem_buf.data(), 0, stem_buf.size() * sizeof(float));
-                fprintf(stderr, "moss_audio: stem_proj[0] first8=[%.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f] absmax=%.2f\n",
-                        stem_buf[0], stem_buf[1], stem_buf[2], stem_buf[3],
-                        stem_buf[4], stem_buf[5], stem_buf[6], stem_buf[7],
-                        *std::max_element(stem_buf.begin(), stem_buf.end(),
-                            [](float a, float b){ return fabsf(a) < fabsf(b); }));
+                fprintf(stderr,
+                        "moss_audio: stem_proj[0] first8=[%.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f] absmax=%.2f\n",
+                        stem_buf[0], stem_buf[1], stem_buf[2], stem_buf[3], stem_buf[4], stem_buf[5], stem_buf[6],
+                        stem_buf[7], *std::max_element(stem_buf.begin(), stem_buf.end(), [](float a, float b) {
+                            return fabsf(a) < fabsf(b);
+                        }));
             }
         }
 
@@ -960,26 +980,27 @@ extern "C" float* moss_audio_run_encoder(struct moss_audio_context* ctx,
         if (!enc_out) {
             fprintf(stderr, "moss_audio: missing encoder_output (chunk %d)\n", c);
             free(result);
-            for (int t = 0; t < 3; t++) free(ds_results[t]);
+            for (int t = 0; t < 3; t++)
+                free(ds_results[t]);
             return nullptr;
         }
 
         int valid = valid_lens[c];
         // enc_out shape: ne=(d, T_chunk_down). Copy only first `valid` rows.
         // Row t starts at offset t * d (ggml ne[0]=d is the fast dim).
-        ggml_backend_tensor_get(enc_out, result + (size_t)out_offset * d,
-                                0, (size_t)valid * d * sizeof(float));
+        ggml_backend_tensor_get(enc_out, result + (size_t)out_offset * d, 0, (size_t)valid * d * sizeof(float));
 
         // Extract deepstack taps (same valid subset)
         if (want_ds) {
             for (int t = 0; t < 3; t++) {
-                if (!ds_results[t]) continue;
+                if (!ds_results[t])
+                    continue;
                 char name[32];
                 snprintf(name, sizeof(name), "ds_tap_%d", t);
                 ggml_tensor* tap = ggml_graph_get_tensor(gf, name);
                 if (tap) {
-                    ggml_backend_tensor_get(tap, ds_results[t] + (size_t)out_offset * d,
-                                            0, (size_t)valid * d * sizeof(float));
+                    ggml_backend_tensor_get(tap, ds_results[t] + (size_t)out_offset * d, 0,
+                                            (size_t)valid * d * sizeof(float));
                 }
             }
         }
@@ -987,19 +1008,24 @@ extern "C" float* moss_audio_run_encoder(struct moss_audio_context* ctx,
         out_offset += valid;
     }
 
-    if (out_T_enc) *out_T_enc = total_valid;
-    if (out_d) *out_d = d;
-    if (ds_tap_0) *ds_tap_0 = ds_results[0];
-    if (ds_tap_1) *ds_tap_1 = ds_results[1];
-    if (ds_tap_2) *ds_tap_2 = ds_results[2];
+    if (out_T_enc)
+        *out_T_enc = total_valid;
+    if (out_d)
+        *out_d = d;
+    if (ds_tap_0)
+        *ds_tap_0 = ds_results[0];
+    if (ds_tap_1)
+        *ds_tap_1 = ds_results[1];
+    if (ds_tap_2)
+        *ds_tap_2 = ds_results[2];
 
     return result;
 }
 
-extern "C" float* moss_audio_run_adapter(struct moss_audio_context* ctx,
-                                          const float* encoder_out, int T_enc, int d_enc,
-                                          int* out_T, int* out_d) {
-    if (!ctx || !encoder_out) return nullptr;
+extern "C" float* moss_audio_run_adapter(struct moss_audio_context* ctx, const float* encoder_out, int T_enc, int d_enc,
+                                         int* out_T, int* out_d) {
+    if (!ctx || !encoder_out)
+        return nullptr;
     const auto& hp = ctx->model.hparams;
     const int d_llm = (int)hp.llm_hidden;
 
@@ -1019,10 +1045,13 @@ extern "C" float* moss_audio_run_adapter(struct moss_audio_context* ctx,
     }
 
     ggml_tensor* out = ggml_graph_get_tensor(gf, "adapter_output");
-    if (!out) return nullptr;
+    if (!out)
+        return nullptr;
 
-    if (out_T) *out_T = T_enc;
-    if (out_d) *out_d = d_llm;
+    if (out_T)
+        *out_T = T_enc;
+    if (out_d)
+        *out_d = d_llm;
 
     float* result = (float*)malloc((size_t)d_llm * T_enc * sizeof(float));
     ggml_backend_tensor_get(out, result, 0, (size_t)d_llm * T_enc * sizeof(float));
@@ -1030,11 +1059,8 @@ extern "C" float* moss_audio_run_adapter(struct moss_audio_context* ctx,
 }
 
 // Run deepstack mergers on captured taps. Returns 3 buffers of (T_enc, d_llm).
-static void moss_audio_run_deepstack_mergers(
-    moss_audio_context* ctx,
-    float* ds_taps[3], int T_enc, int d_enc,
-    float* ds_projs[3])
-{
+static void moss_audio_run_deepstack_mergers(moss_audio_context* ctx, float* ds_taps[3], int T_enc, int d_enc,
+                                             float* ds_projs[3]) {
     const auto& hp = ctx->model.hparams;
     const int d_llm = (int)hp.llm_hidden;
 
@@ -1048,7 +1074,8 @@ static void moss_audio_run_deepstack_mergers(
 
     // Set the deepstack tap inputs
     for (uint32_t i = 0; i < hp.ds_num_taps && i < 3; i++) {
-        if (!ds_taps[i]) continue;
+        if (!ds_taps[i])
+            continue;
         char name[32];
         snprintf(name, sizeof(name), "ds_tap_%u_in", i);
         ggml_tensor* t = ggml_graph_get_tensor(gf, name);
@@ -1090,13 +1117,11 @@ static void moss_audio_run_deepstack_mergers(
 // ===========================================================================
 
 static ggml_cgraph* moss_audio_build_llm_kv_graph(
-    moss_audio_context* ctx, int n_tokens, int n_past,
-    bool last_token_only,
+    moss_audio_context* ctx, int n_tokens, int n_past, bool last_token_only,
     // DeepStack injection: if non-null, add these as residuals at LM layers 0..2
     // for positions where audio_mask[pos] is true
-    int n_audio_tokens,  // length of deepstack projections
-    bool has_deepstack)
-{
+    int n_audio_tokens, // length of deepstack projections
+    bool has_deepstack) {
     const auto& hp = ctx->model.hparams;
     const auto& llm = ctx->model.llm;
     const int d = (int)hp.llm_hidden;
@@ -1105,7 +1130,7 @@ static ggml_cgraph* moss_audio_build_llm_kv_graph(
     const int head_dim = (int)hp.llm_head_dim;
     const int Lk = n_past + n_tokens;
 
-    struct ggml_init_params gparams = { ctx->compute_meta.size(), ctx->compute_meta.data(), true };
+    struct ggml_init_params gparams = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
     ggml_context* ctx0 = ggml_init(gparams);
     ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 16384, false);
 
@@ -1157,13 +1182,9 @@ static ggml_cgraph* moss_audio_build_llm_kv_graph(
         h = ggml_mul(ctx0, h, blk.attn_norm_w);
 
         // Self-attention with KV cache
-        ggml_tensor* attn_out = core_attn::kv_self_attn(
-            ctx0, gf, h,
-            blk.attn_q_w, blk.attn_k_w, blk.attn_v_w, blk.attn_o_w,
-            blk.attn_q_norm_w, blk.attn_k_norm_w,
-            positions, causal_mask,
-            ctx->kv_k, ctx->kv_v,
-            (int)il, n_past, attn_p);
+        ggml_tensor* attn_out = core_attn::kv_self_attn(ctx0, gf, h, blk.attn_q_w, blk.attn_k_w, blk.attn_v_w,
+                                                        blk.attn_o_w, blk.attn_q_norm_w, blk.attn_k_norm_w, positions,
+                                                        causal_mask, ctx->kv_k, ctx->kv_v, (int)il, n_past, attn_p);
 
         cur = ggml_add(ctx0, residual, attn_out);
 
@@ -1216,7 +1237,8 @@ static ggml_cgraph* moss_audio_build_llm_kv_graph(
 // ===========================================================================
 
 extern "C" bool moss_audio_kv_init(struct moss_audio_context* ctx, int max_ctx) {
-    if (!ctx) return false;
+    if (!ctx)
+        return false;
     const auto& hp = ctx->model.hparams;
     const int n_layers = (int)hp.llm_layers;
     const int n_kv = (int)hp.llm_n_kv_heads;
@@ -1224,7 +1246,7 @@ extern "C" bool moss_audio_kv_init(struct moss_audio_context* ctx, int max_ctx) 
 
     ggml_type kv_type = core_attn::kv_dtype_from_env("moss_audio");
 
-    struct ggml_init_params kv_params = { 2 * ggml_tensor_overhead(), nullptr, true };
+    struct ggml_init_params kv_params = {2 * ggml_tensor_overhead(), nullptr, true};
     ctx->kv_ctx = ggml_init(kv_params);
     ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, kv_type, hd, max_ctx, n_kv, n_layers);
     ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, kv_type, hd, max_ctx, n_kv, n_layers);
@@ -1261,12 +1283,11 @@ extern "C" void moss_audio_kv_reset(struct moss_audio_context* ctx) {
 // ds_full[0..2] are pre-scattered (d, n_tokens) F32 tensors (zero at
 // non-audio positions, deepstack proj at audio positions). May be empty.
 // Returns logits for the last token.
-static float* moss_audio_run_llm_prefill_with_deepstack(
-    moss_audio_context* ctx, const float* inputs_embeds, int n_tokens,
-    const std::vector<float> ds_full[3], int n_audio_tokens,
-    int* out_vocab_size)
-{
-    if (!ctx || !inputs_embeds || n_tokens <= 0 || !ctx->kv_k) return nullptr;
+static float* moss_audio_run_llm_prefill_with_deepstack(moss_audio_context* ctx, const float* inputs_embeds,
+                                                        int n_tokens, const std::vector<float> ds_full[3],
+                                                        int n_audio_tokens, int* out_vocab_size) {
+    if (!ctx || !inputs_embeds || n_tokens <= 0 || !ctx->kv_k)
+        return nullptr;
     const auto& hp = ctx->model.hparams;
     const int d = (int)hp.llm_hidden;
     const int vocab = (int)hp.llm_vocab_size;
@@ -1275,8 +1296,7 @@ static float* moss_audio_run_llm_prefill_with_deepstack(
     const bool has_ds = !ds_full[0].empty();
 
     ggml_cgraph* gf = moss_audio_build_llm_kv_graph(ctx, n_tokens, n_past,
-                                                      /*last_token_only=*/true,
-                                                      n_audio_tokens, has_ds);
+                                                    /*last_token_only=*/true, n_audio_tokens, has_ds);
     ggml_backend_sched_reset(ctx->sched);
     if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
         fprintf(stderr, "moss_audio: llm prefill alloc failed\n");
@@ -1290,7 +1310,8 @@ static float* moss_audio_run_llm_prefill_with_deepstack(
     // Positions
     ggml_tensor* pos_in = ggml_graph_get_tensor(gf, "positions");
     std::vector<int32_t> positions(n_tokens);
-    for (int i = 0; i < n_tokens; i++) positions[i] = i;
+    for (int i = 0; i < n_tokens; i++)
+        positions[i] = i;
     ggml_backend_tensor_set(pos_in, positions.data(), 0, (size_t)n_tokens * sizeof(int32_t));
 
     // Causal mask
@@ -1310,13 +1331,13 @@ static float* moss_audio_run_llm_prefill_with_deepstack(
     // Set DeepStack pre-scattered tensors
     if (has_ds) {
         for (uint32_t t = 0; t < hp.ds_num_inject && t < 3; t++) {
-            if (ds_full[t].empty()) continue;
+            if (ds_full[t].empty())
+                continue;
             char name[32];
             snprintf(name, sizeof(name), "ds_full_%u", t);
             ggml_tensor* ds_t = ggml_graph_get_tensor(gf, name);
             if (ds_t) {
-                ggml_backend_tensor_set(ds_t, ds_full[t].data(), 0,
-                                        ds_full[t].size() * sizeof(float));
+                ggml_backend_tensor_set(ds_t, ds_full[t].data(), 0, ds_full[t].size() * sizeof(float));
             }
         }
     }
@@ -1327,9 +1348,11 @@ static float* moss_audio_run_llm_prefill_with_deepstack(
     }
 
     ggml_tensor* logits_t = ggml_graph_get_tensor(gf, "logits");
-    if (!logits_t) return nullptr;
+    if (!logits_t)
+        return nullptr;
 
-    if (out_vocab_size) *out_vocab_size = vocab;
+    if (out_vocab_size)
+        *out_vocab_size = vocab;
     ctx->kv_n_used = n_tokens;
 
     float* result = (float*)malloc((size_t)vocab * sizeof(float));
@@ -1343,9 +1366,10 @@ static float* moss_audio_run_llm_prefill_with_deepstack(
 
 #include "core/bpe.h"
 
-extern "C" int moss_audio_tokenize(struct moss_audio_context* ctx, const char* text,
-                                   int32_t* out_tokens, int max_tokens) {
-    if (!ctx || !text || !out_tokens || max_tokens <= 0) return 0;
+extern "C" int moss_audio_tokenize(struct moss_audio_context* ctx, const char* text, int32_t* out_tokens,
+                                   int max_tokens) {
+    if (!ctx || !text || !out_tokens || max_tokens <= 0)
+        return 0;
     const auto& v = ctx->vocab;
     std::vector<int32_t> result;
 
@@ -1368,28 +1392,34 @@ extern "C" int moss_audio_tokenize(struct moss_audio_context* ctx, const char* t
 
         // 2. Plain text segment up to next special token
         size_t j = i;
-        if (s[j] == '<' && j + 1 < s.size() && s[j + 1] == '|') j++;
+        if (s[j] == '<' && j + 1 < s.size() && s[j + 1] == '|')
+            j++;
         while (j < s.size()) {
             if (s[j] == '<' && j + 1 < s.size() && s[j + 1] == '|') {
                 size_t end = s.find("|>", j + 2);
                 if (end != std::string::npos) {
                     std::string special = s.substr(j, end + 2 - j);
-                    if (v.token_to_id.find(special) != v.token_to_id.end()) break;
+                    if (v.token_to_id.find(special) != v.token_to_id.end())
+                        break;
                 }
             }
             j++;
         }
         std::string chunk = s.substr(i, j - i);
         i = j;
-        if (chunk.empty()) continue;
+        if (chunk.empty())
+            continue;
 
         // 3. Pre-split on whitespace boundaries (GPT-2 style)
         size_t k = 0;
         while (k < chunk.size()) {
             size_t start = k;
-            if (chunk[k] == ' ' || chunk[k] == '\t' || chunk[k] == '\n') k++;
-            while (k < chunk.size() && chunk[k] != ' ' && chunk[k] != '\t' && chunk[k] != '\n') k++;
-            if (k == start) k++;
+            if (chunk[k] == ' ' || chunk[k] == '\t' || chunk[k] == '\n')
+                k++;
+            while (k < chunk.size() && chunk[k] != ' ' && chunk[k] != '\t' && chunk[k] != '\n')
+                k++;
+            if (k == start)
+                k++;
             std::string pre(chunk, start, k - start);
 
             // 4. Byte-encode via GPT-2 table and BPE-merge
@@ -1413,13 +1443,13 @@ extern "C" const char* moss_audio_token_text(struct moss_audio_context* ctx, int
 // Embed tokens
 // ===========================================================================
 
-extern "C" float* moss_audio_embed_tokens(struct moss_audio_context* ctx,
-                                           const int32_t* token_ids, int n_tokens) {
-    if (!ctx || !token_ids || n_tokens <= 0) return nullptr;
+extern "C" float* moss_audio_embed_tokens(struct moss_audio_context* ctx, const int32_t* token_ids, int n_tokens) {
+    if (!ctx || !token_ids || n_tokens <= 0)
+        return nullptr;
     const int d = (int)ctx->model.hparams.llm_hidden;
 
     // Build a tiny graph: embed_tokens lookup
-    struct ggml_init_params gp = { ctx->compute_meta.size(), ctx->compute_meta.data(), true };
+    struct ggml_init_params gp = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
     ggml_context* ctx0 = ggml_init(gp);
     ggml_cgraph* gf = ggml_new_graph(ctx0);
 
@@ -1456,10 +1486,10 @@ extern "C" float* moss_audio_embed_tokens(struct moss_audio_context* ctx,
 // Run LLM with KV cache
 // ===========================================================================
 
-extern "C" float* moss_audio_run_llm_kv(struct moss_audio_context* ctx,
-                                         const float* inputs_embeds, int n_tokens, int n_past,
-                                         int* out_n_tokens, int* out_vocab_size) {
-    if (!ctx || !inputs_embeds || n_tokens <= 0) return nullptr;
+extern "C" float* moss_audio_run_llm_kv(struct moss_audio_context* ctx, const float* inputs_embeds, int n_tokens,
+                                        int n_past, int* out_n_tokens, int* out_vocab_size) {
+    if (!ctx || !inputs_embeds || n_tokens <= 0)
+        return nullptr;
     if (!ctx->kv_k) {
         fprintf(stderr, "moss_audio: kv cache not initialized\n");
         return nullptr;
@@ -1470,8 +1500,7 @@ extern "C" float* moss_audio_run_llm_kv(struct moss_audio_context* ctx,
     const int Lk = n_past + n_tokens;
 
     ggml_cgraph* gf = moss_audio_build_llm_kv_graph(ctx, n_tokens, n_past,
-                                                      /*last_token_only=*/true,
-                                                      0, false);
+                                                    /*last_token_only=*/true, 0, false);
     ggml_backend_sched_reset(ctx->sched);
     if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
         fprintf(stderr, "moss_audio: llm graph alloc failed\n");
@@ -1484,7 +1513,8 @@ extern "C" float* moss_audio_run_llm_kv(struct moss_audio_context* ctx,
 
     ggml_tensor* pos_in = ggml_graph_get_tensor(gf, "positions");
     std::vector<int32_t> positions(n_tokens);
-    for (int i = 0; i < n_tokens; i++) positions[i] = n_past + i;
+    for (int i = 0; i < n_tokens; i++)
+        positions[i] = n_past + i;
     ggml_backend_tensor_set(pos_in, positions.data(), 0, (size_t)n_tokens * sizeof(int32_t));
 
     if (n_tokens > 1) {
@@ -1507,10 +1537,13 @@ extern "C" float* moss_audio_run_llm_kv(struct moss_audio_context* ctx,
     }
 
     ggml_tensor* logits_t = ggml_graph_get_tensor(gf, "logits");
-    if (!logits_t) return nullptr;
+    if (!logits_t)
+        return nullptr;
 
-    if (out_n_tokens) *out_n_tokens = 1; // last_token_only
-    if (out_vocab_size) *out_vocab_size = vocab;
+    if (out_n_tokens)
+        *out_n_tokens = 1; // last_token_only
+    if (out_vocab_size)
+        *out_vocab_size = vocab;
 
     float* result = (float*)malloc((size_t)vocab * sizeof(float));
     ggml_backend_tensor_get(logits_t, result, 0, (size_t)vocab * sizeof(float));
@@ -1523,9 +1556,8 @@ extern "C" float* moss_audio_run_llm_kv(struct moss_audio_context* ctx,
 // ===========================================================================
 
 // Build the chat-template prompt with audio tokens
-static std::vector<int32_t> moss_audio_build_prompt(
-    moss_audio_context* ctx, const char* text_prompt, int n_audio_tokens)
-{
+static std::vector<int32_t> moss_audio_build_prompt(moss_audio_context* ctx, const char* text_prompt,
+                                                    int n_audio_tokens) {
     const auto& hp = ctx->model.hparams;
     std::vector<int32_t> ids;
 
@@ -1533,7 +1565,8 @@ static std::vector<int32_t> moss_audio_build_prompt(
     auto push_text = [&](const char* t) {
         int32_t buf[4096];
         int n = moss_audio_tokenize(ctx, t, buf, 4096);
-        for (int i = 0; i < n; i++) ids.push_back(buf[i]);
+        for (int i = 0; i < n; i++)
+            ids.push_back(buf[i]);
     };
 
     // <|im_start|>
@@ -1593,17 +1626,19 @@ static std::vector<int32_t> moss_audio_build_prompt(
     return ids;
 }
 
-extern "C" char* moss_audio_process(struct moss_audio_context* ctx, const float* samples,
-                                     int n_samples, const char* prompt) {
-    if (!ctx || !samples || n_samples <= 0) return nullptr;
-    if (!prompt) prompt = "Transcribe this audio.";
+extern "C" char* moss_audio_process(struct moss_audio_context* ctx, const float* samples, int n_samples,
+                                    const char* prompt) {
+    if (!ctx || !samples || n_samples <= 0)
+        return nullptr;
+    if (!prompt)
+        prompt = "Transcribe this audio.";
 
     const auto& hp = ctx->model.hparams;
     const int d_llm = (int)hp.llm_hidden;
 
     if (ctx->params.verbosity >= 1)
-        fprintf(stderr, "moss_audio: processing %d samples (%.1f sec), prompt=\"%s\"\n",
-                n_samples, (float)n_samples / (float)hp.sample_rate, prompt);
+        fprintf(stderr, "moss_audio: processing %d samples (%.1f sec), prompt=\"%s\"\n", n_samples,
+                (float)n_samples / (float)hp.sample_rate, prompt);
 
     // 1. Mel spectrogram (or load from file for debugging)
     int n_mels = 0, T_mel = 0;
@@ -1627,16 +1662,21 @@ extern "C" char* moss_audio_process(struct moss_audio_context* ctx, const float*
     if (!mel) {
         mel = moss_audio_compute_mel(ctx, samples, n_samples, &n_mels, &T_mel);
     }
-    if (!mel) { fprintf(stderr, "moss_audio: mel failed\n"); return nullptr; }
+    if (!mel) {
+        fprintf(stderr, "moss_audio: mel failed\n");
+        return nullptr;
+    }
 
     // 2. Run audio encoder (with DeepStack tap capture)
     int T_enc = 0, enc_d = 0;
     float *ds_tap_0 = nullptr, *ds_tap_1 = nullptr, *ds_tap_2 = nullptr;
-    float* encoder_out = moss_audio_run_encoder(ctx, mel, n_mels, T_mel,
-                                                 &T_enc, &enc_d,
-                                                 &ds_tap_0, &ds_tap_1, &ds_tap_2);
+    float* encoder_out =
+        moss_audio_run_encoder(ctx, mel, n_mels, T_mel, &T_enc, &enc_d, &ds_tap_0, &ds_tap_1, &ds_tap_2);
     free(mel);
-    if (!encoder_out) { fprintf(stderr, "moss_audio: encoder failed\n"); return nullptr; }
+    if (!encoder_out) {
+        fprintf(stderr, "moss_audio: encoder failed\n");
+        return nullptr;
+    }
 
     if (ctx->params.verbosity >= 1) {
         fprintf(stderr, "moss_audio: encoder done: %d frames × %d dims\n", T_enc, enc_d);
@@ -1645,11 +1685,11 @@ extern "C" char* moss_audio_process(struct moss_audio_context* ctx, const float*
         for (int i = 0; i < T_enc * enc_d; i++) {
             sum += encoder_out[i];
             float a = fabsf(encoder_out[i]);
-            if (a > absmax) absmax = a;
+            if (a > absmax)
+                absmax = a;
         }
         fprintf(stderr, "moss_audio: encoder out: mean=%.6f absmax=%.6f first=[%.4f %.4f %.4f %.4f]\n",
-                sum / (T_enc * enc_d), absmax,
-                encoder_out[0], encoder_out[1], encoder_out[2], encoder_out[3]);
+                sum / (T_enc * enc_d), absmax, encoder_out[0], encoder_out[1], encoder_out[2], encoder_out[3]);
     }
 
     // 3. Run audio adapter (encoder output → LLM space)
@@ -1658,22 +1698,29 @@ extern "C" char* moss_audio_process(struct moss_audio_context* ctx, const float*
         std::vector<float> small_in((size_t)T_enc * enc_d);
         std::mt19937 rng(42);
         std::normal_distribution<float> dist(0.0f, 0.1f);
-        for (auto& v : small_in) v = dist(rng);
+        for (auto& v : small_in)
+            v = dist(rng);
         int zt = 0, zd = 0;
         float* small_out = moss_audio_run_adapter(ctx, small_in.data(), T_enc, enc_d, &zt, &zd);
         if (small_out) {
             float zm = 0, za = 0;
-            for (int i = 0; i < zt * zd; i++) { zm += small_out[i]; float a = fabsf(small_out[i]); if (a > za) za = a; }
-            fprintf(stderr, "moss_audio: adapter(N(0,0.1)): mean=%.6f absmax=%.6f\n", zm/(zt*zd), za);
+            for (int i = 0; i < zt * zd; i++) {
+                zm += small_out[i];
+                float a = fabsf(small_out[i]);
+                if (a > za)
+                    za = a;
+            }
+            fprintf(stderr, "moss_audio: adapter(N(0,0.1)): mean=%.6f absmax=%.6f\n", zm / (zt * zd), za);
             free(small_out);
         }
     }
     int adapt_T = 0, adapt_d = 0;
-    float* audio_embeds = moss_audio_run_adapter(ctx, encoder_out, T_enc, enc_d,
-                                                  &adapt_T, &adapt_d);
+    float* audio_embeds = moss_audio_run_adapter(ctx, encoder_out, T_enc, enc_d, &adapt_T, &adapt_d);
     if (!audio_embeds) {
         free(encoder_out);
-        free(ds_tap_0); free(ds_tap_1); free(ds_tap_2);
+        free(ds_tap_0);
+        free(ds_tap_1);
+        free(ds_tap_2);
         return nullptr;
     }
 
@@ -1682,32 +1729,33 @@ extern "C" char* moss_audio_process(struct moss_audio_context* ctx, const float*
         for (int i = 0; i < T_enc * adapt_d; i++) {
             sum += audio_embeds[i];
             float a = fabsf(audio_embeds[i]);
-            if (a > absmax) absmax = a;
+            if (a > absmax)
+                absmax = a;
         }
-        fprintf(stderr, "moss_audio: adapter out: mean=%.6f absmax=%.6f\n",
-                sum / (T_enc * adapt_d), absmax);
+        fprintf(stderr, "moss_audio: adapter out: mean=%.6f absmax=%.6f\n", sum / (T_enc * adapt_d), absmax);
     }
 
     // 4. Run DeepStack mergers on captured taps
-    float* ds_taps_arr[3] = { ds_tap_0, ds_tap_1, ds_tap_2 };
-    float* ds_projs[3] = { nullptr, nullptr, nullptr };
+    float* ds_taps_arr[3] = {ds_tap_0, ds_tap_1, ds_tap_2};
+    float* ds_projs[3] = {nullptr, nullptr, nullptr};
     moss_audio_run_deepstack_mergers(ctx, ds_taps_arr, T_enc, enc_d, ds_projs);
     free(encoder_out);
-    free(ds_tap_0); free(ds_tap_1); free(ds_tap_2);
+    free(ds_tap_0);
+    free(ds_tap_1);
+    free(ds_tap_2);
 
     // 5. Build prompt token IDs and embed text tokens
     auto prompt_ids = moss_audio_build_prompt(ctx, prompt, T_enc);
     int n_prompt = (int)prompt_ids.size();
 
     if (ctx->params.verbosity >= 1) {
-        fprintf(stderr, "moss_audio: %d mel frames, %d enc tokens, %d prompt tokens\n",
-                T_mel, T_enc, n_prompt);
+        fprintf(stderr, "moss_audio: %d mel frames, %d enc tokens, %d prompt tokens\n", T_mel, T_enc, n_prompt);
         // Dump first and last non-audio tokens for debugging
         int n_audio = 0;
         for (int i = 0; i < n_prompt; i++)
-            if (prompt_ids[i] == (int32_t)hp.audio_token_id) n_audio++;
-        fprintf(stderr, "moss_audio: prompt: %d audio + %d text/special tokens\n",
-                n_audio, n_prompt - n_audio);
+            if (prompt_ids[i] == (int32_t)hp.audio_token_id)
+                n_audio++;
+        fprintf(stderr, "moss_audio: prompt: %d audio + %d text/special tokens\n", n_audio, n_prompt - n_audio);
         // Print first 15 and last 10 token IDs
         fprintf(stderr, "moss_audio: prompt first15: ");
         for (int i = 0; i < std::min(15, n_prompt); i++)
@@ -1721,7 +1769,8 @@ extern "C" char* moss_audio_process(struct moss_audio_context* ctx, const float*
     float* text_embeds = moss_audio_embed_tokens(ctx, prompt_ids.data(), n_prompt);
     if (!text_embeds) {
         free(audio_embeds);
-        for (int i = 0; i < 3; i++) free(ds_projs[i]);
+        for (int i = 0; i < 3; i++)
+            free(ds_projs[i]);
         return nullptr;
     }
 
@@ -1733,8 +1782,7 @@ extern "C" char* moss_audio_process(struct moss_audio_context* ctx, const float*
             if (prompt_ids[pos] == (int32_t)hp.audio_token_id) {
                 if (audio_idx < T_enc) {
                     // Replace text embedding at this position with audio embedding
-                    memcpy(text_embeds + (size_t)pos * d_llm,
-                           audio_embeds + (size_t)audio_idx * d_llm,
+                    memcpy(text_embeds + (size_t)pos * d_llm, audio_embeds + (size_t)audio_idx * d_llm,
                            (size_t)d_llm * sizeof(float));
                     audio_idx++;
                 }
@@ -1750,12 +1798,14 @@ extern "C" char* moss_audio_process(struct moss_audio_context* ctx, const float*
         float sum = 0, absmax = 0;
         int n_audio = 0;
         for (int pos = 0; pos < n_prompt; pos++) {
-            if (prompt_ids[pos] == (int32_t)hp.audio_token_id) n_audio++;
+            if (prompt_ids[pos] == (int32_t)hp.audio_token_id)
+                n_audio++;
             for (int j = 0; j < d_llm; j++) {
                 float v = text_embeds[(size_t)pos * d_llm + j];
                 sum += v;
                 float a = fabsf(v);
-                if (a > absmax) absmax = a;
+                if (a > absmax)
+                    absmax = a;
             }
         }
         fprintf(stderr, "moss_audio: embeds after scatter: mean=%.6f absmax=%.6f n_audio=%d/%d\n",
@@ -1771,29 +1821,34 @@ extern "C" char* moss_audio_process(struct moss_audio_context* ctx, const float*
     //    graph adds ds_full_N to the hidden state after layer N.
     std::vector<float> ds_full[3];
     for (uint32_t t = 0; t < hp.ds_num_inject && t < 3 && !skip_deepstack; t++) {
-        if (!ds_projs[t]) continue;
+        if (!ds_projs[t])
+            continue;
         ds_full[t].assign((size_t)d_llm * n_prompt, 0.0f);
         int audio_idx = 0;
         for (int pos = 0; pos < n_prompt; pos++) {
             if (prompt_ids[pos] == (int32_t)hp.audio_token_id && audio_idx < T_enc) {
-                memcpy(ds_full[t].data() + (size_t)pos * d_llm,
-                       ds_projs[t] + (size_t)audio_idx * d_llm,
+                memcpy(ds_full[t].data() + (size_t)pos * d_llm, ds_projs[t] + (size_t)audio_idx * d_llm,
                        (size_t)d_llm * sizeof(float));
                 audio_idx++;
             }
         }
     }
-    for (int i = 0; i < 3; i++) free(ds_projs[i]);
+    for (int i = 0; i < 3; i++)
+        free(ds_projs[i]);
 
     // 8. Initialize KV cache and run LLM prefill + decode
     int max_ctx = n_prompt + 512;
     if (ctx->kv_k) {
         // Reuse existing cache if large enough, otherwise reinit
         if (ctx->kv_max_ctx < max_ctx) {
-            if (ctx->kv_buf) ggml_backend_buffer_free(ctx->kv_buf);
-            if (ctx->kv_ctx) ggml_free(ctx->kv_ctx);
-            ctx->kv_buf = nullptr; ctx->kv_ctx = nullptr;
-            ctx->kv_k = nullptr; ctx->kv_v = nullptr;
+            if (ctx->kv_buf)
+                ggml_backend_buffer_free(ctx->kv_buf);
+            if (ctx->kv_ctx)
+                ggml_free(ctx->kv_ctx);
+            ctx->kv_buf = nullptr;
+            ctx->kv_ctx = nullptr;
+            ctx->kv_k = nullptr;
+            ctx->kv_v = nullptr;
             moss_audio_kv_init(ctx, max_ctx);
         } else {
             moss_audio_kv_reset(ctx);
@@ -1804,11 +1859,11 @@ extern "C" char* moss_audio_process(struct moss_audio_context* ctx, const float*
 
     // Prefill: run all prompt tokens through the LLM with DeepStack injection
     int vocab = 0;
-    float* logits = moss_audio_run_llm_prefill_with_deepstack(
-        ctx, text_embeds, n_prompt, ds_full, T_enc, &vocab);
+    float* logits = moss_audio_run_llm_prefill_with_deepstack(ctx, text_embeds, n_prompt, ds_full, T_enc, &vocab);
     free(text_embeds);
 
-    if (!logits) return nullptr;
+    if (!logits)
+        return nullptr;
 
     // 9. Greedy decode loop
     std::vector<int32_t> generated;
@@ -1818,50 +1873,54 @@ extern "C" char* moss_audio_process(struct moss_audio_context* ctx, const float*
         int best_id = 0;
         float best_val = logits[0];
         for (int i = 1; i < vocab; i++) {
-            if (logits[i] > best_val) { best_val = logits[i]; best_id = i; }
+            if (logits[i] > best_val) {
+                best_val = logits[i];
+                best_id = i;
+            }
         }
         free(logits);
         logits = nullptr;
 
         if (ctx->params.verbosity >= 1 && step < 5)
-            fprintf(stderr, "moss_audio: step %d argmax=%d (%.4f) token='%s'\n",
-                    step, best_id, best_val,
+            fprintf(stderr, "moss_audio: step %d argmax=%d (%.4f) token='%s'\n", step, best_id, best_val,
                     (best_id >= 0 && best_id < (int)ctx->vocab.id_to_token.size())
-                        ? ctx->vocab.id_to_token[best_id].c_str() : "?");
-        if (best_id == (int)hp.eos_token_id) break;
+                        ? ctx->vocab.id_to_token[best_id].c_str()
+                        : "?");
+        if (best_id == (int)hp.eos_token_id)
+            break;
         generated.push_back(best_id);
 
         // Embed next token and run one decode step
         float* next_emb = moss_audio_embed_tokens(ctx, &best_id, 1);
-        if (!next_emb) break;
+        if (!next_emb)
+            break;
 
         int dummy_n = 0;
-        logits = moss_audio_run_llm_kv(ctx, next_emb, 1,
-                                        n_prompt + (int)generated.size() - 1,
-                                        &dummy_n, &vocab);
+        logits = moss_audio_run_llm_kv(ctx, next_emb, 1, n_prompt + (int)generated.size() - 1, &dummy_n, &vocab);
         free(next_emb);
-        if (!logits) break;
+        if (!logits)
+            break;
     }
-    if (logits) free(logits);
+    if (logits)
+        free(logits);
 
     // 10. Decode tokens to text
     std::string result;
     for (int id : generated) {
         const char* t = moss_audio_token_text(ctx, id);
-        if (t) result += t;
+        if (t)
+            result += t;
     }
 
     if (ctx->params.verbosity >= 1)
-        fprintf(stderr, "moss_audio: generated %zu tokens: \"%s\"\n",
-                generated.size(), result.substr(0, 100).c_str());
+        fprintf(stderr, "moss_audio: generated %zu tokens: \"%s\"\n", generated.size(), result.substr(0, 100).c_str());
 
     char* out = (char*)malloc(result.size() + 1);
     memcpy(out, result.c_str(), result.size() + 1);
     return out;
 }
 
-extern "C" char* moss_audio_transcribe(struct moss_audio_context* ctx,
-                                        const float* samples, int n_samples) {
+extern "C" char* moss_audio_transcribe(struct moss_audio_context* ctx, const float* samples, int n_samples) {
     return moss_audio_process(ctx, samples, n_samples, "Transcribe this audio.");
 }
 
@@ -1878,9 +1937,8 @@ extern "C" struct moss_audio_context_params moss_audio_context_default_params(vo
     return p;
 }
 
-extern "C" struct moss_audio_context* moss_audio_init_from_file(
-    const char* path_model, struct moss_audio_context_params params)
-{
+extern "C" struct moss_audio_context* moss_audio_init_from_file(const char* path_model,
+                                                                struct moss_audio_context_params params) {
     auto* ctx = new moss_audio_context();
     ctx->params = params;
     ctx->n_threads = params.n_threads;
@@ -1918,15 +1976,22 @@ extern "C" struct moss_audio_context* moss_audio_init_from_file(
 }
 
 extern "C" void moss_audio_free(struct moss_audio_context* ctx) {
-    if (!ctx) return;
-    if (ctx->kv_buf) ggml_backend_buffer_free(ctx->kv_buf);
-    if (ctx->kv_ctx) ggml_free(ctx->kv_ctx);
-    if (ctx->sched) ggml_backend_sched_free(ctx->sched);
-    if (ctx->model.buf) ggml_backend_buffer_free(ctx->model.buf);
-    if (ctx->model.ctx) ggml_free(ctx->model.ctx);
+    if (!ctx)
+        return;
+    if (ctx->kv_buf)
+        ggml_backend_buffer_free(ctx->kv_buf);
+    if (ctx->kv_ctx)
+        ggml_free(ctx->kv_ctx);
+    if (ctx->sched)
+        ggml_backend_sched_free(ctx->sched);
+    if (ctx->model.buf)
+        ggml_backend_buffer_free(ctx->model.buf);
+    if (ctx->model.ctx)
+        ggml_free(ctx->model.ctx);
     if (ctx->backend_cpu && ctx->backend_cpu != ctx->backend)
         ggml_backend_free(ctx->backend_cpu);
-    if (ctx->backend) ggml_backend_free(ctx->backend);
+    if (ctx->backend)
+        ggml_backend_free(ctx->backend);
     delete ctx;
 }
 

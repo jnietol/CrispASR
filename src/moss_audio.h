@@ -25,7 +25,7 @@ struct moss_audio_context;
 
 struct moss_audio_context_params {
     int n_threads;
-    int verbosity;   // 0=silent 1=normal 2=verbose
+    int verbosity; // 0=silent 1=normal 2=verbose
     bool use_gpu;
     bool flash_attn;
 };
@@ -33,57 +33,47 @@ struct moss_audio_context_params {
 struct moss_audio_context_params moss_audio_context_default_params(void);
 
 // Load model from GGUF.
-struct moss_audio_context* moss_audio_init_from_file(const char* path_model,
-                                                     struct moss_audio_context_params params);
+struct moss_audio_context* moss_audio_init_from_file(const char* path_model, struct moss_audio_context_params params);
 
 void moss_audio_free(struct moss_audio_context* ctx);
 
 // Transcribe / understand audio. prompt is the text instruction (e.g.
 // "Transcribe this audio." or "Describe the sounds in this clip.").
 // Returns malloc'd UTF-8 string (caller owns).
-char* moss_audio_process(struct moss_audio_context* ctx, const float* samples,
-                         int n_samples, const char* prompt);
+char* moss_audio_process(struct moss_audio_context* ctx, const float* samples, int n_samples, const char* prompt);
 
 // Convenience wrapper: transcribe with default prompt.
-char* moss_audio_transcribe(struct moss_audio_context* ctx, const float* samples,
-                            int n_samples);
+char* moss_audio_transcribe(struct moss_audio_context* ctx, const float* samples, int n_samples);
 
 // ---- Stage helpers for differential testing ----
 
 // Compute 128-bin log-mel spectrogram (Whisper-style).
 // Output: malloc'd (n_mels, T_mel) F32 row-major. Caller frees.
-float* moss_audio_compute_mel(struct moss_audio_context* ctx,
-                              const float* samples, int n_samples,
-                              int* out_n_mels, int* out_T_mel);
+float* moss_audio_compute_mel(struct moss_audio_context* ctx, const float* samples, int n_samples, int* out_n_mels,
+                              int* out_T_mel);
 
 // Run audio encoder only. Returns (T_enc, d_model=1280) F32 row-major.
 // Also fills deepstack taps if ds_tap_0/1/2 are non-null (each T_enc × 1280).
-float* moss_audio_run_encoder(struct moss_audio_context* ctx,
-                              const float* mel, int n_mels, int T_mel,
-                              int* out_T_enc, int* out_d,
-                              float** ds_tap_0, float** ds_tap_1, float** ds_tap_2);
+float* moss_audio_run_encoder(struct moss_audio_context* ctx, const float* mel, int n_mels, int T_mel, int* out_T_enc,
+                              int* out_d, float** ds_tap_0, float** ds_tap_1, float** ds_tap_2);
 
 // Run audio adapter on encoder output. Returns (T_enc, llm_dim=2560) F32.
-float* moss_audio_run_adapter(struct moss_audio_context* ctx,
-                              const float* encoder_out, int T_enc, int d_enc,
+float* moss_audio_run_adapter(struct moss_audio_context* ctx, const float* encoder_out, int T_enc, int d_enc,
                               int* out_T, int* out_d);
 
 // Embed tokens. Returns (n_tokens, llm_dim) F32.
-float* moss_audio_embed_tokens(struct moss_audio_context* ctx,
-                               const int32_t* token_ids, int n_tokens);
+float* moss_audio_embed_tokens(struct moss_audio_context* ctx, const int32_t* token_ids, int n_tokens);
 
 // Initialize / reset KV cache for LLM decode.
 bool moss_audio_kv_init(struct moss_audio_context* ctx, int max_ctx);
 void moss_audio_kv_reset(struct moss_audio_context* ctx);
 
 // Run LLM with KV cache. Returns logits (vocab_size,) F32 for last token.
-float* moss_audio_run_llm_kv(struct moss_audio_context* ctx,
-                             const float* inputs_embeds, int n_tokens, int n_past,
+float* moss_audio_run_llm_kv(struct moss_audio_context* ctx, const float* inputs_embeds, int n_tokens, int n_past,
                              int* out_n_tokens, int* out_vocab_size);
 
 // Tokenize text using BPE.
-int moss_audio_tokenize(struct moss_audio_context* ctx, const char* text,
-                        int32_t* out_tokens, int max_tokens);
+int moss_audio_tokenize(struct moss_audio_context* ctx, const char* text, int32_t* out_tokens, int max_tokens);
 
 // Token ID → string.
 const char* moss_audio_token_text(struct moss_audio_context* ctx, int token_id);

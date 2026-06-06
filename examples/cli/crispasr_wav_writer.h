@@ -196,9 +196,8 @@ inline std::string crispasr_make_id3v2_ai_tag() {
     std::string frames;
     frames.append(make_txxx("AI_GENERATED", "true"));
     frames.append(make_txxx("GENERATOR", "CrispASR"));
-    frames.append(make_txxx("AI_CONTENT_NOTICE",
-                            "This audio was synthesized by an AI text-to-speech model. "
-                            "It is not a recording of a human speaker."));
+    frames.append(make_txxx("AI_CONTENT_NOTICE", "This audio was synthesized by an AI text-to-speech model. "
+                                                 "It is not a recording of a human speaker."));
 
     // ID3v2.3 header (10 bytes)
     std::string tag;
