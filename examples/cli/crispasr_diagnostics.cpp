@@ -260,8 +260,8 @@ void crispasr_print_devices(FILE* out) {
         case GGML_BACKEND_DEVICE_TYPE_ACCEL:
             type_str = "accel";
             break;
-        case GGML_BACKEND_DEVICE_TYPE_META:
-            type_str = "meta";
+        default:
+            type_str = "unknown";
             break;
         }
         std::fprintf(out, "    [%zu] %-6s name=%s desc=%s mem=%zu/%zu MiB id=%s\n", i, type_str, p.name ? p.name : "?",

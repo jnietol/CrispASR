@@ -589,6 +589,29 @@ catch_discover_tests(test-issue-89-long-audio-fallback
     PROPERTIES LABELS "unit;long-audio;issue-89"
 )
 
+# ─── test-issue-150-cjk-fallback — issue #150 regression guard
+#
+# Pins split_text_at_punct via crispasr_make_disp_segments: the 42-char CJK
+# subtitle fallback must only fire for text containing CJK/kana/Hangul, not
+# for long English sentences where it would split words at raw character
+# boundaries (e.g. "about" → "abo" / "ut").  Compiles crispasr_output.cpp
+# directly — no model load, pure CPU.
+add_executable(test-issue-150-cjk-fallback
+    test-issue-150-cjk-fallback.cpp
+    ${PROJECT_SOURCE_DIR}/examples/cli/crispasr_output.cpp
+)
+target_include_directories(test-issue-150-cjk-fallback PRIVATE
+    ${PROJECT_SOURCE_DIR}/examples/cli
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(test-issue-150-cjk-fallback PRIVATE
+    Catch2::Catch2WithMain
+)
+catch_discover_tests(test-issue-150-cjk-fallback
+    TEST_SPEC "[issue-150]"
+    PROPERTIES LABELS "unit;output;issue-150"
+)
+
 # ─── test-internal-chunking-gate — CAP_INTERNAL_CHUNKING regression guard
 #
 # Pins the auto-chunk fallback skip for backends that declare
