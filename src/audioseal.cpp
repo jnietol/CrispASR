@@ -39,14 +39,14 @@ namespace {
 
 struct audioseal_hparams {
     uint32_t sample_rate = 16000;
-    uint32_t channels = 1;        // mono
-    uint32_t dimension = 128;     // encoder/decoder base dim (SEANet default)
-    uint32_t n_filters = 32;     // first layer channels
+    uint32_t channels = 1;    // mono
+    uint32_t dimension = 128; // encoder/decoder base dim (SEANet default)
+    uint32_t n_filters = 32;  // first layer channels
     uint32_t n_residual_layers = 1;
-    uint32_t ratios_n = 4;       // number of encoder/decoder blocks
+    uint32_t ratios_n = 4; // number of encoder/decoder blocks
     uint32_t lstm_layers = 2;
-    uint32_t nbits = 16;         // watermark message bits
-    uint32_t hop_length = 1;     // computed from ratios product
+    uint32_t nbits = 16;          // watermark message bits
+    uint32_t hop_length = 1;      // computed from ratios product
     std::vector<uint32_t> ratios; // downsampling ratios [8, 5, 4, 2] → hop=320
 };
 
@@ -94,9 +94,8 @@ static ggml_tensor* elu(ggml_context* ctx, ggml_tensor* x) {
 // Conv1d wrapper. Tensor layout is (T, C) throughout (ggml native).
 // w shape: (C_out, C_in, K) in PyTorch → stored as ne=[K, C_in, C_out] in GGUF.
 // x shape: (T, C_in). Output: (T_out, C_out).
-static ggml_tensor* conv1d(ggml_context* ctx, ggml_tensor* x,
-                           ggml_tensor* w, ggml_tensor* b,
-                           int stride, int padding, int dilation) {
+static ggml_tensor* conv1d(ggml_context* ctx, ggml_tensor* x, ggml_tensor* w, ggml_tensor* b, int stride, int padding,
+                           int dilation) {
     ggml_tensor* y = ggml_conv_1d(ctx, w, x, stride, padding, dilation);
     y = ggml_reshape_2d(ctx, y, y->ne[0], y->ne[1]);
     if (b) {
@@ -143,22 +142,17 @@ static ggml_tensor* conv1d(ggml_context* ctx, ggml_tensor* x,
 //
 // Unrolled at graph-construction time since T is known (typically 50).
 // Node count: ~12 ops per step × T steps × 2 layers = ~1200 nodes.
-static ggml_tensor* lstm_layer_forward(ggml_context* ctx,
-                                       ggml_tensor* x,
-                                       const audioseal_lstm_layer& layer,
-                                       int D) {
+static ggml_tensor* lstm_layer_forward(ggml_context* ctx, ggml_tensor* x, const audioseal_lstm_layer& layer, int D) {
     const int T = (int)x->ne[1]; // x: ne[0]=D, ne[1]=T
 
     // Precompute input contribution for all time steps:
     // ih_all = W_ih @ x + b_ih + b_hh   shape: (4*D, T)
     ggml_tensor* ih_all = ggml_mul_mat(ctx, layer.weight_ih, x);
     if (layer.bias_ih) {
-        ih_all = ggml_add(ctx, ih_all,
-                          ggml_reshape_2d(ctx, layer.bias_ih, 4 * D, 1));
+        ih_all = ggml_add(ctx, ih_all, ggml_reshape_2d(ctx, layer.bias_ih, 4 * D, 1));
     }
     if (layer.bias_hh) {
-        ih_all = ggml_add(ctx, ih_all,
-                          ggml_reshape_2d(ctx, layer.bias_hh, 4 * D, 1));
+        ih_all = ggml_add(ctx, ih_all, ggml_reshape_2d(ctx, layer.bias_hh, 4 * D, 1));
     }
 
     // Unroll over T time steps
@@ -174,8 +168,7 @@ static ggml_tensor* lstm_layer_forward(ggml_context* ctx,
     for (int t = 0; t < T; t++) {
         // Extract ih_all[:, t] — the input contribution for this step
         // ih_all is (4*D, T), column t starts at offset t * 4*D * sizeof(float)
-        ggml_tensor* ih_t = ggml_view_1d(ctx, ih_all, 4 * D,
-                                          (size_t)t * ih_all->nb[1]);
+        ggml_tensor* ih_t = ggml_view_1d(ctx, ih_all, 4 * D, (size_t)t * ih_all->nb[1]);
 
         // Recurrent contribution: W_hh @ h_{t-1}  → (4*D,)
         // weight_hh: ne[0]=D, ne[1]=4*D. h_prev: ne[0]=D.
@@ -194,9 +187,7 @@ static ggml_tensor* lstm_layer_forward(ggml_context* ctx,
         ggml_tensor* o_t = ggml_sigmoid(ctx, ggml_view_1d(ctx, gates_t, D, (size_t)3 * D * sizeof(float)));
 
         // Cell state: c_t = f * c_{t-1} + i * g
-        ggml_tensor* c_t = ggml_add(ctx,
-                                     ggml_mul(ctx, f_t, c_prev),
-                                     ggml_mul(ctx, i_t, g_t));
+        ggml_tensor* c_t = ggml_add(ctx, ggml_mul(ctx, f_t, c_prev), ggml_mul(ctx, i_t, g_t));
 
         // Hidden state: h_t = o * tanh(c_t)
         ggml_tensor* h_t = ggml_mul(ctx, o_t, ggml_tanh(ctx, c_t));
@@ -248,21 +239,21 @@ struct audioseal_ctx {
     //   idx 15: Conv1d output projection
 
     // Generator encoder
-    audioseal_conv gen_enc_in;       // idx 0
-    audioseal_resblock gen_enc_res[4]; // idx 1, 4, 7, 10
-    audioseal_conv gen_enc_down[4];   // idx 3, 6, 9, 12
+    audioseal_conv gen_enc_in;            // idx 0
+    audioseal_resblock gen_enc_res[4];    // idx 1, 4, 7, 10
+    audioseal_conv gen_enc_down[4];       // idx 3, 6, 9, 12
     audioseal_lstm_layer gen_enc_lstm[2]; // idx 13 (2-layer LSTM)
-    audioseal_conv gen_enc_out;       // idx 15
+    audioseal_conv gen_enc_out;           // idx 15
 
     // Generator message embedding
     ggml_tensor* gen_msg_w = nullptr; // Embedding(32, 128) = [32, 128]
 
     // Generator decoder
-    audioseal_conv gen_dec_in;        // idx 0
+    audioseal_conv gen_dec_in;            // idx 0
     audioseal_lstm_layer gen_dec_lstm[2]; // idx 1
-    audioseal_conv gen_dec_up[4];     // idx 3, 6, 9, 12
-    audioseal_resblock gen_dec_res[4]; // idx 4, 7, 10, 13
-    audioseal_conv gen_dec_out;       // idx 15
+    audioseal_conv gen_dec_up[4];         // idx 3, 6, 9, 12
+    audioseal_resblock gen_dec_res[4];    // idx 4, 7, 10, 13
+    audioseal_conv gen_dec_out;           // idx 15
 
     // Detector encoder (same structure)
     audioseal_conv det_enc_in;
@@ -272,8 +263,8 @@ struct audioseal_ctx {
     audioseal_conv det_enc_out;
 
     // Detector heads
-    audioseal_conv det_reverse;       // ConvTranspose1d(128, 32, k=320, s=320)
-    audioseal_conv det_head;          // Conv1d(32, 18, k=1)
+    audioseal_conv det_reverse; // ConvTranspose1d(128, 32, k=320, s=320)
+    audioseal_conv det_head;    // Conv1d(32, 18, k=1)
 
     bool has_generator = false;
     bool has_detector = false;
@@ -328,20 +319,17 @@ static void load_metadata(audioseal_ctx* c, gguf_context* g) {
 }
 
 // Helper: bind weight+bias pair from tensor map using GGUF name prefix.
-static void bind_conv(std::map<std::string, ggml_tensor*>& t,
-                      const std::string& prefix, audioseal_conv& c) {
+static void bind_conv(std::map<std::string, ggml_tensor*>& t, const std::string& prefix, audioseal_conv& c) {
     c.w = core_gguf::try_get(t, (prefix + ".weight").c_str());
     c.b = core_gguf::try_get(t, (prefix + ".bias").c_str());
 }
 
-static void bind_resblock(std::map<std::string, ggml_tensor*>& t,
-                          const std::string& prefix, audioseal_resblock& rb) {
+static void bind_resblock(std::map<std::string, ggml_tensor*>& t, const std::string& prefix, audioseal_resblock& rb) {
     bind_conv(t, prefix + ".block.1", rb.dilated);
     bind_conv(t, prefix + ".block.3", rb.pointwise);
 }
 
-static void bind_lstm_pair(std::map<std::string, ggml_tensor*>& t,
-                           const std::string& prefix,
+static void bind_lstm_pair(std::map<std::string, ggml_tensor*>& t, const std::string& prefix,
                            audioseal_lstm_layer layers[2]) {
     for (int i = 0; i < 2; i++) {
         std::string lp = prefix + ".lstm.weight_ih_l" + std::to_string(i);
@@ -360,10 +348,10 @@ static bool bind_tensors(audioseal_ctx* c) {
 
     // Encoder sequential indices for 4 ratio blocks:
     //   idx 0=input_conv, 1=res, 3=down, 4=res, 6=down, 7=res, 9=down, 10=res, 12=down, 13=lstm, 15=out
-    static const int res_idx[4]  = {1, 4, 7, 10};
+    static const int res_idx[4] = {1, 4, 7, 10};
     static const int down_idx[4] = {3, 6, 9, 12};
     // Decoder: idx 0=in, 1=lstm, 3=up, 4=res, 6=up, 7=res, 9=up, 10=res, 12=up, 13=res, 15=out
-    static const int up_idx[4]   = {3, 6, 9, 12};
+    static const int up_idx[4] = {3, 6, 9, 12};
     static const int dres_idx[4] = {4, 7, 10, 13};
 
     // --- Generator encoder ---
@@ -417,8 +405,7 @@ static bool bind_tensors(audioseal_ctx* c) {
 
 // SEANet ResBlock: ELU → Conv1d(C, C/compress, k=3, dil=1) → ELU → Conv1d(C/compress, C, k=1) + skip
 // All tensors in (T, C) layout.
-static ggml_tensor* build_resblock(ggml_context* ctx, ggml_tensor* x,
-                                   const audioseal_resblock& rb) {
+static ggml_tensor* build_resblock(ggml_context* ctx, ggml_tensor* x, const audioseal_resblock& rb) {
     ggml_tensor* y = elu(ctx, x);
     if (rb.dilated.w) {
         y = conv1d(ctx, y, rb.dilated.w, rb.dilated.b, 1, 1, 1); // k=3, pad=1, dil=1
@@ -436,20 +423,20 @@ static ggml_tensor* build_resblock(ggml_context* ctx, ggml_tensor* x,
 // ---------------------------------------------------------------------------
 
 // Run the SEANet encoder: input conv → (resblock + ELU + downsample) × 4 → LSTM → ELU → output conv
-static ggml_tensor* forward_encoder(ggml_context* ctx, ggml_tensor* x,
-                                    const audioseal_conv& enc_in,
-                                    const audioseal_resblock res[4],
-                                    const audioseal_conv down[4],
-                                    const audioseal_lstm_layer lstm[2],
-                                    const audioseal_conv& enc_out,
+static ggml_tensor* forward_encoder(ggml_context* ctx, ggml_tensor* x, const audioseal_conv& enc_in,
+                                    const audioseal_resblock res[4], const audioseal_conv down[4],
+                                    const audioseal_lstm_layer lstm[2], const audioseal_conv& enc_out,
                                     const uint32_t ratios[4]) {
     // Input conv
-    if (std::getenv("AUDIOSEAL_DEBUG")) fprintf(stderr, "  enc_in: x ne=[%lld,%lld]\n", (long long)x->ne[0], (long long)x->ne[1]);
+    if (std::getenv("AUDIOSEAL_DEBUG"))
+        fprintf(stderr, "  enc_in: x ne=[%lld,%lld]\n", (long long)x->ne[0], (long long)x->ne[1]);
     if (enc_in.w) {
-        if (std::getenv("AUDIOSEAL_DEBUG")) fprintf(stderr, "  enc_in.w ne=[%lld,%lld,%lld]\n",
-                (long long)enc_in.w->ne[0], (long long)enc_in.w->ne[1], (long long)enc_in.w->ne[2]);
+        if (std::getenv("AUDIOSEAL_DEBUG"))
+            fprintf(stderr, "  enc_in.w ne=[%lld,%lld,%lld]\n", (long long)enc_in.w->ne[0], (long long)enc_in.w->ne[1],
+                    (long long)enc_in.w->ne[2]);
         x = conv1d(ctx, x, enc_in.w, enc_in.b, 1, 3, 1);
-        if (std::getenv("AUDIOSEAL_DEBUG")) fprintf(stderr, "  after enc_in: x ne=[%lld,%lld]\n", (long long)x->ne[0], (long long)x->ne[1]);
+        if (std::getenv("AUDIOSEAL_DEBUG"))
+            fprintf(stderr, "  after enc_in: x ne=[%lld,%lld]\n", (long long)x->ne[0], (long long)x->ne[1]);
         if (std::getenv("AUDIOSEAL_DUMP_STAGES")) {
             ggml_set_name(x, "stage_enc_0");
             ggml_set_output(x);
@@ -458,13 +445,17 @@ static ggml_tensor* forward_encoder(ggml_context* ctx, ggml_tensor* x,
 
     // 4 blocks: resblock → ELU → downsample
     for (int i = 0; i < 4; i++) {
-        if (std::getenv("AUDIOSEAL_DEBUG")) fprintf(stderr, "  resblock %d: x ne=[%lld,%lld]\n", i, (long long)x->ne[0], (long long)x->ne[1]);
+        if (std::getenv("AUDIOSEAL_DEBUG"))
+            fprintf(stderr, "  resblock %d: x ne=[%lld,%lld]\n", i, (long long)x->ne[0], (long long)x->ne[1]);
         x = build_resblock(ctx, x, res[i]);
         if (std::getenv("AUDIOSEAL_DUMP_STAGES")) {
-            char nm[32]; snprintf(nm, sizeof(nm), "stage_enc_res%d", i);
-            ggml_set_name(x, nm); ggml_set_output(x);
+            char nm[32];
+            snprintf(nm, sizeof(nm), "stage_enc_res%d", i);
+            ggml_set_name(x, nm);
+            ggml_set_output(x);
         }
-        if (std::getenv("AUDIOSEAL_DEBUG")) fprintf(stderr, "  after resblock %d: x ne=[%lld,%lld]\n", i, (long long)x->ne[0], (long long)x->ne[1]);
+        if (std::getenv("AUDIOSEAL_DEBUG"))
+            fprintf(stderr, "  after resblock %d: x ne=[%lld,%lld]\n", i, (long long)x->ne[0], (long long)x->ne[1]);
         x = elu(ctx, x);
         if (down[i].w) {
             int ratio = (int)ratios[i];
@@ -476,14 +467,19 @@ static ggml_tensor* forward_encoder(ggml_context* ctx, ggml_tensor* x,
             // ggml_conv_1d only supports symmetric padding.
             // NOTE: ggml_pad_ext convention may swap left/right — test both
             x = ggml_pad_ext(ctx, x, pad_right, pad_left, 0, 0, 0, 0, 0, 0);
-            if (std::getenv("AUDIOSEAL_DEBUG")) fprintf(stderr, "  down %d: ratio=%d K=%d pad_l=%d pad_r=%d w ne=[%lld,%lld,%lld]\n",
-                    i, ratio, K, pad_left, pad_right, (long long)down[i].w->ne[0], (long long)down[i].w->ne[1], (long long)down[i].w->ne[2]);
+            if (std::getenv("AUDIOSEAL_DEBUG"))
+                fprintf(stderr, "  down %d: ratio=%d K=%d pad_l=%d pad_r=%d w ne=[%lld,%lld,%lld]\n", i, ratio, K,
+                        pad_left, pad_right, (long long)down[i].w->ne[0], (long long)down[i].w->ne[1],
+                        (long long)down[i].w->ne[2]);
             x = conv1d(ctx, x, down[i].w, down[i].b, ratio, 0, 1); // pad=0 (done externally)
             if (std::getenv("AUDIOSEAL_DUMP_STAGES")) {
-                char nm[32]; snprintf(nm, sizeof(nm), "stage_enc_down%d", i);
-                ggml_set_name(x, nm); ggml_set_output(x);
+                char nm[32];
+                snprintf(nm, sizeof(nm), "stage_enc_down%d", i);
+                ggml_set_name(x, nm);
+                ggml_set_output(x);
             }
-            if (std::getenv("AUDIOSEAL_DEBUG")) fprintf(stderr, "  after down %d: x ne=[%lld,%lld]\n", i, (long long)x->ne[0], (long long)x->ne[1]);
+            if (std::getenv("AUDIOSEAL_DEBUG"))
+                fprintf(stderr, "  after down %d: x ne=[%lld,%lld]\n", i, (long long)x->ne[0], (long long)x->ne[1]);
         }
     }
 
@@ -492,43 +488,51 @@ static ggml_tensor* forward_encoder(ggml_context* ctx, ggml_tensor* x,
     {
         ggml_tensor* lstm_in = x;
         int hidden = (int)x->ne[1]; // x is (T, D) in ggml, ne[0]=T, ne[1]=D
-        if (std::getenv("AUDIOSEAL_DEBUG")) fprintf(stderr, "  LSTM: x ne=[%lld,%lld] hidden=%d\n", (long long)x->ne[0], (long long)x->ne[1], hidden);
+        if (std::getenv("AUDIOSEAL_DEBUG"))
+            fprintf(stderr, "  LSTM: x ne=[%lld,%lld] hidden=%d\n", (long long)x->ne[0], (long long)x->ne[1], hidden);
         // Transpose to (D, T) for LSTM
         x = ggml_cont(ctx, ggml_transpose(ctx, x)); // (D, T)
-        if (std::getenv("AUDIOSEAL_DEBUG")) fprintf(stderr, "  LSTM after transpose: x ne=[%lld,%lld]\n", (long long)x->ne[0], (long long)x->ne[1]);
+        if (std::getenv("AUDIOSEAL_DEBUG"))
+            fprintf(stderr, "  LSTM after transpose: x ne=[%lld,%lld]\n", (long long)x->ne[0], (long long)x->ne[1]);
         for (int i = 0; i < 2; i++) {
             if (lstm[i].weight_ih)
                 x = lstm_layer_forward(ctx, x, lstm[i], hidden);
         }
         // Transpose back to (T, D)
-        if (std::getenv("AUDIOSEAL_DEBUG")) fprintf(stderr, "  LSTM output (before transpose back): x ne=[%lld,%lld]\n", (long long)x->ne[0], (long long)x->ne[1]);
+        if (std::getenv("AUDIOSEAL_DEBUG"))
+            fprintf(stderr, "  LSTM output (before transpose back): x ne=[%lld,%lld]\n", (long long)x->ne[0],
+                    (long long)x->ne[1]);
         x = ggml_cont(ctx, ggml_transpose(ctx, x));
-        if (std::getenv("AUDIOSEAL_DEBUG")) fprintf(stderr, "  LSTM output (after transpose back): x ne=[%lld,%lld]\n", (long long)x->ne[0], (long long)x->ne[1]);
-        if (std::getenv("AUDIOSEAL_DEBUG")) fprintf(stderr, "  lstm_in: ne=[%lld,%lld]\n", (long long)lstm_in->ne[0], (long long)lstm_in->ne[1]);
+        if (std::getenv("AUDIOSEAL_DEBUG"))
+            fprintf(stderr, "  LSTM output (after transpose back): x ne=[%lld,%lld]\n", (long long)x->ne[0],
+                    (long long)x->ne[1]);
+        if (std::getenv("AUDIOSEAL_DEBUG"))
+            fprintf(stderr, "  lstm_in: ne=[%lld,%lld]\n", (long long)lstm_in->ne[0], (long long)lstm_in->ne[1]);
         x = ggml_add(ctx, x, lstm_in); // skip connection
-        if (std::getenv("AUDIOSEAL_DEBUG")) fprintf(stderr, "  after skip add: x ne=[%lld,%lld]\n", (long long)x->ne[0], (long long)x->ne[1]);
+        if (std::getenv("AUDIOSEAL_DEBUG"))
+            fprintf(stderr, "  after skip add: x ne=[%lld,%lld]\n", (long long)x->ne[0], (long long)x->ne[1]);
     }
 
     // ELU + output conv
     x = elu(ctx, x);
-    if (std::getenv("AUDIOSEAL_DEBUG")) fprintf(stderr, "  enc_out conv: x ne=[%lld,%lld]\n", (long long)x->ne[0], (long long)x->ne[1]);
+    if (std::getenv("AUDIOSEAL_DEBUG"))
+        fprintf(stderr, "  enc_out conv: x ne=[%lld,%lld]\n", (long long)x->ne[0], (long long)x->ne[1]);
     if (enc_out.w) {
-        if (std::getenv("AUDIOSEAL_DEBUG")) fprintf(stderr, "  enc_out.w ne=[%lld,%lld,%lld]\n",
-                (long long)enc_out.w->ne[0], (long long)enc_out.w->ne[1], (long long)enc_out.w->ne[2]);
+        if (std::getenv("AUDIOSEAL_DEBUG"))
+            fprintf(stderr, "  enc_out.w ne=[%lld,%lld,%lld]\n", (long long)enc_out.w->ne[0],
+                    (long long)enc_out.w->ne[1], (long long)enc_out.w->ne[2]);
         x = conv1d(ctx, x, enc_out.w, enc_out.b, 1, 3, 1);
-        if (std::getenv("AUDIOSEAL_DEBUG")) fprintf(stderr, "  after enc_out: x ne=[%lld,%lld]\n", (long long)x->ne[0], (long long)x->ne[1]);
+        if (std::getenv("AUDIOSEAL_DEBUG"))
+            fprintf(stderr, "  after enc_out: x ne=[%lld,%lld]\n", (long long)x->ne[0], (long long)x->ne[1]);
     }
 
     return x;
 }
 
 // Run the SEANet decoder: input conv → LSTM → (ELU + upsample + resblock) × 4 → ELU → output conv → tanh
-static ggml_tensor* forward_decoder(ggml_context* ctx, ggml_tensor* x,
-                                    const audioseal_conv& dec_in,
-                                    const audioseal_lstm_layer lstm[2],
-                                    const audioseal_conv up[4],
-                                    const audioseal_resblock res[4],
-                                    const audioseal_conv& dec_out,
+static ggml_tensor* forward_decoder(ggml_context* ctx, ggml_tensor* x, const audioseal_conv& dec_in,
+                                    const audioseal_lstm_layer lstm[2], const audioseal_conv up[4],
+                                    const audioseal_resblock res[4], const audioseal_conv& dec_out,
                                     const uint32_t ratios[4]) {
     // Input conv
     if (dec_in.w)
@@ -565,8 +569,7 @@ static ggml_tensor* forward_decoder(ggml_context* ctx, ggml_tensor* x,
             // via encoder stage comparison).
             if (pad_total > 0) {
                 int out_t = (int)y->ne[0] - pad_left - pad_right;
-                y = ggml_view_2d(ctx, y, out_t, (int)y->ne[1],
-                                 y->nb[1], (size_t)pad_right * sizeof(float));
+                y = ggml_view_2d(ctx, y, out_t, (int)y->ne[1], y->nb[1], (size_t)pad_right * sizeof(float));
                 y = ggml_cont(ctx, y);
             }
             if (up[i].b) {
@@ -638,13 +641,14 @@ struct audioseal_ctx* audioseal_init_from_file(const char* path, struct audiosea
     c->compute_meta.resize(256 * 1024 * 1024); // 256 MB
 
     if (params.verbosity > 0) {
-        fprintf(stderr, "audioseal: loaded from '%s' — generator=%s detector=%s "
-                        "sr=%u nbits=%u hop=%u ratios=[",
-                path, c->has_generator ? "yes" : "no",
-                c->has_detector ? "yes" : "no",
-                c->hp.sample_rate, c->hp.nbits, c->hp.hop_length);
+        fprintf(stderr,
+                "audioseal: loaded from '%s' — generator=%s detector=%s "
+                "sr=%u nbits=%u hop=%u ratios=[",
+                path, c->has_generator ? "yes" : "no", c->has_detector ? "yes" : "no", c->hp.sample_rate, c->hp.nbits,
+                c->hp.hop_length);
         for (size_t i = 0; i < c->hp.ratios.size(); i++) {
-            if (i > 0) fprintf(stderr, ",");
+            if (i > 0)
+                fprintf(stderr, ",");
             fprintf(stderr, "%u", c->hp.ratios[i]);
         }
         fprintf(stderr, "] tensors=%zu\n", c->tensors.size());
@@ -664,16 +668,15 @@ uint32_t audioseal_nbits(const struct audioseal_ctx* ctx) {
     return ctx ? ctx->hp.nbits : 16;
 }
 
-float* audioseal_embed(struct audioseal_ctx* ctx,
-                       const float* pcm, int n_samples,
-                       const uint8_t* message) {
+float* audioseal_embed(struct audioseal_ctx* ctx, const float* pcm, int n_samples, const uint8_t* message) {
     if (!ctx || !pcm || n_samples <= 0 || !ctx->has_generator)
         return nullptr;
 
     // Build compute graph
     ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
     ggml_context* ctx0 = ggml_init(ip);
-    if (!ctx0) return nullptr;
+    if (!ctx0)
+        return nullptr;
 
     ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 8192, false);
 
@@ -683,10 +686,8 @@ float* audioseal_embed(struct audioseal_ctx* ctx,
     ggml_set_input(x_in);
 
     // Encoder
-    ggml_tensor* latent = forward_encoder(ctx0, x_in,
-                                           ctx->gen_enc_in, ctx->gen_enc_res,
-                                           ctx->gen_enc_down, ctx->gen_enc_lstm,
-                                           ctx->gen_enc_out, ctx->hp.ratios.data());
+    ggml_tensor* latent = forward_encoder(ctx0, x_in, ctx->gen_enc_in, ctx->gen_enc_res, ctx->gen_enc_down,
+                                          ctx->gen_enc_lstm, ctx->gen_enc_out, ctx->hp.ratios.data());
 
     // Mark encoder output for stage extraction
     ggml_set_name(latent, "enc_output");
@@ -706,7 +707,7 @@ float* audioseal_embed(struct audioseal_ctx* ctx,
         ggml_tensor* emb = ggml_get_rows(ctx0, ctx->gen_msg_w, indices); // ne=[128, 16]
         // Sum across the 16 embeddings: transpose to (16, 128), sum_rows → (1, 128)
         ggml_tensor* embt = ggml_cont(ctx0, ggml_transpose(ctx0, emb)); // (16, 128)
-        ggml_tensor* msg_proj = ggml_sum_rows(ctx0, embt); // ne[0]=1, ne[1]=128
+        ggml_tensor* msg_proj = ggml_sum_rows(ctx0, embt);              // ne[0]=1, ne[1]=128
 
         // latent is (T, 128). msg_proj is (1, 128). Use ggml_repeat for broadcast.
         ggml_tensor* msg_expanded = ggml_repeat(ctx0, msg_proj, latent);
@@ -714,10 +715,8 @@ float* audioseal_embed(struct audioseal_ctx* ctx,
     }
 
     // Decoder
-    ggml_tensor* wm = forward_decoder(ctx0, latent,
-                                       ctx->gen_dec_in, ctx->gen_dec_lstm,
-                                       ctx->gen_dec_up, ctx->gen_dec_res,
-                                       ctx->gen_dec_out, ctx->hp.ratios.data());
+    ggml_tensor* wm = forward_decoder(ctx0, latent, ctx->gen_dec_in, ctx->gen_dec_lstm, ctx->gen_dec_up,
+                                      ctx->gen_dec_res, ctx->gen_dec_out, ctx->hp.ratios.data());
 
     // Output = input + watermark (additive).
     // Decoder may produce fewer samples due to encoder rounding; crop input to match.
@@ -742,8 +741,7 @@ float* audioseal_embed(struct audioseal_ctx* ctx,
     }
 
     // Set inputs
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "audio_in"),
-                            pcm, 0, (size_t)n_samples * sizeof(float));
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "audio_in"), pcm, 0, (size_t)n_samples * sizeof(float));
 
     // Set message indices: for bit i, index = 2*i + bit_value
     std::vector<int32_t> msg_indices(ctx->hp.nbits);
@@ -753,8 +751,7 @@ float* audioseal_embed(struct audioseal_ctx* ctx,
     }
     ggml_tensor* msg_t = ggml_graph_get_tensor(gf, "msg_indices");
     if (msg_t) {
-        ggml_backend_tensor_set(msg_t, msg_indices.data(), 0,
-                                ctx->hp.nbits * sizeof(int32_t));
+        ggml_backend_tensor_set(msg_t, msg_indices.data(), 0, ctx->hp.nbits * sizeof(int32_t));
     }
 
     ggml_status st = ggml_backend_graph_compute(ctx->backend, gf);
@@ -767,14 +764,14 @@ float* audioseal_embed(struct audioseal_ctx* ctx,
 
     // Dump intermediate stages for debug/diff comparison
     if (std::getenv("AUDIOSEAL_DUMP_STAGES")) {
-        const char* stage_names[] = {"stage_enc_0", "stage_enc_res0", "stage_enc_down0",
-                                     "stage_enc_res1", "stage_enc_down1",
-                                     "stage_enc_res2", "stage_enc_down2",
-                                     "stage_enc_res3", "stage_enc_down3",
-                                     "enc_output", nullptr};
+        const char* stage_names[] = {
+            "stage_enc_0",    "stage_enc_res0",  "stage_enc_down0", "stage_enc_res1",  "stage_enc_down1",
+            "stage_enc_res2", "stage_enc_down2", "stage_enc_res3",  "stage_enc_down3", "enc_output",
+            nullptr};
         for (int s = 0; stage_names[s]; s++) {
             ggml_tensor* st = ggml_graph_get_tensor(gf, stage_names[s]);
-            if (!st) continue;
+            if (!st)
+                continue;
             size_t nbytes = ggml_nbytes(st);
             std::vector<float> buf(nbytes / sizeof(float));
             ggml_backend_tensor_get(st, buf.data(), 0, nbytes);
@@ -786,8 +783,8 @@ float* audioseal_embed(struct audioseal_ctx* ctx,
                 fwrite(hdr, sizeof(int32_t), 2, df);
                 fwrite(buf.data(), sizeof(float), buf.size(), df);
                 fclose(df);
-                fprintf(stderr, "audioseal: dumped %s ne=[%lld,%lld] to %s\n",
-                        stage_names[s], (long long)st->ne[0], (long long)st->ne[1], path);
+                fprintf(stderr, "audioseal: dumped %s ne=[%lld,%lld] to %s\n", stage_names[s], (long long)st->ne[0],
+                        (long long)st->ne[1], path);
             }
         }
     }
@@ -805,15 +802,14 @@ float* audioseal_embed(struct audioseal_ctx* ctx,
     return result;
 }
 
-float* audioseal_detect(struct audioseal_ctx* ctx,
-                        const float* pcm, int n_samples,
-                        int* out_n, uint8_t* out_message) {
+float* audioseal_detect(struct audioseal_ctx* ctx, const float* pcm, int n_samples, int* out_n, uint8_t* out_message) {
     if (!ctx || !pcm || n_samples <= 0 || !ctx->has_detector)
         return nullptr;
 
     ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
     ggml_context* ctx0 = ggml_init(ip);
-    if (!ctx0) return nullptr;
+    if (!ctx0)
+        return nullptr;
 
     ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 8192, false);
 
@@ -823,10 +819,8 @@ float* audioseal_detect(struct audioseal_ctx* ctx,
     ggml_set_input(x_in);
 
     // Detector encoder (same structure as generator encoder)
-    ggml_tensor* latent = forward_encoder(ctx0, x_in,
-                                           ctx->det_enc_in, ctx->det_enc_res,
-                                           ctx->det_enc_down, ctx->det_enc_lstm,
-                                           ctx->det_enc_out, ctx->hp.ratios.data());
+    ggml_tensor* latent = forward_encoder(ctx0, x_in, ctx->det_enc_in, ctx->det_enc_res, ctx->det_enc_down,
+                                          ctx->det_enc_lstm, ctx->det_enc_out, ctx->hp.ratios.data());
 
     // Reverse convolution: ConvTranspose1d(128, 32, k=320, s=320) → back to input time
     // K=s=320 so no padding crop needed.
@@ -834,8 +828,7 @@ float* audioseal_detect(struct audioseal_ctx* ctx,
         ggml_tensor* y = ggml_conv_transpose_1d(ctx0, ctx->det_reverse.w, latent, 320, 0, 1);
         y = ggml_reshape_2d(ctx0, y, y->ne[0], y->ne[1]);
         if (ctx->det_reverse.b) {
-            y = ggml_add(ctx0, y, ggml_reshape_2d(ctx0, ctx->det_reverse.b,
-                                                    1, (int)ctx->det_reverse.b->ne[0]));
+            y = ggml_add(ctx0, y, ggml_reshape_2d(ctx0, ctx->det_reverse.b, 1, (int)ctx->det_reverse.b->ne[0]));
         }
         latent = y;
     }
@@ -848,13 +841,12 @@ float* audioseal_detect(struct audioseal_ctx* ctx,
 
     // Softmax on detection channels (first 2), take index 1 (watermark present)
     // head_out shape: (18, T)
-    ggml_tensor* det_logits = ggml_view_2d(ctx0, head_out, 2, (int)head_out->ne[1],
-                                            head_out->nb[1], 0);
+    ggml_tensor* det_logits = ggml_view_2d(ctx0, head_out, 2, (int)head_out->ne[1], head_out->nb[1], 0);
     det_logits = ggml_cont(ctx0, det_logits);
     det_logits = ggml_soft_max(ctx0, det_logits);
     // Take channel 1 (watermark probability)
-    ggml_tensor* det_probs = ggml_view_2d(ctx0, det_logits, 1, (int)det_logits->ne[1],
-                                           det_logits->nb[1], sizeof(float));
+    ggml_tensor* det_probs =
+        ggml_view_2d(ctx0, det_logits, 1, (int)det_logits->ne[1], det_logits->nb[1], sizeof(float));
     det_probs = ggml_cont(ctx0, det_probs);
     ggml_set_name(det_probs, "det_probs");
     ggml_set_output(det_probs);
@@ -863,13 +855,12 @@ float* audioseal_detect(struct audioseal_ctx* ctx,
     // Message head: channels 2-17 → sigmoid → decoded bits
     ggml_tensor* msg_out = nullptr;
     if (out_message && (int)head_out->ne[0] >= 18) {
-        ggml_tensor* msg_logits = ggml_view_2d(ctx0, head_out, 16, (int)head_out->ne[1],
-                                                head_out->nb[1], 2 * sizeof(float));
+        ggml_tensor* msg_logits =
+            ggml_view_2d(ctx0, head_out, 16, (int)head_out->ne[1], head_out->nb[1], 2 * sizeof(float));
         msg_logits = ggml_cont(ctx0, msg_logits);
         // Average over time → (16,)
         // For now: take mean over time dimension
-        msg_out = ggml_pool_1d(ctx0, ggml_cont(ctx0, ggml_transpose(ctx0, msg_logits)),
-                               GGML_OP_POOL_AVG,
+        msg_out = ggml_pool_1d(ctx0, ggml_cont(ctx0, ggml_transpose(ctx0, msg_logits)), GGML_OP_POOL_AVG,
                                (int)msg_logits->ne[1], (int)msg_logits->ne[1], 0);
         msg_out = ggml_sigmoid(ctx0, msg_out);
         ggml_set_name(msg_out, "msg_out");
@@ -885,8 +876,7 @@ float* audioseal_detect(struct audioseal_ctx* ctx,
         return nullptr;
     }
 
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "det_audio_in"),
-                            pcm, 0, (size_t)n_samples * sizeof(float));
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "det_audio_in"), pcm, 0, (size_t)n_samples * sizeof(float));
 
     ggml_status st = ggml_backend_graph_compute(ctx->backend, gf);
     if (st != GGML_STATUS_SUCCESS) {
@@ -903,7 +893,8 @@ float* audioseal_detect(struct audioseal_ctx* ctx,
     if (result) {
         ggml_backend_tensor_get(probs, result, 0, (size_t)n_frames * sizeof(float));
     }
-    if (out_n) *out_n = n_frames;
+    if (out_n)
+        *out_n = n_frames;
 
     // Extract message bits
     if (msg_out && out_message) {

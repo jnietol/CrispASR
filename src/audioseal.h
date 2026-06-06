@@ -70,14 +70,10 @@ uint32_t audioseal_nbits(const struct audioseal_ctx* ctx);
 // `stage_name` is one of: "enc_output", "audio_out".
 // Returns a malloc'd float32 buffer. Caller frees with free().
 // *out_n receives the number of elements.
-float* audioseal_embed_stage(struct audioseal_ctx* ctx,
-                             const float* pcm, int n_samples,
-                             const uint8_t* message,
+float* audioseal_embed_stage(struct audioseal_ctx* ctx, const float* pcm, int n_samples, const uint8_t* message,
                              const char* stage_name, int* out_n);
 
-float* audioseal_embed(struct audioseal_ctx* ctx,
-                       const float* pcm, int n_samples,
-                       const uint8_t* message);
+float* audioseal_embed(struct audioseal_ctx* ctx, const float* pcm, int n_samples, const uint8_t* message);
 
 // Detect watermark in float32 mono PCM at 16 kHz.
 //
@@ -88,9 +84,7 @@ float* audioseal_embed(struct audioseal_ctx* ctx,
 // message bits.
 //
 // Returns nullptr on error.
-float* audioseal_detect(struct audioseal_ctx* ctx,
-                        const float* pcm, int n_samples,
-                        int* out_n, uint8_t* out_message);
+float* audioseal_detect(struct audioseal_ctx* ctx, const float* pcm, int n_samples, int* out_n, uint8_t* out_message);
 
 #ifdef __cplusplus
 }
