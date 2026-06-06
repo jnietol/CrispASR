@@ -857,6 +857,37 @@ catch_discover_tests(test_watermark
     PROPERTIES LABELS "unit"
 )
 
+# ─── test_tts_provenance — Catch2 unit tests for TTS AI-provenance
+#compliance (WAV LIST/INFO, ID3v2, C2PA, consent gate, watermark edge cases).
+#Pure CPU, no model dependencies.
+add_executable(test_tts_provenance test_tts_provenance.cpp)
+target_include_directories(test_tts_provenance PRIVATE
+    ${PROJECT_SOURCE_DIR}/examples/cli
+)
+target_link_libraries(test_tts_provenance PRIVATE
+    Catch2::Catch2WithMain
+)
+catch_discover_tests(test_tts_provenance
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit"
+)
+
+# ─── test_audioseal — Catch2 unit tests for AudioSeal ggml watermark.
+#API surface tests run unconditionally. Live model tests require
+#AUDIOSEAL_GGUF env var pointing at an audioseal.gguf.
+add_executable(test_audioseal test_audioseal.cpp)
+target_include_directories(test_audioseal PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(test_audioseal PRIVATE
+    Catch2::Catch2WithMain
+    audioseal
+)
+catch_discover_tests(test_audioseal
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit"
+)
+
 # ─── test_server_chunking — Catch2 unit tests for the sentence splitter
 #used by / v1 / audio / speech long - form input(PLAN §75d / issue #66).
 #Pure functions, no backend dependency.
