@@ -218,3 +218,130 @@ TEST_CASE("registry: all entries with companions have companion_approx_size set"
         }
     }
 }
+
+// ── #152: fill() robustness — no entry may crash on lookup ──────────
+
+TEST_CASE("registry: every entry fills without crash (#152)", "[unit][registry]") {
+    // The SIGSEGV in #152 was heap corruption, but this test ensures
+    // fill() handles every Entry in the static table without tripping
+    // on NULL fields or malformed strings.
+    const int n = crispasr_registry_count();
+    REQUIRE(n > 0);
+    for (int i = 0; i < n; ++i) {
+        CrispasrRegistryEntry e;
+        bool ok = crispasr_registry_get_at(i, e);
+        REQUIRE(ok);
+        REQUIRE(!e.backend.empty());
+        REQUIRE(!e.filename.empty());
+        REQUIRE(!e.url.empty());
+        REQUIRE(!e.approx_size.empty());
+        // companion fields: either both set or both empty
+        REQUIRE((e.companion_filename.empty() == e.companion_url.empty()));
+    }
+}
+
+TEST_CASE("registry: fill with preferred quant does not crash on any entry (#152)", "[unit][registry]") {
+    const int n = crispasr_registry_count();
+    for (int i = 0; i < n; ++i) {
+        CrispasrRegistryEntry e;
+        // Exercise the quant-rewriting path for every entry
+        crispasr_registry_get_at(i, e);
+        CrispasrRegistryEntry eq;
+        crispasr_registry_lookup(e.backend, eq, "q4_k");
+        REQUIRE(!eq.backend.empty());
+        REQUIRE(!eq.filename.empty());
+    }
+}
+
+// ── v0.7.0 new backends: verify they exist in the registry ──────────
+
+TEST_CASE("registry: zonos has entry", "[unit][registry]") {
+    CrispasrRegistryEntry e;
+    REQUIRE(crispasr_registry_lookup("zonos", e));
+    REQUIRE(e.filename.find("zonos") != std::string::npos);
+}
+
+TEST_CASE("registry: kugelaudio has entry", "[unit][registry]") {
+    CrispasrRegistryEntry e;
+    REQUIRE(crispasr_registry_lookup("kugelaudio", e));
+}
+
+TEST_CASE("registry: melotts has entry", "[unit][registry]") {
+    CrispasrRegistryEntry e;
+    REQUIRE(crispasr_registry_lookup("melotts", e));
+}
+
+TEST_CASE("registry: cosyvoice3-tts has entry", "[unit][registry]") {
+    CrispasrRegistryEntry e;
+    REQUIRE(crispasr_registry_lookup("cosyvoice3-tts", e));
+}
+
+TEST_CASE("registry: dia has entry", "[unit][registry]") {
+    CrispasrRegistryEntry e;
+    REQUIRE(crispasr_registry_lookup("dia", e));
+}
+
+TEST_CASE("registry: f5-tts has entry", "[unit][registry]") {
+    CrispasrRegistryEntry e;
+    REQUIRE(crispasr_registry_lookup("f5-tts", e));
+}
+
+TEST_CASE("registry: bark has entry", "[unit][registry]") {
+    CrispasrRegistryEntry e;
+    REQUIRE(crispasr_registry_lookup("bark", e));
+}
+
+TEST_CASE("registry: piper has entry", "[unit][registry]") {
+    CrispasrRegistryEntry e;
+    REQUIRE(crispasr_registry_lookup("piper", e));
+}
+
+TEST_CASE("registry: csm (sesame) has entry", "[unit][registry]") {
+    CrispasrRegistryEntry e;
+    REQUIRE(crispasr_registry_lookup("csm", e));
+}
+
+TEST_CASE("registry: pocket-tts has entry", "[unit][registry]") {
+    CrispasrRegistryEntry e;
+    REQUIRE(crispasr_registry_lookup("pocket-tts", e));
+}
+
+TEST_CASE("registry: speecht5 has entry", "[unit][registry]") {
+    CrispasrRegistryEntry e;
+    REQUIRE(crispasr_registry_lookup("speecht5", e));
+}
+
+TEST_CASE("registry: fastpitch has entry", "[unit][registry]") {
+    CrispasrRegistryEntry e;
+    REQUIRE(crispasr_registry_lookup("fastpitch", e));
+}
+
+TEST_CASE("registry: parler-tts has entry", "[unit][registry]") {
+    CrispasrRegistryEntry e;
+    REQUIRE(crispasr_registry_lookup("parler-tts", e));
+}
+
+TEST_CASE("registry: voxcpm2-tts has entry", "[unit][registry]") {
+    CrispasrRegistryEntry e;
+    REQUIRE(crispasr_registry_lookup("voxcpm2-tts", e));
+}
+
+TEST_CASE("registry: moss-audio has entry", "[unit][registry]") {
+    CrispasrRegistryEntry e;
+    REQUIRE(crispasr_registry_lookup("moss-audio", e));
+}
+
+TEST_CASE("registry: sensevoice has entry", "[unit][registry]") {
+    CrispasrRegistryEntry e;
+    REQUIRE(crispasr_registry_lookup("sensevoice", e));
+}
+
+TEST_CASE("registry: paraformer has entry", "[unit][registry]") {
+    CrispasrRegistryEntry e;
+    REQUIRE(crispasr_registry_lookup("paraformer", e));
+}
+
+TEST_CASE("registry: outetts has entry", "[unit][registry]") {
+    CrispasrRegistryEntry e;
+    REQUIRE(crispasr_registry_lookup("outetts", e));
+}
