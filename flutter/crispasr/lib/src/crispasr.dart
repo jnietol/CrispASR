@@ -4063,3 +4063,84 @@ String? kokoroResolveModelForLang(String modelPath, String lang,
     calloc.free(nameBuf);
   }
 }
+
+// =========================================================================
+// Audio watermark — CrispASR native spread-spectrum + optional AudioSeal
+// =========================================================================
+
+/// Native audio watermarking via CrispASR's `crispasr_watermark_*` C API.
+///
+/// Provides two tiers:
+///   1. **Built-in spread-spectrum** (always available when the symbols are
+///      exported): frequency-domain pattern that survives re-encoding and
+///      moderate compression.
+///   2. **AudioSeal neural** (optional): Meta's SEANet-based watermark,
+///      activated by calling [loadModel] with an AudioSeal GGUF.
+///
+/// When an AudioSeal model is loaded, [embed] and [detect] dispatch to it
+/// automatically; otherwise they use the spread-spectrum fallback.
+///
+/// All operations work on float32 mono PCM. AudioSeal expects 16 kHz;
+/// spread-spectrum works at any sample rate.
+class CrispasrWatermark {
+  CrispasrWatermark._();
+
+  /// Check whether the loaded dylib exports the watermark symbols.
+  /// Returns false on older CrispASR builds that predate the watermark API.
+  static bool isAvailable({DynamicLibrary? lib}) {
+    lib ??= DynamicLibrary.open(CrispASR.defaultLibName());
+    return lib.providesSymbol('crispasr_watermark_embed') &&
+        lib.providesSymbol('crispasr_watermark_detect');
+  }
+
+  /// Load an AudioSeal GGUF model for neural watermarking. Call once at
+  /// startup. Returns true on success. On failure the API falls back to
+  /// the built-in spread-spectrum watermark.
+  static bool loadModel(String ggufPath, {DynamicLibrary? lib}) {
+    lib ??= DynamicLibrary.open(CrispASR.defaultLibName());
+    if (!lib.providesSymbol('crispasr_watermark_load_model')) return false;
+    final fn = lib.lookupFunction<
+        Int32 Function(Pointer<Utf8>),
+        int Function(Pointer<Utf8>)>('crispasr_watermark_load_model');
+    final p = ggufPath.toNativeUtf8();
+    final rc = fn(p);
+    malloc.free(p);
+    return rc == 0;
+  }
+
+  /// Embed a watermark into float32 mono PCM (in-place).
+  ///
+  /// [alpha] controls spread-spectrum strength (0.005 default); ignored
+  /// when AudioSeal is loaded.
+  ///
+  /// Returns a new [Float32List] with the watermark applied.
+  static Float32List embed(Float32List pcm, {double alpha = 0.005, DynamicLibrary? lib}) {
+    lib ??= DynamicLibrary.open(CrispASR.defaultLibName());
+    final fn = lib.lookupFunction<
+        Void Function(Pointer<Float>, Int32, Float),
+        void Function(Pointer<Float>, int, double)>('crispasr_watermark_embed');
+    final ptr = malloc<Float>(pcm.length);
+    ptr.asTypedList(pcm.length).setAll(0, pcm);
+    fn(ptr, pcm.length, alpha);
+    final result = Float32List.fromList(ptr.asTypedList(pcm.length));
+    malloc.free(ptr);
+    return result;
+  }
+
+  /// Detect watermark presence in float32 mono PCM.
+  ///
+  /// Returns a confidence score in [0, 1]:
+  ///   - > 0.65 — watermark present (AI-generated)
+  ///   - < 0.40 — no watermark detected
+  static double detect(Float32List pcm, {DynamicLibrary? lib}) {
+    lib ??= DynamicLibrary.open(CrispASR.defaultLibName());
+    final fn = lib.lookupFunction<
+        Float Function(Pointer<Float>, Int32),
+        double Function(Pointer<Float>, int)>('crispasr_watermark_detect');
+    final ptr = malloc<Float>(pcm.length);
+    ptr.asTypedList(pcm.length).setAll(0, pcm);
+    final score = fn(ptr, pcm.length);
+    malloc.free(ptr);
+    return score;
+  }
+}
