@@ -4,8 +4,8 @@ package whisper
 // CrispASR Session API for TTS-capable backends (kokoro, vibevoice,
 // qwen3-tts, orpheus, chatterbox, csm, dia, speecht5, fastpitch,
 // melotts, piper, parler-tts, outetts, indextts, voxcpm2-tts,
-// cosyvoice3-tts, pocket-tts, f5-tts, bark, kugelaudio, ...) plus the kokoro per-language
-// model + voice resolver (PLAN #56 opt 2b).
+// cosyvoice3-tts, pocket-tts, f5-tts, bark, kugelaudio, tada, ...) plus the kokoro
+// per-language model + voice resolver (PLAN #56 opt 2b).
 
 /*
 // LDFLAGS for libcrispasr + all conditionally-built sub-libs are set in
@@ -298,7 +298,7 @@ import (
 	"unsafe"
 )
 
-// CrispasrSession is a TTS-capable session (kokoro, vibevoice, qwen3-tts, orpheus, parler-tts, pocket-tts).
+// CrispasrSession is a TTS-capable session (kokoro, vibevoice, qwen3-tts, orpheus, parler-tts, pocket-tts, tada).
 type CrispasrSession struct {
 	handle *C.CrispasrSession
 }
@@ -845,7 +845,7 @@ func (s *CrispasrSession) Speakers() []string {
 }
 
 // Synthesize converts `text` to 24 kHz mono PCM. Requires a TTS-capable
-// backend (kokoro / vibevoice / qwen3-tts / orpheus).
+// backend (kokoro / vibevoice / qwen3-tts / orpheus / tada).
 func (s *CrispasrSession) Synthesize(text string) ([]float32, error) {
 	ctext := C.CString(text)
 	defer C.free(unsafe.Pointer(ctext))

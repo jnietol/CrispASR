@@ -27,6 +27,7 @@ trade-off:
 | **`voxcpm2-tts`** | VoxCPM2: 2B Qwen2 backbone + flow matching + BigVGAN @ 48 kHz (decimated to 24 kHz). Zero-shot voice cloning via `--voice <ref.wav>`. | Yes | ~2.4 GB via `-m auto` |
 | **`pocket-tts`** | Kyutai Pocket TTS 100M: continuous-latent AR @ 12.5 Hz + one-step LSD flow head + Mimi VAE decoder → 24 kHz. MIT / CC-BY-4.0. Voice cloning via `--voice ref.wav`. | Yes (`--voice`) | ~220 MB via `-m auto` (F16 GGUF) |
 | **`kugelaudio`** | KugelAudio-0-Open: 7B Qwen2.5 backbone + 4-layer DiT diffusion head (20-step SDE-DPMSolver++) + acoustic VAE decoder → 24 kHz. 23 languages. MIT. | Pre-encoded voices (`--voice voice.gguf`) | ~5.3 GB Q4_K / ~16 GB F16 via `-m auto` |
+| **`tada`** | HumeAI TADA-3B-ML: Llama-3.2-3B backbone + per-token flow-matching diffusion head + TADA codec → 24 kHz. 1:1 text-to-acoustic alignment (no expansion). Voice cloning via reference audio prompt. Requires `--codec-model` for companion codec GGUF. | Yes (`--voice <ref.wav>`) | ~2.2 GB talker Q4_K + ~1 GB codec GGUF |
 
 All backends write mono WAV via `--tts-output` (22 kHz for piper/fastpitch, 16 kHz for speecht5, 24 kHz for most others, 44.1 kHz for melotts/dia/parler-tts, 48 kHz for voxcpm2-tts).
 

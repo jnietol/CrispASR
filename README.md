@@ -142,6 +142,7 @@ quick-start commands and engine selection guidance.
 | **parler-tts** | [`cstr/parler-tts-mini-v1.1-GGUF`](https://huggingface.co/cstr/parler-tts-mini-v1.1-GGUF) | Parler TTS Mini v1.1 (~900M): T5 encoder + MusicGen decoder + DAC 44.1 kHz; prompt-conditioned (describe voice in text via `--instruct`) | en | Apache-2.0 |
 | **outetts** | [`cstr/outetts-0.3-1b-GGUF`](https://huggingface.co/cstr/outetts-0.3-1b-GGUF) | OLMo-1B talker + WavTokenizer single-codebook VQ-GAN at 24 kHz; voice cloning via speaker profile JSON (`--voice <speaker.json>`) | en | CC-BY-4.0 |
 | **pocket-tts** | [`cstr/pocket-tts-GGUF`](https://huggingface.co/cstr/pocket-tts-GGUF) | Kyutai Pocket TTS 100M: continuous-latent AR at 12.5 Hz + one-step LSD flow + Mimi VAE 24 kHz; voice cloning via ref audio ([more](docs/architecture.md#pocket-tts)) | en | MIT / CC-BY-4.0 |
+| **tada** | `HumeAI/tada-3b-ml` | Llama-3.2-3B backbone + per-token FM diffusion head + TADA codec at 24 kHz; 1:1 text-to-acoustic alignment; voice cloning via `--voice <ref.wav>` + `--codec-model <codec.gguf>` ([more](docs/architecture.md#tada)) | en | — |
 
 <details>
 <summary><b>TTS feature matrix</b></summary>
@@ -166,6 +167,7 @@ quick-start commands and engine selection guidance.
 | fastpitch | — | — | 22 | — | — |
 | piper | — | — | 22 | — | — |
 | pocket-tts | yes | temp | 24 | yes | — |
+| tada | yes | — | 24 | — | — |
 
 \* CustomVoice variant only; Base uses baked speakers via `--voice <name>`.
 

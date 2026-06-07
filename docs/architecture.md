@@ -701,3 +701,24 @@ Suno Bark (MIT, ~400M): three-stage GPT-2 pipeline — text → semantic tokens
 GGUF with selective Q4_K quantization. Speaker conditioning via `.npz`
 voice prompts.
 
+### tada
+
+HumeAI TADA-3B-ML (`HumeAI/tada-3b-ml`). Two GGUFs: backbone talker + codec.
+
+- **Backbone**: Llama-3.2-3B (28L, 3072-d, 24 heads, 8 KV heads, RoPE, SwiGLU,
+  RMSNorm). Token embeddings extended with `acoustic_proj`, `mask`, `time_start`,
+  and `time_end` step-embedding tensors for per-token conditioning.
+- **FM head**: 4-layer SwiGLU + AdaLN transformer with sinusoidal time embedding.
+  Uses an Euler ODE solver (flow-matching) to diffuse a noise vector into a
+  per-token acoustic vector conditioned on the backbone hidden state.
+- **Codec**: 6-layer local-attention transformer + DAC-style upsampler → 24 kHz
+  mono PCM.
+- **Special**: 1:1 text-to-acoustic alignment — every text token maps to exactly
+  one acoustic vector (no duration predictor, no length regulator). BPE tokenizer
+  (tiktoken GPT-2 byte-level vocab).
+- **Voice cloning**: reference audio is encoded via the codec and prepended as a
+  prompt to the backbone KV cache.
+
+Models: `HumeAI/tada-3b-ml` (backbone Q4_K ~2.2 GB) + companion codec GGUF
+(~1 GB). Pass `--codec-model <codec.gguf>`.
+

@@ -506,6 +506,8 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
         return "piper";
     if (contains_ci("chatterbox") || contains_ci("kartoffelbox") || contains_ci("lahgtna"))
         return "chatterbox";
+    if (contains_ci("tada"))
+        return "tada";
     if (contains_ci("m2m100") || (contains_ci("m2m") && contains_ci("100")) || contains_ci("wmt21"))
         return "m2m100";
     if (contains_ci("madlad"))
@@ -606,6 +608,8 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
                 result = "f5-tts";
             else if (a == "chatterbox" || a == "chatterbox_turbo" || a == "kartoffelbox")
                 result = "chatterbox";
+            else if (a == "tada" || a == "tada-tts" || a == "tada-3b-ml")
+                result = "tada";
             else if (a == "m2m100" || a == "m2m_100")
                 result = "m2m100";
             else if (a == "voxtral")

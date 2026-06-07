@@ -2126,6 +2126,24 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
         return s;
     }
 #endif
+#ifdef CA_HAVE_TADA
+    if (s->backend == "tada" || s->backend == "tada-tts" || s->backend == "tada-3b" || s->backend == "tada-3b-ml") {
+        s->backend = "tada";
+        tada_context_params p = tada_context_default_params();
+        p.n_threads = s->n_threads;
+        p.verbosity = g_open_verbosity_tls > 0 ? g_open_verbosity_tls : 1;
+        p.use_gpu = g_open_use_gpu_tls;
+        s->tada_ctx = tada_init_from_file(model_path, p);
+        if (!s->tada_ctx) {
+            fprintf(stderr, "crispasr: failed to init tada from '%s'\n", model_path);
+            delete s;
+            return nullptr;
+        }
+        // TADA codec must be loaded before synthesise. Caller does so via
+        // `crispasr_session_set_codec_path` after open.
+        return s;
+    }
+#endif
 #ifdef CA_HAVE_OUTETTS
     if (s->backend == "outetts" || s->backend == "oute-tts" || s->backend == "oute_tts") {
         s->backend = "outetts";
@@ -2766,6 +2784,9 @@ CA_EXPORT int crispasr_session_available_backends(char* out_csv, int out_cap) {
 #endif
 #ifdef CA_HAVE_CHATTERBOX
     list += ",chatterbox";
+#endif
+#ifdef CA_HAVE_TADA
+    list += ",tada";
 #endif
 #ifdef CA_HAVE_OUTETTS
     list += ",outetts";
@@ -5023,6 +5044,10 @@ CA_EXPORT int crispasr_session_set_codec_path(crispasr_session* s, const char* p
     if (s->chatterbox_ctx)
         return chatterbox_set_s3gen_path(s->chatterbox_ctx, path);
 #endif
+#ifdef CA_HAVE_TADA
+    if (s->tada_ctx)
+        return tada_set_codec_path(s->tada_ctx, path);
+#endif
 #ifdef CA_HAVE_OUTETTS
     if (s->outetts_ctx)
         return outetts_set_codec_path(s->outetts_ctx, path);
@@ -5496,6 +5521,11 @@ CA_EXPORT float* crispasr_session_synthesize(crispasr_session* s, const char* te
         return chatterbox_synthesize(s->chatterbox_ctx, text, out_n_samples);
     }
 #endif
+#ifdef CA_HAVE_TADA
+    if (s->tada_ctx) {
+        return tada_synthesize(s->tada_ctx, text, out_n_samples);
+    }
+#endif
 #ifdef CA_HAVE_CSM
     if (s->csm_tts_ctx) {
         // CSM emits 24 kHz mono float — same convention as the other TTS
@@ -5958,6 +5988,10 @@ CA_EXPORT void crispasr_session_close(crispasr_session* s) {
     if (s->chatterbox_ctx)
         chatterbox_free(s->chatterbox_ctx);
 #endif
+#ifdef CA_HAVE_TADA
+    if (s->tada_ctx)
+        tada_free(s->tada_ctx);
+#endif
 #ifdef CA_HAVE_OUTETTS
     if (s->outetts_ctx)
         outetts_free(s->outetts_ctx);
@@ -6333,6 +6367,12 @@ CA_EXPORT int crispasr_session_set_temperature(crispasr_session* s, float temper
         touched++;
     }
 #endif
+#ifdef CA_HAVE_TADA
+    if (s->tada_ctx) {
+        tada_set_temperature(s->tada_ctx, temperature);
+        touched++;
+    }
+#endif
 #ifdef CA_HAVE_OUTETTS
     if (s->outetts_ctx) {
         outetts_set_temperature(s->outetts_ctx, temperature);
@@ -6399,6 +6439,12 @@ CA_EXPORT int crispasr_session_set_tts_seed(crispasr_session* s, uint64_t seed) 
 #ifdef CA_HAVE_CHATTERBOX
     if (s->chatterbox_ctx) {
         chatterbox_set_seed((chatterbox_context*)s->chatterbox_ctx, (uint32_t)seed);
+        touched++;
+    }
+#endif
+#ifdef CA_HAVE_TADA
+    if (s->tada_ctx) {
+        tada_set_seed(s->tada_ctx, seed);
         touched++;
     }
 #endif
