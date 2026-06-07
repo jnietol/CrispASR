@@ -306,6 +306,27 @@ static g2p_en::context g_g2p_ctx;
 static bool g_g2p_tried = false;
 static std::string g_g2p_dict_source; // "olaph", "open-dict", or file path
 
+static void g2p_ensure_espeak_dict() {
+    if (g_g2p_ctx.espeak_ipa.loaded) return;
+    // Try local cache first
+    const char* home = getenv("HOME");
+    if (!home) home = getenv("USERPROFILE");
+    if (home) {
+        std::string p = std::string(home) + "/.cache/crispasr/espeak_en_us.tsv";
+        int n = g2p_en::load_ipa_dict_file(g_g2p_ctx.espeak_ipa, p);
+        if (n > 0) { fprintf(stderr, "piper_tts: espeak IPA dict loaded (%d entries)\n", n); return; }
+    }
+    // Auto-download from HuggingFace
+    std::string path = crispasr_cache::ensure_cached_file(
+        "espeak_en_us.tsv",
+        "https://huggingface.co/datasets/cstr/g2p-dicts/resolve/main/espeak_en_us.tsv",
+        /*quiet=*/true, "crispasr", "");
+    if (!path.empty()) {
+        int n = g2p_en::load_ipa_dict_file(g_g2p_ctx.espeak_ipa, path);
+        if (n > 0) fprintf(stderr, "piper_tts: espeak IPA dict loaded (%d entries)\n", n);
+    }
+}
+
 static void g2p_ensure_cmudict() {
     if (g_g2p_ctx.dict.loaded)
         return;
@@ -345,10 +366,9 @@ static bool phonemize_builtin(const std::string& voice, const std::string& text,
         std::lock_guard<std::mutex> g(g_g2p_mu);
         if (!g_g2p_tried) {
             g_g2p_tried = true;
+            // Load dicts in priority order: espeak IPA dict > CMUdict
+            g2p_ensure_espeak_dict();
             g2p_ensure_cmudict();
-            if (g_g2p_ctx.dict.loaded) {
-                fprintf(stderr, "piper_tts: CMUdict loaded (%zu entries)\n", g_g2p_ctx.dict.entries.size());
-            }
         }
     }
     out = g2p_en::text_to_ipa(g_g2p_ctx, text);

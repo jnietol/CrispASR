@@ -431,11 +431,49 @@ inline int load_cmudict_file(cmudict& dict, const std::string& path) {
     return count;
 }
 
+// ── IPA dictionary (pre-generated espeak output) ────────────────────
+// Format: "word\t/IPA/\n" — loads espeak-generated dicts directly.
+// These bypass ARPAbet→IPA conversion entirely.
+
+struct ipa_dict {
+    std::map<std::string, std::string> entries; // word (lowercase) → IPA
+    bool loaded = false;
+};
+
+// Load espeak/open-dict-data format: "word\t/IPA/\n"
+inline int load_ipa_dict_file(ipa_dict& dict, const std::string& path) {
+    FILE* f = fopen(path.c_str(), "r");
+    if (!f) return 0;
+    char line[512];
+    int count = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (line[0] == '#' || line[0] == 'w' || line[0] == '\n') continue; // skip header/comments
+        size_t len = strlen(line);
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) line[--len] = 0;
+        char* tab = strchr(line, '\t');
+        if (!tab) continue;
+        *tab = 0;
+        std::string word = line;
+        for (auto& c : word) c = (char)tolower((unsigned char)c);
+        if (dict.entries.count(word)) continue;
+        char* ipa_start = tab + 1;
+        while (*ipa_start == '/' || *ipa_start == ' ') ipa_start++;
+        std::string ipa;
+        for (char* p = ipa_start; *p && *p != '/' && *p != ','; p++) ipa += *p;
+        while (!ipa.empty() && (ipa.back() == ' ' || ipa.back() == '/')) ipa.pop_back();
+        if (!ipa.empty() && !word.empty()) { dict.entries[word] = ipa; count++; }
+    }
+    fclose(f);
+    dict.loaded = count > 0;
+    return count;
+}
+
 // ── Context ─────────────────────────────────────────────────────────
 
 struct context {
-    cmudict dict;
-    neural_model neural;
+    ipa_dict espeak_ipa;   // Pre-generated espeak IPA (highest priority)
+    cmudict dict;          // CMUdict ARPAbet (converted to IPA)
+    neural_model neural;   // Neural G2P for OOV
 };
 
 // ── Tokenizer ───────────────────────────────────────────────────────
@@ -473,15 +511,25 @@ inline const std::map<std::string, std::string>& espeak_overrides() {
 }
 
 // Convert a single word to IPA using the pipeline:
-// 0. espeak override table (exact match for problem words)
-// 1. CMUdict + ARPAbet→IPA
-// 2. Neural G2P
-// 3. LTS rules
+// Pipeline (highest priority first):
+// 0. Pre-generated espeak IPA dict (100% piper-compatible)
+// 1. espeak override table (handful of truly irregular words)
+// 2. CMUdict + ARPAbet→IPA conversion (76% espeak match)
+// 3. Neural G2P (OOV fallback)
+// 4. LTS rules (zero-dep fallback)
 inline std::string word_to_ipa(const context& ctx, const std::string& word) {
+    std::string lower;
+    for (char c : word) lower += (char)tolower((unsigned char)c);
     std::string upper;
     for (char c : word) upper += (char)toupper((unsigned char)c);
 
-    // Tier 0: espeak override table
+    // Tier 0: Pre-generated espeak IPA dict (bypasses ARPAbet conversion)
+    if (ctx.espeak_ipa.loaded) {
+        auto it = ctx.espeak_ipa.entries.find(lower);
+        if (it != ctx.espeak_ipa.entries.end()) return it->second;
+    }
+
+    // Tier 1: espeak override table (handful of irregular words)
     auto& overrides = espeak_overrides();
     auto ov_it = overrides.find(upper);
     if (ov_it != overrides.end()) return ov_it->second;

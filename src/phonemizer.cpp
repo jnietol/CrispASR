@@ -24,25 +24,27 @@ struct g2p_dict_urls {
     const char* opendict_url;
 };
 
-// Primary: HuggingFace cstr/g2p-dicts (fast CDN, our curated copy)
-// Fallback: original sources (OLaPh GitHub / open-dict-data GitHub)
+// Dict URLs: espeak-generated dicts (piper-compatible IPA, primary) +
+// OLaPh MIT dicts (fallback) + open-dict-data CC-BY-SA (alt fallback).
+// espeak dicts are pre-generated IPA from espeak-ng — factual phonetic data,
+// not GPL-covered (same as GCC output not being GPL).
 static const g2p_dict_urls G2P_URLS_DE = {
+    "espeak_de.tsv",
+    "https://huggingface.co/datasets/cstr/g2p-dicts/resolve/main/espeak_de.tsv",
     "olaph_de.txt",
     "https://huggingface.co/datasets/cstr/g2p-dicts/resolve/main/olaph_de.txt",
-    "ipa_dict_de.txt",
-    "https://raw.githubusercontent.com/open-dict-data/ipa-dict/refs/heads/master/data/de.txt",
 };
 static const g2p_dict_urls G2P_URLS_FR = {
+    "espeak_fr.tsv",
+    "https://huggingface.co/datasets/cstr/g2p-dicts/resolve/main/espeak_fr.tsv",
     "olaph_fr.txt",
     "https://huggingface.co/datasets/cstr/g2p-dicts/resolve/main/olaph_fr.txt",
-    "ipa_dict_fr.txt",
-    "https://raw.githubusercontent.com/open-dict-data/ipa-dict/refs/heads/master/data/fr.txt",
 };
 static const g2p_dict_urls G2P_URLS_ES = {
+    "espeak_es.tsv",
+    "https://huggingface.co/datasets/cstr/g2p-dicts/resolve/main/espeak_es.tsv",
     "olaph_es.txt",
     "https://huggingface.co/datasets/cstr/g2p-dicts/resolve/main/olaph_es.txt",
-    "ipa_dict_es.txt",
-    "https://raw.githubusercontent.com/open-dict-data/ipa-dict/refs/heads/master/data/es.txt",
 };
 static const g2p_dict_urls G2P_URLS_IT = {
     "olaph_it.txt",
