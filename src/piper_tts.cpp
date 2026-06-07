@@ -23,6 +23,7 @@
 #include "ggml-cpu.h"
 
 #include "core/conv.h"
+#include "core/g2p_en.h"
 #include "core/gguf_loader.h"
 
 #include <algorithm>
@@ -283,10 +284,45 @@ static bool phonemize_espeak_popen(const std::string& voice, const std::string& 
     return !out.empty();
 }
 
+// Built-in English G2P (LTS rules + optional CMUdict). MIT-licensed,
+// zero external dependencies. Used as final fallback when espeak-ng
+// is not available. Produces IPA via ARPAbet→IPA conversion.
+static std::mutex g_g2p_mu;
+static g2p_en::context g_g2p_ctx;
+static bool g_g2p_tried = false;
+
+static bool phonemize_builtin(const std::string& voice, const std::string& text, std::string& out) {
+    // Only English for now
+    if (!voice.empty() && voice.find("en") == std::string::npos)
+        return false;
+    {
+        std::lock_guard<std::mutex> g(g_g2p_mu);
+        if (!g_g2p_tried) {
+            g_g2p_tried = true;
+            // Try to load CMUdict from common locations
+            const char* env = getenv("CRISPASR_CMUDICT_PATH");
+            if (env && *env) {
+                g2p_en::load_cmudict_file(g_g2p_ctx.dict, env);
+            }
+            if (!g_g2p_ctx.dict.loaded) {
+                const char* home = getenv("HOME");
+                if (!home) home = getenv("USERPROFILE");
+                if (home) {
+                    std::string p = std::string(home) + "/.cache/crispasr/cmudict.dict";
+                    g2p_en::load_cmudict_file(g_g2p_ctx.dict, p);
+                }
+            }
+        }
+    }
+    out = g2p_en::text_to_ipa(g_g2p_ctx, text);
+    return !out.empty();
+}
+
 static bool phonemize_espeak(const std::string& voice, const std::string& text, std::string& out) {
-    // Try in-process first (linked or dlopen'd), then popen fallback.
+    // Try in-process espeak first, then popen, then built-in G2P.
     if (phonemize_espeak_lib(voice, text, out)) return true;
-    return phonemize_espeak_popen(voice, text, out);
+    if (phonemize_espeak_popen(voice, text, out)) return true;
+    return phonemize_builtin(voice, text, out);
 }
 
 // ── Hparams ────────────────────────────────────────────────────────
@@ -2240,22 +2276,10 @@ const char* piper_tts_espeak_voice(const struct piper_tts_context* ctx) {
 }
 
 bool piper_tts_has_espeak(void) {
-#ifdef CRISPASR_HAVE_ESPEAK_NG
+    // Built-in English G2P is always available (LTS rules, no deps).
+    // This function now reports whether ANY phonemization path works,
+    // not just espeak-ng specifically.
     return true;
-#elif defined(CRISPASR_ESPEAK_DLOPEN)
-    // Try dlopen first
-    if (espeak_dl_get().load()) return true;
-    // Fall through to popen check
-#endif
-    // Check if espeak-ng binary is on $PATH
-    char cmd[64];
-    snprintf(cmd, sizeof(cmd), "espeak-ng --version%s", piper_redir);
-    FILE* fp = piper_popen(cmd, "r");
-    if (!fp) return false;
-    char buf[128];
-    bool ok = fgets(buf, sizeof(buf), fp) != nullptr;
-    piper_pclose(fp);
-    return ok;
 }
 
 void piper_tts_set_dump_dir(struct piper_tts_context* ctx, const char* dir) {

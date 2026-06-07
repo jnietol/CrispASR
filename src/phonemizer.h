@@ -35,8 +35,10 @@ bool phonemize_espeak_dlopen(const std::string& lang, const std::string& text, s
 bool phonemize_espeak_popen(const std::string& lang, const std::string& text, std::string& out);
 
 // Built-in English G2P: LTS rules (always available, zero deps) +
-// optional CMUdict (134K words) + optional neural G2P (GRU seq2seq).
+// optional CMUdict (134K words, auto-loaded from ~/.cache/crispasr/cmudict.dict
+// or CRISPASR_CMUDICT_PATH env var) + optional neural G2P (GRU seq2seq).
 // Produces IPA directly via ARPAbet→IPA conversion table.
+// For non-English, returns false and falls through to espeak.
 bool phonemize_builtin_en(const std::string& lang, const std::string& text, std::string& out);
 
 // Try all available phonemizers in priority order.

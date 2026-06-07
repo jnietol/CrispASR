@@ -34,16 +34,12 @@ static float compute_rms(const float* pcm, int n) {
     return (float)std::sqrt(sum / n);
 }
 
-TEST_CASE("espeak-ng availability", "[espeak]") {
-    // Reports whether espeak-ng is reachable via dlopen or popen.
-    // May be false if espeak-ng is not installed — that's fine,
-    // the test just documents the current state.
+TEST_CASE("phonemizer availability", "[espeak]") {
+    // Built-in English G2P is always available (LTS rules, zero deps).
+    // piper_tts_has_espeak() now reports whether ANY phonemization
+    // path works (espeak-ng, dlopen, popen, or built-in G2P).
     bool has = piper_tts_has_espeak();
-    INFO("piper_tts_has_espeak() = " << has);
-    if (!has) {
-        WARN("espeak-ng not available — text synthesis tests will be skipped");
-    }
-    SUCCEED();
+    REQUIRE(has);
 }
 
 TEST_CASE("piper phoneme synthesis (IPA)", "[piper][espeak]") {
@@ -95,13 +91,10 @@ TEST_CASE("piper phoneme synthesis (IPA)", "[piper][espeak]") {
     piper_tts_free(ctx);
 }
 
-TEST_CASE("piper text synthesis (espeak phonemization)", "[piper][espeak]") {
+TEST_CASE("piper text synthesis (built-in G2P or espeak)", "[piper][espeak]") {
     std::string model = get_model_path();
     if (model.empty()) {
         SKIP("PIPER_TEST_MODEL not set");
-    }
-    if (!piper_tts_has_espeak()) {
-        SKIP("espeak-ng not available");
     }
 
     struct piper_tts_params pp = piper_tts_default_params();

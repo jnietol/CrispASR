@@ -178,6 +178,88 @@ TEST_CASE("tokenizer splits correctly", "[g2p][tokenizer]") {
     }
 }
 
+// ── CMUdict loading ──────────────────────────────────────────────────
+
+TEST_CASE("CMUdict file loading", "[g2p][cmudict]") {
+    g2p_en::context ctx;
+
+    SECTION("load from file") {
+        // Try loading CMUdict from known locations
+        const char* paths[] = {
+            "/tmp/cmudict.dict",
+            "models/cmudict.dict",
+            nullptr
+        };
+        bool loaded = false;
+        for (int i = 0; paths[i]; i++) {
+            int n = g2p_en::load_cmudict_file(ctx.dict, paths[i]);
+            if (n > 0) {
+                INFO("Loaded " << n << " entries from " << paths[i]);
+                loaded = true;
+                break;
+            }
+        }
+        if (!loaded) {
+            SKIP("CMUdict file not found — skipping (place cmudict.dict in /tmp/)");
+        }
+        REQUIRE(ctx.dict.loaded);
+        REQUIRE(ctx.dict.entries.size() > 100000);
+
+        SECTION("HELLO lookup") {
+            auto it = ctx.dict.entries.find("HELLO");
+            REQUIRE(it != ctx.dict.entries.end());
+            // HELLO -> HH AH0 L OW1 or HH EH0 L OW1
+            CHECK(!it->second.empty());
+            CHECK(it->second[0] == "HH");
+        }
+
+        SECTION("word_to_ipa with dict produces stressed output") {
+            std::string ipa_dict = g2p_en::word_to_ipa(ctx, "hello");
+            // With CMUdict, "hello" should have proper stress
+            CHECK(ipa_dict.find("ˈ") != std::string::npos);
+        }
+
+        SECTION("THE lookup") {
+            auto it = ctx.dict.entries.find("THE");
+            REQUIRE(it != ctx.dict.entries.end());
+            // THE -> DH AH0 or DH AH1 or DH IY0
+            bool has_dh = false;
+            for (auto& ph : it->second) {
+                if (ph == "DH") has_dh = true;
+            }
+            CHECK(has_dh);
+        }
+    }
+}
+
+// ── CMUdict IPA quality ──────────────────────────────────────────────
+
+TEST_CASE("CMUdict IPA output quality", "[g2p][cmudict][quality]") {
+    g2p_en::context ctx;
+    int n = g2p_en::load_cmudict_file(ctx.dict, "/tmp/cmudict.dict");
+    if (n == 0) {
+        SKIP("CMUdict not available");
+    }
+
+    SECTION("common words produce expected IPA") {
+        // "hello" should contain h and a stressed vowel
+        std::string ipa = g2p_en::word_to_ipa(ctx, "hello");
+        CHECK(ipa.find("h") != std::string::npos);
+        CHECK(!ipa.empty());
+    }
+
+    SECTION("world has ɹ or ɜ") {
+        std::string ipa = g2p_en::word_to_ipa(ctx, "world");
+        bool has_r = ipa.find("ɹ") != std::string::npos || ipa.find("ɜ") != std::string::npos;
+        CHECK(has_r);
+    }
+
+    SECTION("fox has f") {
+        std::string ipa = g2p_en::word_to_ipa(ctx, "fox");
+        CHECK(ipa.find("f") != std::string::npos);
+    }
+}
+
 // ── Phonemizer interface ─────────────────────────────────────────────
 
 TEST_CASE("phonemizer builtin_en works without espeak", "[phonemizer]") {

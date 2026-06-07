@@ -15,26 +15,57 @@ namespace crispasr {
 // ── Built-in English G2P (LTS rules + optional CMUdict/neural) ───────
 
 static g2p_en::context g_g2p_ctx;
-static bool g_g2p_loaded = false;
+static std::mutex g_g2p_mu;
+static bool g_g2p_cmudict_tried = false;
+
+// Try to auto-load CMUdict on first use.
+static void ensure_cmudict_loaded() {
+    if (g_g2p_ctx.dict.loaded || g_g2p_cmudict_tried) return;
+    g_g2p_cmudict_tried = true;
+
+    // Check standard locations
+    const char* paths[] = {
+        nullptr, // filled from env below
+        "cmudict.dict",
+        "models/cmudict.dict",
+        "/usr/share/cmudict/cmudict.dict",
+        "/usr/local/share/cmudict/cmudict.dict",
+        nullptr
+    };
+    // Check CRISPASR_CMUDICT_PATH env var first
+    const char* env = std::getenv("CRISPASR_CMUDICT_PATH");
+    if (env && *env) paths[0] = env;
+
+    for (int i = 0; paths[i]; i++) {
+        int n = g2p_en::load_cmudict_file(g_g2p_ctx.dict, paths[i]);
+        if (n > 0) {
+            fprintf(stderr, "g2p: loaded CMUdict (%d entries) from %s\n", n, paths[i]);
+            return;
+        }
+    }
+
+    // Try ~/.cache/crispasr/cmudict.dict
+    const char* home = std::getenv("HOME");
+    if (!home) home = std::getenv("USERPROFILE");
+    if (home) {
+        std::string cache_path = std::string(home) + "/.cache/crispasr/cmudict.dict";
+        int n = g2p_en::load_cmudict_file(g_g2p_ctx.dict, cache_path);
+        if (n > 0) {
+            fprintf(stderr, "g2p: loaded CMUdict (%d entries) from %s\n", n, cache_path.c_str());
+        }
+    }
+}
 
 bool phonemize_builtin_en(const std::string& lang, const std::string& text, std::string& out) {
     // Only handles English
     if (!lang.empty() && lang.find("en") == std::string::npos && lang != "auto")
         return false;
-    // LTS rules always work (no data needed); CMUdict/neural if loaded
+    {
+        std::lock_guard<std::mutex> g(g_g2p_mu);
+        ensure_cmudict_loaded();
+    }
     out = g2p_en::text_to_ipa(g_g2p_ctx, text);
     return !out.empty();
-}
-
-void phonemizer_load_cmudict(const std::map<std::string, std::vector<std::string>>& entries) {
-    g_g2p_ctx.dict.entries = entries;
-    g_g2p_ctx.dict.loaded = true;
-    g_g2p_loaded = true;
-}
-
-void phonemizer_load_neural_g2p(const g2p_en::neural_model& model) {
-    g_g2p_ctx.neural = model;
-    g_g2p_loaded = true;
 }
 
 // ── espeak-ng via dlopen ─────────────────────────────────────────────

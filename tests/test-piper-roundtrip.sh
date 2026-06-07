@@ -19,6 +19,32 @@ PIPER_MODEL="${2:-auto}"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
+# Ensure CMUdict is available for quality phonemization.
+# Check common locations; download if missing.
+CMUDICT=""
+for p in "${CRISPASR_CMUDICT_PATH:-}" \
+         "$HOME/.cache/crispasr/cmudict.dict" \
+         "/tmp/cmudict.dict" \
+         "models/cmudict.dict"; do
+    if [ -f "$p" ] 2>/dev/null; then
+        CMUDICT="$p"
+        break
+    fi
+done
+if [ -z "$CMUDICT" ]; then
+    echo "Downloading CMUdict..."
+    mkdir -p "$HOME/.cache/crispasr"
+    curl -sL "https://raw.githubusercontent.com/cmusphinx/cmudict/refs/heads/master/cmudict.dict" \
+        -o "$HOME/.cache/crispasr/cmudict.dict" 2>/dev/null && \
+        CMUDICT="$HOME/.cache/crispasr/cmudict.dict"
+fi
+if [ -n "$CMUDICT" ]; then
+    export CRISPASR_CMUDICT_PATH="$CMUDICT"
+    echo "CMUdict: $CMUDICT"
+else
+    echo "WARNING: CMUdict not available — quality may be degraded"
+fi
+
 PASS=0
 FAIL=0
 

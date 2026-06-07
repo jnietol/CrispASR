@@ -256,6 +256,57 @@ struct cmudict {
     bool loaded = false;
 };
 
+// Load CMUdict from a file in CMU format: "WORD PH1 PH2 PH3\n"
+// Lines starting with ;;; are comments. Variant pronunciations
+// (e.g. "HELLO(2)") are skipped (first pronunciation kept).
+// Returns number of entries loaded.
+inline int load_cmudict_file(cmudict& dict, const std::string& path) {
+    FILE* f = fopen(path.c_str(), "r");
+    if (!f) return 0;
+    char line[512];
+    int count = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (line[0] == ';' || line[0] == '\n' || line[0] == '\r') continue;
+        // Strip newline
+        size_t len = strlen(line);
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) line[--len] = 0;
+        if (len == 0) continue;
+        // Split: first token is word, rest are phonemes
+        char* p = line;
+        // Extract word (up to first space or '(')
+        std::string word;
+        while (*p && *p != ' ' && *p != '\t' && *p != '(') {
+            word += (char)toupper((unsigned char)*p);
+            p++;
+        }
+        // Skip variant markers like (2), (3)
+        if (*p == '(') {
+            // Only keep first pronunciation
+            if (dict.entries.count(word)) continue;
+            while (*p && *p != ')') p++;
+            if (*p == ')') p++;
+        }
+        // Skip whitespace
+        while (*p == ' ' || *p == '\t') p++;
+        // Parse phonemes
+        std::vector<std::string> phones;
+        while (*p) {
+            while (*p == ' ' || *p == '\t') p++;
+            if (!*p) break;
+            std::string ph;
+            while (*p && *p != ' ' && *p != '\t') ph += *p++;
+            if (!ph.empty()) phones.push_back(ph);
+        }
+        if (!phones.empty() && !word.empty()) {
+            dict.entries[word] = phones;
+            count++;
+        }
+    }
+    fclose(f);
+    dict.loaded = count > 0;
+    return count;
+}
+
 // ── Context ─────────────────────────────────────────────────────────
 
 struct context {
