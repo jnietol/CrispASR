@@ -5167,3 +5167,71 @@ tests/test-espeak-phonemize.cpp — 30 assertions (piper synthesis)
 tests/test-piper-roundtrip.sh   — 4 live TTS→ASR tests
 ```
 
+---
+
+## 157. voxcpm2-tts — Vulkan / CUDA GPU acceleration (scheduler-based)
+
+### Context
+
+VoxCPM2 graph-ified its AR-loop hot paths (TSLM step, LocEnc, LocDiT
+CFM, VAE decode) in §96 for Metal. On Apple Silicon (unified memory)
+both the graph paths (`ggml_backend_graph_compute`) and the legacy CPU
+paths (`tensor_data_f32`, `matmul_mv_ggml`, `rms_norm_cpu`) access the
+same shared-storage buffer, so everything works.
+
+On discrete GPUs (Vulkan, CUDA) the default buffer is device-local VRAM
+that is not host-visible. The legacy CPU paths would SIGSEGV
+dereferencing GPU pointers. As of #158 fix (2026-06-07, `c6299251`),
+voxcpm2 falls back to CPU when the backend buffer is not host-visible —
+correct but loses all GPU acceleration.
+
+### Why a scheduler
+
+The Vulkan backend's `supports_buft` only accepts its own device-local
+buffer type; it rejects host-pinned buffers. So there is no single
+buffer type that satisfies both CPU-pointer legacy paths and GPU graph
+compute. The solution is `ggml_backend_sched`:
+
+1. Load weights to **CPU buffer** (legacy paths can dereference them).
+2. Create `ggml_backend_sched` with `[gpu_backend, cpu_backend]`.
+3. Graph paths call `ggml_backend_sched_graph_compute()` instead of raw
+   `ggml_backend_graph_compute()`. The scheduler copies weight data to
+   GPU device-local buffers as needed and allocates intermediates on GPU.
+4. Legacy paths (TSLM/RALM prefill, FSQ, stop_score) stay on CPU with
+   CPU-accessible weights.
+
+This mirrors the qwen3_tts architecture (`ggml_backend_sched` +
+`ggml_backend_sched_graph_compute`).
+
+### Prerequisites / risks
+
+- **Upstream scheduler bugs**: our tools/upstream-prs #10 documents
+  dangling `src[j]` pointers across `sched_split_graph` calls (affects
+  graph reuse, which the cached LocDiT/LocEnc/TSLM graphs trigger); #16
+  documents cross-backend copy insertion failure for small mixed-backend
+  graphs. Both need fixes applied or merged upstream before the scheduler
+  is safe here.
+- **galloc→sched migration**: the existing per-graph `ggml_gallocr`
+  pre-reservation (`ggml_gallocr_reserve` + `ggml_gallocr_alloc_graph`)
+  must be replaced with `ggml_backend_sched_reserve` +
+  `ggml_backend_sched_graph_compute`. Touches every graph path.
+- **No hardware to test**: need Vulkan or CUDA device to validate.
+
+### Scope
+
+1. `voxcpm2_init_from_file`: when `!ggml_backend_buft_is_host(buft)`,
+   load weights to CPU, keep GPU backend, create `ggml_backend_sched`.
+2. Replace `ctx->galloc` with `ctx->sched` (`ggml_backend_sched`).
+3. For each graph entry point (`locdit_forward_graph`,
+   `locenc_forward_graph`, `tslm_step_graph`, `vae_decode_graph`):
+   replace `ggml_gallocr_alloc_graph` + `ggml_backend_graph_compute`
+   with `ggml_backend_sched_graph_compute`.
+4. Validate: diff harness `voxcpm2-q4_k.gguf` zero-shot + voice-clone.
+5. Stretch: graph-ify TSLM/RALM prefill (loop `tslm_step_graph` N_pos
+   times) to run prefill on GPU too.
+
+### Status
+
+Not started. Blocked on upstream scheduler bug fixes (#10, #16) and
+access to a Vulkan/CUDA test device.
+
