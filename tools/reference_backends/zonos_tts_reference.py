@@ -42,8 +42,116 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import numpy as np
+
+
+# ---------------------------------------------------------------------------
+# dump_reference.py plugin API
+# ---------------------------------------------------------------------------
+
+DEFAULT_STAGES = [
+    "conditioning_prefix",   # (2, prefix_len, d_model): cond+uncond stacked
+    "phoneme_ids",           # (prefix_len_ph,): int32 token IDs
+    "prefill_logits",        # (n_codebooks, head_vocab_size): cond logits after prefill
+    "output_codes",          # (n_codebooks, seq_len): final generated codes
+]
+
+
+def dump(model_dir: Path, audio: np.ndarray, stages: set, **kwargs) -> dict[str, np.ndarray]:
+    """
+    Run the Zonos model and capture intermediates for diff testing.
+
+    model_dir: HF id or local path to Zyphra/Zonos-v0.1-transformer.
+    audio: unused (Zonos is TTS; text comes from ZONOS_TTS_TEXT env var).
+    stages: subset of DEFAULT_STAGES to capture.
+
+    Env vars:
+      ZONOS_TTS_TEXT        synthesis text (default "Hello world.")
+      ZONOS_TTS_SEED        RNG seed (default 42)
+      ZONOS_TTS_MAX_TOKENS  max AR steps (default 200)
+      ZONOS_TTS_LANGUAGE    eSpeak language code (default "en-us")
+    """
+    try:
+        import torch
+        import torchaudio  # noqa: F401 – needed by zonos internals
+    except ImportError:
+        raise SystemExit("pip install torch torchaudio")
+    try:
+        from zonos.model import Zonos
+        from zonos.conditioning import make_cond_dict
+    except ImportError:
+        raise SystemExit("pip install git+https://github.com/Zyphra/Zonos.git")
+
+    text = os.environ.get("ZONOS_TTS_TEXT", "Hello world.")
+    seed = int(os.environ.get("ZONOS_TTS_SEED", "42"))
+    max_tokens = int(os.environ.get("ZONOS_TTS_MAX_TOKENS", "200"))
+    language = os.environ.get("ZONOS_TTS_LANGUAGE", "en-us")
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model_str = str(model_dir)
+    model = Zonos.from_pretrained(model_str, device=device)
+
+    speaker = torch.randn(1, 1, 128, device=device, dtype=torch.bfloat16)
+    cond_dict = make_cond_dict(text=text, language=language, speaker=speaker, device=device)
+
+    captures: dict[str, np.ndarray] = {}
+
+    # conditioning_prefix — shape (2, prefix_len, d_model)
+    conditioning = model.prepare_conditioning(cond_dict)
+    if "conditioning_prefix" in stages:
+        captures["conditioning_prefix"] = conditioning.detach().cpu().float().numpy()
+
+    # prefill_logits + output_codes — need to run generate()
+    if "prefill_logits" in stages or "output_codes" in stages:
+        torch.manual_seed(seed)
+
+        # Hook _prefill to capture logits before CFG blend
+        _prefill_logits: list[np.ndarray] = []
+
+        original_prefill = model._prefill.__func__
+
+        def hooked_prefill(self, prefix_hidden_states, input_ids, inference_params, cfg_scale):
+            result = original_prefill(self, prefix_hidden_states, input_ids, inference_params, cfg_scale)
+            if "prefill_logits" in stages and not _prefill_logits:
+                # result shape: (1, n_cb, vocab) after CFG blend
+                _prefill_logits.append(result.detach().cpu().float().numpy())
+            return result
+
+        import types
+        model._prefill = types.MethodType(hooked_prefill, model)
+
+        codes = model.generate(
+            conditioning,
+            max_new_tokens=max_tokens,
+            cfg_scale=2.0,
+            progress_bar=False,
+        )
+
+        if "prefill_logits" in stages and _prefill_logits:
+            # shape (1, n_cb, vocab) → squeeze batch → (n_cb, vocab)
+            captures["prefill_logits"] = _prefill_logits[0].squeeze(0)
+
+        if "output_codes" in stages:
+            captures["output_codes"] = codes.detach().cpu().numpy().astype(np.int32)
+
+    # phoneme_ids: extract from the conditioner for the same text
+    if "phoneme_ids" in stages:
+        try:
+            from zonos.conditioning import phonemize, get_symbol_ids, BOS_ID, EOS_ID
+            ph = phonemize([text], [language])[0]
+            ids = [BOS_ID] + get_symbol_ids(ph) + [EOS_ID]
+            captures["phoneme_ids"] = np.array(ids, dtype=np.int32)
+        except Exception as e:
+            print(f"phoneme_ids capture failed: {e}", file=sys.stderr)
+
+    return captures
+
+
+# ---------------------------------------------------------------------------
+# Standalone script (unchanged from original)
+# ---------------------------------------------------------------------------
 
 
 def _hook_factory(dump_dir: str, layer_name: str) -> callable:

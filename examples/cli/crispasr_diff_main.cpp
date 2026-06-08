@@ -58,6 +58,7 @@
 #include "glm_asr.h"
 #include "firered_asr.h"
 #include "voxcpm2_tts.h"
+#include "zonos_tts.h"
 #include "funasr.h"
 #include "paraformer.h"
 #include "sensevoice.h"
@@ -5125,13 +5126,61 @@ int main(int argc, char** argv) {
         rmdir(dump_dir);
         melotts_free(ctx);
 
+    } else if (backend_name == "zonos-tts") {
+        // Zonos TTS diff: text-driven, audio arg is unused.
+        // Text comes from ZONOS_TTS_TEXT env var (or the ref archive's metadata).
+        // Stages:
+        //   conditioning_prefix  (2*T, d_model) — cond rows then uncond rows
+        //   phoneme_ids          (T_ph,)         — int32 IDs from espeak
+
+        auto zp = zonos_tts_default_params();
+        zp.n_threads = 4;
+        zp.verbosity = 0;
+        zp.use_gpu = false;
+        zonos_tts_context* ctx = zonos_tts_init_from_file(model_path.c_str(), zp);
+        if (!ctx) {
+            fprintf(stderr, "crispasr-diff: failed to load zonos-tts model '%s'\n", model_path.c_str());
+            return 4;
+        }
+
+        // Resolve synthesis text: prefer ref archive metadata, then env var.
+        std::string syn_text;
+        const char* env_text = std::getenv("ZONOS_TTS_TEXT");
+        if (env_text && *env_text) {
+            syn_text = env_text;
+        } else {
+            syn_text = ref.meta("zonos_tts_text");
+            if (syn_text.empty())
+                syn_text = "Hello world.";
+        }
+        printf("crispasr-diff[zonos-tts]: text = %s\n", syn_text.c_str());
+
+        // Stage 1: conditioning_prefix
+        {
+            int prefix_len = 0, d_model = 0;
+            float* prefix = zonos_tts_build_conditioning_prefix(ctx, syn_text.c_str(), &prefix_len, &d_model);
+            if (!prefix) {
+                printf("[ERR ] conditioning_prefix    zonos_tts_build_conditioning_prefix returned null\n");
+                n_fail++;
+            } else {
+                // Shape: (2 * prefix_len, d_model) — compare row-by-row
+                auto rep = compare_with_row_width(ref, "conditioning_prefix", prefix, (size_t)2 * prefix_len * d_model,
+                                                  d_model);
+                print_row("conditioning_prefix", rep, COS_THRESHOLD);
+                record(rep);
+                free(prefix);
+            }
+        }
+
+        zonos_tts_free(ctx);
+
     } else {
         fprintf(stderr,
                 "crispasr-diff: backend '%s' is not recognised. "
                 "Supported: voxtral, voxtral4b, qwen3, qwen3-tts, qwen3-tts-codec, kokoro, granite, granite-4.1, "
                 "granite-nle, parakeet, canary, cohere, gemma4, mimo-tokenizer, mimo-asr, orpheus, moonshine, "
                 "moonshine-streaming, lid-cld3, glm-asr, firered-asr, voxcpm2-tts, funasr, paraformer, sensevoice, "
-                "cosyvoice3-tts, melotts, parler-tts, moss-audio, kugelaudio.\n",
+                "cosyvoice3-tts, melotts, parler-tts, moss-audio, kugelaudio, zonos-tts.\n",
                 backend_name.c_str());
         return 5;
     }

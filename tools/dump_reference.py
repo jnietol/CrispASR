@@ -244,6 +244,15 @@ REGISTERED_BACKENDS: Dict[str, str] = {
     # model_dir = HumeAI/tada-3b-ml HF id or local snapshot.
     # Audio arg is unused (text-driven). Text from TADA_SYN_TEXT env var.
     "tada-tts":   "reference_backends.tada_tts",
+    # Zyphra/Zonos-v0.1-transformer: GPT-style AR TTS with 9-codebook DAC.
+    # model_dir = Zyphra/Zonos-v0.1-transformer HF id or local snapshot.
+    # Audio arg is unused (text-driven). Text + seed from env vars:
+    #   ZONOS_TTS_TEXT (default "Hello world.")
+    #   ZONOS_TTS_SEED (default 42)
+    #   ZONOS_TTS_MAX_TOKENS (default 200)
+    #   ZONOS_TTS_LANGUAGE (default "en-us")
+    # Stages: conditioning_prefix, phoneme_ids, prefill_logits, output_codes.
+    "zonos-tts":  "reference_backends.zonos_tts_reference",
 }
 
 DEFAULT_STAGES_BY_BACKEND: Dict[str, List[str]] = {}  # populated at import

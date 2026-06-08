@@ -1347,6 +1347,50 @@ static int sample_with_min_p(const float* logits, int n, float temperature, floa
 } // namespace
 
 // -----------------------------------------------------------------------
+// Diff-harness stage API
+// -----------------------------------------------------------------------
+
+float* zonos_tts_build_conditioning_prefix(struct zonos_tts_context* ctx, const char* text, int* out_prefix_len,
+                                           int* out_d_model) {
+    if (!ctx || !text || !out_prefix_len || !out_d_model)
+        return nullptr;
+
+    const auto& hp = ctx->hp;
+    const int d = (int)hp.d_model;
+
+    const char* lang = "en-us";
+    if (ctx->cond_state.language_id >= 0 && ctx->cond_state.language_id < (int)ctx->cond_state.language_codes.size())
+        lang = ctx->cond_state.language_codes[ctx->cond_state.language_id].c_str();
+
+    auto phoneme_ids = tokenize_text_full(text, lang);
+    int cond_len = 0, uncond_len = 0;
+    float* cond = build_prefix_cpu(ctx, phoneme_ids, false, &cond_len);
+    float* uncond = build_prefix_cpu(ctx, phoneme_ids, true, &uncond_len);
+    if (!cond || !uncond || cond_len != uncond_len) {
+        free(cond);
+        free(uncond);
+        return nullptr;
+    }
+
+    // Return layout: (2 * prefix_len, d_model) — cond rows first, uncond rows second.
+    // Matches Python prepare_conditioning() which does torch.cat([cond, uncond]).
+    float* out = (float*)malloc((size_t)2 * cond_len * d * sizeof(float));
+    if (!out) {
+        free(cond);
+        free(uncond);
+        return nullptr;
+    }
+    std::memcpy(out, cond, (size_t)cond_len * d * sizeof(float));
+    std::memcpy(out + (size_t)cond_len * d, uncond, (size_t)uncond_len * d * sizeof(float));
+    free(cond);
+    free(uncond);
+
+    *out_prefix_len = cond_len;
+    *out_d_model = d;
+    return out;
+}
+
+// -----------------------------------------------------------------------
 // Synthesis: AR decode with CFG + multi-codebook delay pattern
 // -----------------------------------------------------------------------
 
@@ -1399,6 +1443,57 @@ int32_t* zonos_tts_synthesize_codes(struct zonos_tts_context* ctx, const char* t
     if (ctx->params.verbosity >= 1) {
         fprintf(stderr, "zonos_tts: prefix_len=%d (cond=%d uncond=%d) cfg=%.1f temp=%.2f max_steps=%d\n",
                 cond_len + uncond_len, cond_len, uncond_len, cfg_scale, temperature, max_steps);
+    }
+
+    // Dump conditioning prefix for diff testing (ZONOS_CPP_DUMP_DIR controls path).
+    // Python prepare_conditioning() returns cat([cond, uncond]) → (2, T, d_model).
+    // We write the same layout: cond rows first, then uncond rows.
+    {
+        const char* dump_dir = getenv("ZONOS_CPP_DUMP_DIR");
+        if (dump_dir) {
+            // Write phoneme IDs
+            {
+                char path[512];
+                snprintf(path, sizeof(path), "%s/cpp_phoneme_ids.txt", dump_dir);
+                FILE* f = fopen(path, "w");
+                if (f) {
+                    for (int id : phoneme_ids)
+                        fprintf(f, "%d\n", id);
+                    fclose(f);
+                }
+            }
+            // Write conditioning prefix as NumPy F32 array shape (2*T, d_model).
+            // Each row is a token vector. First cond_len rows = cond, next uncond_len = uncond.
+            {
+                char path[512];
+                snprintf(path, sizeof(path), "%s/cpp_conditioning_prefix.npy", dump_dir);
+                FILE* f = fopen(path, "wb");
+                if (f) {
+                    // NumPy .npy v1.0 header for shape (2*cond_len, d_model) float32 C-order
+                    const char magic[] = "\x93NUMPY\x01\x00";
+                    fwrite(magic, 1, 8, f);
+                    char hdr[128];
+                    int hdr_len = snprintf(hdr, sizeof(hdr),
+                                           "{'descr': '<f4', 'fortran_order': False, "
+                                           "'shape': (%d, %d), }",
+                                           cond_len + uncond_len, d);
+                    // Pad header to multiple of 64 with spaces, terminated by '\n'
+                    int padded = ((hdr_len + 10 + 63) / 64) * 64 - 10;
+                    while (hdr_len < padded)
+                        hdr[hdr_len++] = ' ';
+                    hdr[hdr_len - 1] = '\n';
+                    uint16_t hdr_len16 = (uint16_t)(hdr_len);
+                    fwrite(&hdr_len16, 2, 1, f);
+                    fwrite(hdr, 1, hdr_len, f);
+                    fwrite(cond_prefix, sizeof(float), (size_t)cond_len * d, f);
+                    if (uncond_prefix)
+                        fwrite(uncond_prefix, sizeof(float), (size_t)uncond_len * d, f);
+                    fclose(f);
+                    fprintf(stderr, "zonos_tts: dumped conditioning prefix (%d+%d x %d) to %s\n", cond_len, uncond_len,
+                            d, path);
+                }
+            }
+        }
     }
 
     // Allocate KV cache: prefix + max decode steps + safety margin
@@ -1486,11 +1581,29 @@ int32_t* zonos_tts_synthesize_codes(struct zonos_tts_context* ctx, const char* t
                     best_u = i;
             fprintf(stderr, "zonos_tts: DIFF uncond prefill cb0 argmax=%d (%.2f)\n", best_u, logits_uncond[best_u]);
         }
-        FILE* df = fopen("/mnt/storage/zonos-tts/cpp_prefill_logits.bin", "wb");
+        const char* dump_dir = getenv("ZONOS_CPP_DUMP_DIR");
+        if (!dump_dir)
+            dump_dir = "/mnt/storage/zonos-tts";
+        char df_path[512];
+        snprintf(df_path, sizeof(df_path), "%s/cpp_prefill_logits.npy", dump_dir);
+        FILE* df = fopen(df_path, "wb");
         if (df) {
-            int32_t n = (int32_t)(hp.head_vocab_size * hp.n_codebooks);
-            fwrite(&n, sizeof(int32_t), 1, df);
-            fwrite(logits_cond, sizeof(float), n, df);
+            // NumPy .npy v1.0: shape (n_codebooks, head_vocab_size) float32
+            const char magic[] = "\x93NUMPY\x01\x00";
+            fwrite(magic, 1, 8, df);
+            char hdr[128];
+            int hlen = snprintf(hdr, sizeof(hdr),
+                                "{'descr': '<f4', 'fortran_order': False, "
+                                "'shape': (%d, %d), }",
+                                (int)hp.n_codebooks, (int)hp.head_vocab_size);
+            int padded = ((hlen + 10 + 63) / 64) * 64 - 10;
+            while (hlen < padded)
+                hdr[hlen++] = ' ';
+            hdr[hlen - 1] = '\n';
+            uint16_t hlen16 = (uint16_t)hlen;
+            fwrite(&hlen16, 2, 1, df);
+            fwrite(hdr, 1, hlen, df);
+            fwrite(logits_cond, sizeof(float), (size_t)hp.n_codebooks * hp.head_vocab_size, df);
             fclose(df);
         }
     }

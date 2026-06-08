@@ -94,6 +94,17 @@ int32_t* zonos_tts_synthesize_codes(struct zonos_tts_context* ctx, const char* t
 void zonos_tts_codes_free(int32_t* codes);
 void zonos_tts_pcm_free(float* pcm);
 void zonos_tts_free(struct zonos_tts_context* ctx);
+
+// --- Diff-harness stage APIs (used by crispasr-diff) ---
+
+// Build the conditioning prefix for diff testing.
+// Runs the prefix conditioner on `text` and returns a float buffer of shape
+// (2 * prefix_len, d_model): first prefix_len rows = conditioned path,
+// next prefix_len rows = unconditioned path.
+// Caller frees with free(). Returns nullptr on failure.
+// out_prefix_len receives the per-path length; out_d_model receives d_model.
+float* zonos_tts_build_conditioning_prefix(struct zonos_tts_context* ctx, const char* text, int* out_prefix_len,
+                                           int* out_d_model);
 void zonos_tts_set_n_threads(struct zonos_tts_context* ctx, int n_threads);
 void zonos_tts_set_temperature(struct zonos_tts_context* ctx, float temperature);
 void zonos_tts_set_seed(struct zonos_tts_context* ctx, uint64_t seed);
