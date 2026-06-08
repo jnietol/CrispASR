@@ -58,6 +58,7 @@
 
 #pragma once
 
+#include "core/conv.h"
 #include "ggml.h"
 
 #include <cstdint>
@@ -154,27 +155,10 @@ static inline ggml_tensor* conv1d(ggml_context* ctx, ggml_tensor* x, ggml_tensor
 
 // ConvTranspose1d with symmetric cropping: T_out = T_in * stride
 // DAC uses kernel=2*stride, pad=stride/2.
+// Delegates to core_convt::convt1d_crop (proven in orpheus SNAC).
 static inline ggml_tensor* convt1d(ggml_context* ctx, ggml_tensor* x, ggml_tensor* w, ggml_tensor* b, int stride) {
     const int pad = stride / 2;
-    const int Cin = (int)x->ne[0];
-    const int Cout = (int)w->ne[2];
-    // core_convt::convt1d_crop if available, else manual:
-    // x: (Cin, T) -> transpose -> (T, Cin)
-    ggml_tensor* xt = ggml_cont(ctx, ggml_transpose(ctx, x)); // (T, Cin)
-    ggml_tensor* y = ggml_conv_transpose_1d(ctx, w, xt, stride, 0, 1);
-    // Output is (T_out_full, Cout). Crop pad from each side.
-    int T_out_full = (int)y->ne[0];
-    int T_out = T_out_full - 2 * pad;
-    if (T_out > 0 && pad > 0) {
-        y = ggml_view_2d(ctx, y, T_out, Cout, y->nb[1], pad * sizeof(float));
-        y = ggml_cont(ctx, y);
-    }
-    // (T_out, Cout) -> (Cout, T_out)
-    y = ggml_cont(ctx, ggml_transpose(ctx, y));
-    if (b)
-        y = ggml_add(ctx, y, b);
-    (void)Cin;
-    return y;
+    return core_convt::convt1d_crop(ctx, x, w, b, stride, /*crop_left=*/pad, /*crop_right=*/pad);
 }
 
 // ResidualUnit: Snake -> Conv1d(k=7,dil=d) -> Snake -> Conv1d(k=1) -> add
