@@ -1680,60 +1680,61 @@ static bool load_dac_codec(zonos_tts_context* ctx) {
     const int n_cb = dw.config.n_codebooks; // 9
 
     // Quantizer codebooks + out_proj
+    // GGUF names: quantizer.quantizers.K.codebook.weight, .out_proj.weight/bias
     dw.quantizers.resize(n_cb);
     for (int k = 0; k < n_cb; k++) {
         char name[128];
-        snprintf(name, sizeof(name), "dac.quant.%d", k);
+        snprintf(name, sizeof(name), "quantizer.quantizers.%d.codebook.weight", k);
         dw.quantizers[k].codebook = get(name);
-        snprintf(name, sizeof(name), "dac.quant_proj.%d.weight", k);
+        snprintf(name, sizeof(name), "quantizer.quantizers.%d.out_proj.weight", k);
         dw.quantizers[k].out_proj_w = get(name);
-        snprintf(name, sizeof(name), "dac.quant_proj.%d.bias", k);
+        snprintf(name, sizeof(name), "quantizer.quantizers.%d.out_proj.bias", k);
         dw.quantizers[k].out_proj_b = get(name);
     }
 
-    // Decoder input conv
-    dw.in_conv_w = get("dac.dec.in_conv.weight");
-    dw.in_conv_b = get("dac.dec.in_conv.bias");
+    // Decoder input conv: decoder.conv1.weight/bias
+    dw.in_conv_w = get("decoder.conv1.weight");
+    dw.in_conv_b = get("decoder.conv1.bias");
 
-    // Decoder blocks
+    // Decoder blocks: decoder.block.B.*
     for (int b = 0; b < 4; b++) {
         auto& blk = dw.blocks[b];
         char name[128];
 
-        // Snake alpha
-        snprintf(name, sizeof(name), "dac.dec.blk.%d.0.alpha", b);
+        // Block-level Snake: decoder.block.B.snake1.alpha
+        snprintf(name, sizeof(name), "decoder.block.%d.snake1.alpha", b);
         blk.snake_alpha = get(name);
 
-        // ConvTranspose1d
-        snprintf(name, sizeof(name), "dac.dec.blk.%d.1.weight", b);
+        // ConvTranspose1d: decoder.block.B.conv_t1.weight/bias
+        snprintf(name, sizeof(name), "decoder.block.%d.conv_t1.weight", b);
         blk.up_w = get(name);
-        snprintf(name, sizeof(name), "dac.dec.blk.%d.1.bias", b);
+        snprintf(name, sizeof(name), "decoder.block.%d.conv_t1.bias", b);
         blk.up_b = get(name);
 
-        // 3 ResidualUnits (indices 2, 3, 4)
+        // 3 ResidualUnits: decoder.block.B.res_unitR.*
         for (int r = 0; r < 3; r++) {
             auto& ru = blk.res[r];
-            int ri = r + 2; // block-internal index
+            int ri = r + 1; // res_unit1, res_unit2, res_unit3
 
-            snprintf(name, sizeof(name), "dac.dec.blk.%d.%d.block.0.alpha", b, ri);
+            snprintf(name, sizeof(name), "decoder.block.%d.res_unit%d.snake1.alpha", b, ri);
             ru.alpha0 = get(name);
-            snprintf(name, sizeof(name), "dac.dec.blk.%d.%d.block.1.weight", b, ri);
+            snprintf(name, sizeof(name), "decoder.block.%d.res_unit%d.conv1.weight", b, ri);
             ru.conv0_w = get(name);
-            snprintf(name, sizeof(name), "dac.dec.blk.%d.%d.block.1.bias", b, ri);
+            snprintf(name, sizeof(name), "decoder.block.%d.res_unit%d.conv1.bias", b, ri);
             ru.conv0_b = get(name);
-            snprintf(name, sizeof(name), "dac.dec.blk.%d.%d.block.2.alpha", b, ri);
+            snprintf(name, sizeof(name), "decoder.block.%d.res_unit%d.snake2.alpha", b, ri);
             ru.alpha1 = get(name);
-            snprintf(name, sizeof(name), "dac.dec.blk.%d.%d.block.3.weight", b, ri);
+            snprintf(name, sizeof(name), "decoder.block.%d.res_unit%d.conv2.weight", b, ri);
             ru.conv1_w = get(name);
-            snprintf(name, sizeof(name), "dac.dec.blk.%d.%d.block.3.bias", b, ri);
+            snprintf(name, sizeof(name), "decoder.block.%d.res_unit%d.conv2.bias", b, ri);
             ru.conv1_b = get(name);
         }
     }
 
-    // Output Snake + Conv
-    dw.out_snake_alpha = get("dac.dec.out_snake.alpha");
-    dw.out_conv_w = get("dac.dec.out_conv.weight");
-    dw.out_conv_b = get("dac.dec.out_conv.bias");
+    // Output Snake + Conv: decoder.snake1.alpha, decoder.conv2.weight/bias
+    dw.out_snake_alpha = get("decoder.snake1.alpha");
+    dw.out_conv_w = get("decoder.conv2.weight");
+    dw.out_conv_b = get("decoder.conv2.bias");
 
     // Validate critical tensors
     if (!dw.quantizers[0].codebook || !dw.in_conv_w || !dw.out_conv_w) {
