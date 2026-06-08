@@ -182,6 +182,13 @@ wav_size = out_wav.stat().st_size if out_wav.exists() else 0
 
 print(f"\n{'='*64}", flush=True)
 print(f"Zonos TTS: rc={rc}  elapsed={elapsed}s  wav={'OK' if wav_exists else 'MISSING'}  size={wav_size}", flush=True)
+
+# Always print Zonos diagnostic lines (phoneme count, AR steps, DAC decode)
+print("--- zonos diagnostics ---", flush=True)
+for ln in combined.splitlines():
+    if any(k in ln for k in ["zonos_tts:", "crispasr[zonos", "CONSENT", "espeak"]):
+        print(f"  {ln.strip()}", flush=True)
+
 if rc != 0:
     print("--- stderr tail ---", flush=True)
     for ln in combined.splitlines()[-30:]:
