@@ -5083,9 +5083,10 @@ CA_EXPORT void crispasr_session_result_free(crispasr_session_result* r) {
 //     required and goes through `ref_text_or_null`. Pass nullptr for a
 //     voice pack.
 //
-// `crispasr_session_set_codec_path` is qwen3-tts-only and is a no-op for
-// other backends. Required before the first synthesise call when a
-// qwen3-tts session is opened via the unified API.
+// `crispasr_session_set_codec_path` forwards the codec GGUF path to the
+// active backend (qwen3-tts, orpheus, zonos, dia, tada, outetts, indextts).
+// For Zonos and Dia the codec is auto-discovered as a sibling on open;
+// call this only to override the discovered path.
 
 CA_EXPORT int crispasr_session_set_codec_path(crispasr_session* s, const char* path) {
     if (!s || !path)
@@ -5120,6 +5121,18 @@ CA_EXPORT int crispasr_session_set_codec_path(crispasr_session* s, const char* p
 #ifdef CA_HAVE_OUTETTS
     if (s->outetts_ctx)
         return outetts_set_codec_path(s->outetts_ctx, path);
+#endif
+#ifdef CA_HAVE_ZONOS
+    if (s->zonos_ctx) {
+        zonos_tts_set_codec_path(s->zonos_ctx, path);
+        return 0;
+    }
+#endif
+#ifdef CA_HAVE_DIA
+    if (s->dia_tts_ctx) {
+        dia_tts_set_codec_path(s->dia_tts_ctx, path);
+        return 0;
+    }
 #endif
 #ifdef CA_HAVE_INDEXTTS
     // indextts routes its BigVGAN vocoder companion (indextts-bigvgan)
