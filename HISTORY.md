@@ -6,6 +6,53 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-06-09 v0.7.1 — release
+
+Release rollup of the 155 commits since **v0.7.0** (2026-06-06). Detailed
+per-feature entries follow below; this is the user-facing summary.
+
+**New TTS backends**
+- **Zonos v0.1 (transformer)** — full end-to-end synthesis + voice cloning,
+  ASR-roundtrip verified. Selective Q4_K quant (keep heads/embeddings/
+  prefix-conditioner at F16; 931 MB) + step-0 EOS retry guard.
+- **TADA-TTS** — C++ runtime, backend adapter, GGUF converters, reference
+  backend, and integration wiring.
+
+**TTS quality / phonemization**
+- **G2P overhaul** — built-in CMUdict + pre-generated espeak IPA dictionary
+  (126K words, 99.5% piper match) wired into piper; multilingual rule-based
+  G2P for English/German/Spanish/French; espeak-ng is no longer a hard
+  dependency (graceful fallbacks). espeak-ng now loaded via MIT-clean
+  `dlopen` (no GPL static linking) and bundled via FetchContent when absent.
+- **conv_transpose_1d** — proper GPU kernel fix replacing the CPU-fallback
+  workaround (#155); fixes HiFi-GAN / vocoder upsampling on GPU backends.
+- **GPU/sched migration** — pocket-tts and moonshine(-streaming) migrated to
+  the ggml graph + scheduler path (mmap, GPU default); VoxCPM2 RALM step
+  graph-ified on GPU with Vulkan/CUDA weight mirrors (#158).
+
+**Provenance & licensing (EU AI Act)**
+- **AudioSeal watermark** dispatch wired through CLI, server, and C-ABI;
+  robust averaged-spectrum detection (alpha=0.08); post-embed verification
+  and `--detect-watermark` CLI verb; `crispasr_session_synthesize()` now
+  auto-embeds the watermark; `CRISPASR_NO_WATERMARK` debug env.
+- **Spoken AI-disclosure** opt-out for voice-cloned output (CLI
+  `--no-spoken-disclaimer`, server `"spoken_disclaimer": false`); machine-
+  readable provenance (watermark + C2PA) is always retained. NB: the audible
+  disclosure is intentionally the **consumer's** responsibility — the library
+  guarantees only the machine-readable provenance (#159).
+- **Registry** now warns prominently on non-commercial (CC-BY-NC) models.
+
+**C-ABI / bindings**
+- CrisperWeaver-parity functions: progress callback, stereo output, parallel
+  synthesis, DTW; `--g2p-dict` plumbed through the C ABI, Go binding, and
+  server; Zonos+Dia wired into `set_codec_path` with sibling-DAC discovery.
+
+**Build / CI**
+- MSVC project-wide NOMINMAX; Windows pkgconfiglite empty-checksum fix; Go
+  CGO LDFLAGS sync (`-laudioseal`); GitHub Actions bumped to Node.js 24.
+
+---
+
 ## 2026-06-09 §130 Zonos TTS — completed
 
 **§130 Zonos TTS — end-to-end synthesis verified.** ASR roundtrip
