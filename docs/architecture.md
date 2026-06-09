@@ -185,6 +185,7 @@ regression test against `samples/jfk.wav`:
 | qwen3-tts | Qwen3 talker + 12 Hz codec + code-predictor | ✔ | ✔ | ✔ | CUDA / Metal | gguf_loader, kv_self_attn, swiglu |
 | orpheus | Llama-3.2 talker + SNAC RVQ codec | ✔ | ✔ | ✔ | CUDA / Metal | gguf_loader, kv_self_attn, swiglu |
 | chatterbox | T3 (Llama / GPT-2) + S3Gen (Conformer + UNet1D CFM + HiFTGen) | ✔ | ✔ | ✔ | CUDA / Metal | gguf_loader, kv_self_attn, swiglu, fft |
+| zonos-tts | 26L GQA transformer + 9-codebook DAC @ 44.1 kHz; CFG; voice cloning from WAV | ✔ | ✔ | ✔ | CUDA / Metal | gguf_loader, kv_self_attn, gated_mlp |
 | m2m100 | facebook/m2m100 12L+12L transformer (text-to-text translation; WMT21 4.7B variant via `--backend m2m100-wmt21`) | ✔ | — | ✔ (cross-attn) | CUDA / Metal | gguf_loader, kv_self_attn |
 | madlad / t5 | T5 encoder-decoder (MADLAD-400 12L+12L, gated-GELU, RMSNorm, bucketed rel-pos bias). Tokens match Python SP bit-by-bit; translation outputs match the HF reference. | ✔ | — | ✔ (cross-attn) | CUDA / Metal | gguf_loader, ffn |
 
@@ -363,6 +364,45 @@ Variants:
 
 Conformer rel-pos parity gap closed in §80 — encoder_out now bit-exact
 to Python reference.
+
+### zonos-tts
+
+Zyphra Zonos-v0.1-transformer: 26-layer GQA transformer (d=2048,
+n_heads=16, n_kv=4, head_dim=128) conditioned on speaker embedding +
+phoneme tokens → 9-codebook DAC codes @ 86 Hz → 44.1 kHz PCM via the
+DAC decoder GGUF.
+
+**Conditioning prefix**: speaker embedding (512-d float32 from a reference
+WAV, encoded externally or via `--voice <ref.wav>`) is projected through
+an MLP and prepended as prefix tokens before the phonemised text. CFG
+(classifier-free guidance) runs a conditioned path and an unconditioned
+path in parallel, blending with `cfg_scale=2.0`: `uncond + 2*(cond − uncond)`.
+
+**Backbone**: standard pre-norm transformer with RMSNorm,
+GatedMLP (`fc2(y * silu(gate))`, first chunk = y, second = gate),
+and consecutive-pair RoPE (`GGML_ROPE_TYPE_NORMAL`) matching
+x_transformers' `apply_rotary_emb` (reshape to (…, d/2, 2), rotate
+paired elements). GQA with 4 KV heads shared across 16 query heads.
+
+**AR decode**: 9-codebook delay pattern (codebook k shifted by k+1
+positions). Each step samples one token per codebook via min-p=0.1 +
+temperature=1.0 + repetition penalty (factor=3.0, window=2). EOS is
+only predicted on codebook 0; other codebooks have EOS masked to −∞.
+
+**Quantisation floor**: Q4_K inflates the EOS logit at prefill by ~0.9
+units (from −1.125 to −0.21), making P(EOS) jump from ~38 % to ~60 %
+and causing synthesis to terminate with 0 audio frames on every seed. Use
+F16 (or Q8_0 once available). Q4_K is below quality floor for this model.
+
+**Voice cloning**: pass `--voice <ref.wav>` at the CLI or set
+`ZONOS_SPEAKER_EMB_PATH=/path/to/jfk_speaker_emb.bin` (raw float32,
+512 floats). The runtime calls `zonos_tts_set_voice(ctx, path)` which
+decodes the WAV via `src/core/audio_resample` and runs the VoiceEncoder
+MLP to produce the speaker embedding.
+
+GGUFs: [`cstr/zonos-v0.1-transformer-GGUF`](https://huggingface.co/cstr/zonos-v0.1-transformer-GGUF)
+(AR transformer) + [`cstr/dac-44khz-GGUF`](https://huggingface.co/cstr/dac-44khz-GGUF)
+(DAC decoder, auto-discovered as a sibling or via `--codec-model`).
 
 ### omniasr (CTC + LLM + Unlimited)
 

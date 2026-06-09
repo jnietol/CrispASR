@@ -6523,6 +6523,12 @@ CA_EXPORT int crispasr_session_set_temperature(crispasr_session* s, float temper
         touched++;
     }
 #endif
+#ifdef CA_HAVE_ZONOS
+    if (s->zonos_ctx) {
+        zonos_tts_set_temperature(s->zonos_ctx, temperature);
+        touched++;
+    }
+#endif
     return touched > 0 ? 0 : -2;
 }
 

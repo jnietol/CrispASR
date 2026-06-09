@@ -554,6 +554,8 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
         return "csm";
     if (contains_ci("parler") && contains_ci("tts"))
         return "parler-tts";
+    if (contains_ci("zonos"))
+        return "zonos";
     if (contains_ci("ggml-") && contains_ci(".bin"))
         return "whisper";
 
@@ -676,6 +678,8 @@ std::string crispasr_detect_backend_from_gguf(const std::string& model_path) {
                 result = "csm";
             else if (a == "parler-tts" || a == "parler_tts" || a == "parlertts")
                 result = "parler-tts";
+            else if (a == "zonos" || a == "zonos-tts" || a == "zonos_tts")
+                result = "zonos";
         }
     }
     gguf_free(gctx);

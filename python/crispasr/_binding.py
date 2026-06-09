@@ -1377,7 +1377,7 @@ class Session:
             self._lib.crispasr_session_result_free(res)
 
     # ---------------------------------------------------------------------
-    # TTS synthesis (vibevoice, qwen3-tts, kokoro, orpheus, chatterbox, outetts, indextts, voxcpm2, csm, dia, bark, speecht5, parler-tts, pocket-tts, kugelaudio, tada)
+    # TTS synthesis (vibevoice, qwen3-tts, kokoro, orpheus, chatterbox, outetts, indextts, voxcpm2, csm, dia, zonos-tts, bark, speecht5, parler-tts, pocket-tts, kugelaudio, tada)
     # ---------------------------------------------------------------------
 
     def set_codec_path(self, path: str) -> None:
