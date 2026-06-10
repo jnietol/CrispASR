@@ -1,30 +1,4 @@
-FROM ubuntu:22.04 AS build
-WORKDIR /src
-
-# archive.ubuntu.com flakes intermittently from CI runners; retries +
-# longer timeouts let transient connection failures resolve themselves
-# rather than failing the whole build.
-RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' \
-      > /etc/apt/apt.conf.d/80-retries && \
-  apt-get update && \
-  apt-get install -y --fix-missing build-essential cmake git curl ninja-build && \
-  rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
-
-ARG CRISPASR_REPO=https://github.com/CrispStrobe/CrispASR
-ARG CRISPASR_REF=main
-
-RUN git clone --depth 1 "${CRISPASR_REPO}" /src/CrispASR && \
-  git -C /src/CrispASR fetch --depth 1 origin "${CRISPASR_REF}" && \
-  git -C /src/CrispASR checkout --detach FETCH_HEAD
-WORKDIR /src/CrispASR
-# Limit parallelism — HF free-tier build machines have ~7 GB RAM.
-# -j1 avoids OOM from parallel compilation of 60+ backend .cpp files.
-ARG CRISPASR_BUILD_JOBS=1
-RUN jobs="${CRISPASR_BUILD_JOBS}" && \
-  cmake -S . -B build -G Ninja -DCRISPASR_BUILD_TESTS=OFF && \
-  cmake --build build -j"${jobs}" --target crispasr-cli crispasr-lid
-
-FROM ubuntu:22.04 AS runtime
+FROM ubuntu:22.04
 WORKDIR /space
 
 RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' \
@@ -34,14 +8,23 @@ RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https:
       espeak-ng espeak-ng-data libespeak-ng1 && \
   rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
-COPY --from=build /src/CrispASR/build /opt/crispasr/build
-COPY --from=build /src/CrispASR/samples /space/samples
-# In the HF Space repo, files are at root level (not hf-space/).
-# When building from the CrispASR repo root, they're under hf-space/.
-# Support both contexts by trying root first.
+# Pre-built binaries (crispasr + crispasr-lid + shared libs) uploaded to
+# the Space repo at bin/. This avoids the 6+ minute C++ compilation that
+# exceeds the free-tier Docker build timeout.
+COPY bin/crispasr-bin-linux-x64.tar.gz /tmp/
+RUN mkdir -p /opt/crispasr/build/bin && \
+  tar xzf /tmp/crispasr-bin-linux-x64.tar.gz -C /opt/crispasr/build/bin/ && \
+  rm /tmp/crispasr-bin-linux-x64.tar.gz && \
+  find /opt/crispasr/build/bin -name 'lib*.so*' -exec cp -a {} /usr/local/lib/ \; && \
+  ldconfig
+
+# Fetch bundled sample audio from the GitHub repo (optional).
+ARG CRISPASR_REPO=https://github.com/CrispStrobe/CrispASR
+RUN mkdir -p /space/samples && \
+  curl -sL "${CRISPASR_REPO}/raw/main/samples/jfk.wav" -o /space/samples/jfk.wav 2>/dev/null || true
+
 COPY requirements.txt /space/requirements.txt
 RUN pip3 install --no-cache-dir -r /space/requirements.txt
-RUN find /opt/crispasr/build -type f -name 'lib*.so*' -exec cp -a {} /usr/local/lib/ \; && ldconfig
 
 COPY app.py start.sh /space/
 RUN chmod +x /space/start.sh && \
