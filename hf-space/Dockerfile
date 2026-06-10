@@ -19,11 +19,17 @@ RUN mkdir -p /opt/crispasr/build/bin && \
   find /opt/crispasr/build/bin -name 'lib*.so*' -exec cp -a {} /usr/local/lib/ \; && \
   ldconfig
 
-# Pre-download G2P dicts so kokoro TTS phonemizer works without runtime downloads.
+# Pre-download G2P dicts + kokoro model so TTS works on first call.
 RUN mkdir -p /cache/.cache/crispasr && \
-  curl -sL "https://huggingface.co/datasets/cstr/g2p-dicts/resolve/main/espeak_en.tsv" -o /cache/.cache/crispasr/espeak_en.tsv && \
-  curl -sL "https://raw.githubusercontent.com/cmusphinx/cmudict/refs/heads/master/cmudict.dict" -o /cache/.cache/crispasr/cmudict.dict && \
-  ls -lh /cache/.cache/crispasr/ || true
+  curl -sL "https://huggingface.co/datasets/cstr/g2p-dicts/resolve/main/espeak_en.tsv" \
+       -o /cache/.cache/crispasr/espeak_en.tsv && \
+  curl -sL "https://raw.githubusercontent.com/cmusphinx/cmudict/refs/heads/master/cmudict.dict" \
+       -o /cache/.cache/crispasr/cmudict.dict && \
+  curl -sL "https://huggingface.co/cstr/kokoro-82m-GGUF/resolve/main/kokoro-82m-q8_0.gguf" \
+       -o /cache/kokoro-82m-q8_0.gguf && \
+  curl -sL "https://huggingface.co/cstr/kokoro-voices-GGUF/resolve/main/kokoro-voice-af_heart.gguf" \
+       -o /cache/kokoro-voice-af_heart.gguf && \
+  ls -lh /cache/ /cache/.cache/crispasr/ || true
 
 # Fetch bundled sample audio from the GitHub repo (optional).
 ARG CRISPASR_REPO=https://github.com/CrispStrobe/CrispASR
