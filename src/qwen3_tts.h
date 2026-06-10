@@ -40,6 +40,10 @@ struct qwen3_tts_context_params qwen3_tts_context_default_params(void);
 // Initialise from the talker LM GGUF file.
 struct qwen3_tts_context* qwen3_tts_init_from_file(const char* path_model, struct qwen3_tts_context_params params);
 
+// Initialise a codec-only context — no talker / code_predictor / speaker encoder.
+// Only loads the codec GGUF and sets up a backend.
+struct qwen3_tts_context* qwen3_tts_init_codec_only(const char* codec_path, struct qwen3_tts_context_params params);
+
 // Point the runtime at the codec GGUF (cstr/qwen3-tts-tokenizer-12hz-GGUF).
 // Required before the first `qwen3_tts_synthesize` call. Returns 0 on success.
 int qwen3_tts_set_codec_path(struct qwen3_tts_context* ctx, const char* path);
@@ -55,6 +59,12 @@ int qwen3_tts_set_voice_prompt(struct qwen3_tts_context* ctx, const char* wav_pa
 // Same as set_voice_prompt but also stores the reference transcription.
 // Required for synthesis when no voice pack is loaded.
 int qwen3_tts_set_voice_prompt_with_text(struct qwen3_tts_context* ctx, const char* wav_path, const char* ref_text);
+
+// ECAPA-only voice prompt: computes the speaker embedding but skips the
+// codec encode. Used for cross-lingual cloning (e.g. Japanese reference
+// → Chinese output) where the reference audio's speech codes would
+// interfere with the target language. Returns 0 on success.
+int qwen3_tts_set_voice_prompt_xvec_only(struct qwen3_tts_context* ctx, const char* wav_path);
 
 // Debug: get the runtime ref codes after set_voice_prompt. Returns pointer
 // to internal int32 buffer of *out_n elements ([T_codec, 16] row-major).
@@ -94,6 +104,10 @@ int qwen3_tts_select_voice(struct qwen3_tts_context* ctx, const char* name);
 // Chinese=2055, Japanese=2058 — see the `codec_language_id` field in the
 // HF config.json's talker_config). Returns 0 on success.
 int qwen3_tts_set_language(struct qwen3_tts_context* ctx, int codec_language_id);
+
+// Set language by name (case-insensitive, e.g. "chinese", "japanese", "auto").
+// Looks up the name in the qwen3tts.codec_language_names table loaded from GGUF.
+int qwen3_tts_set_language_by_name(struct qwen3_tts_context* ctx, const char* name);
 
 // ---------------------------------------------------------------------------
 // CustomVoice (fixed-speaker fine-tunes — Qwen3-TTS-CustomVoice variants)
@@ -260,6 +274,11 @@ float* qwen3_tts_synthesize(struct qwen3_tts_context* ctx, const char* text, int
 void qwen3_tts_pcm_free(float* pcm);
 
 void qwen3_tts_free(struct qwen3_tts_context* ctx);
+
+// Drain the GPU command queue — blocks until all previously submitted
+// work completes. Call between repeated DLL invocations (e.g. per-sentence
+// in a Python read-aloud loop) to prevent HIP driver command-buffer pile-up.
+void qwen3_tts_sync(struct qwen3_tts_context* ctx);
 
 void qwen3_tts_set_n_threads(struct qwen3_tts_context* ctx, int n_threads);
 
