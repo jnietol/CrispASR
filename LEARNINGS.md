@@ -10,6 +10,30 @@ If a lesson is still "live" (affects current work), it's linked from
 
 ---
 
+## HF Space is a separate, FLAT repo that silently drifts from `hf-space/`
+
+The deployed Space (`huggingface.co/spaces/cstr/CrispASR`) is its own git
+repo with files at the ROOT (`Dockerfile`, `app.py`, `start.sh`, …) — NOT a
+checkout of this repo's `hf-space/` subdir; someone flattens + uploads.
+Nothing keeps them in sync, so it bit-rots invisibly:
+
+- The Space's Dockerfile `COPY`s `app.py` (root); ours `COPY hf-space/app.py`
+  (repo-root build context). Don't upload our Dockerfile verbatim — flatten
+  the two `COPY hf-space/...` lines.
+- A rebuild clones the *latest* CrispASR `main` for the binary AND installs
+  the *latest* Gradio (`gradio>=5,<6`), so a build/CLI/API change that merged
+  weeks ago only breaks the Space at its *next* rebuild. Ours had been
+  serving an old image and kept trying to build the removed `whisper-cli`
+  target; the server binary is the `crispasr-cli` target (`crispasr-lib` is
+  only the library). Gradio dropped `gr.Code(language="text")`.
+- `gr.mount_gradio_app(fastapi_app, demo, "/")` + uvicorn lets the Space
+  serve the OpenAI `/v1` API publicly alongside the UI (HF only routes the
+  one `app_port`).
+
+Verify a Space change by actually hitting `/v1/...` (200 + a real transcript)
+— `stage=RUNNING` lies (HF serves 503/edge-CORS for an unhealthy space). See
+HISTORY (2026-06-10 hf-space).
+
 ## VAD + chunking
 
 ### Caching a stateful context must serialize the *use*, not just the *lookup* (#132, May 2026)

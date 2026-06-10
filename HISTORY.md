@@ -6,6 +6,26 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-06-10 hf-space — public OpenAI-compatible /v1 API + space un-rot
+
+The `hf-space/` Gradio demo only exposed its UI on the public port (7860);
+the C++ server's OpenAI-compatible API (`/v1/*`, `/health`, `/backends`,
+`/load`) ran on internal :8080 and 404'd publicly. Browser clients like the
+CrisperWeaver web/PWA (which calls `/v1/audio/transcriptions`) thus had no
+backend. Wrapped Gradio in a FastAPI app that reverse-proxies those routes
+to :8080 (CORS + preflight) and mounted Gradio at `/` via
+`gr.mount_gradio_app`, served by uvicorn.
+
+Deploying it surfaced that the live `cstr/CrispASR` space had bit-rotted —
+serving an image it could no longer reproduce:
+- the space's Dockerfile built the long-removed `whisper-cli` target → every
+  rebuild failed; the server binary is now the `crispasr-cli` target
+  (OUTPUT_NAME `crispasr`), not `crispasr-lib`.
+- `app.py` used `gr.Code(language="text")`, which current Gradio 5 rejects.
+Fixed both in `hf-space/` and re-synced the (separate, flat) Space repo.
+Verified live: `/v1/audio/transcriptions` returns correct transcripts with
+CORS for the web origin. See LEARNINGS (HF Space drift).
+
 ## 2026-06-09 v0.7.1 — release
 
 Release rollup of the 155 commits since **v0.7.0** (2026-06-06). Detailed
