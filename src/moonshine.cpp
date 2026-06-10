@@ -2,6 +2,7 @@
 #include "moonshine-impl.h"
 #include "moonshine-tokenizer.h"
 
+#include "core/attention.h"
 #include "core/beam_decode.h"
 #include "core/gguf_loader.h"
 
@@ -964,38 +965,32 @@ static int moonshine_transcribe_impl(struct moonshine_context* ctx, const float*
         // full tensor (small — single-MB total for the 8L Tiny model). The
         // self-attention KV is the only state that diverges between beams;
         // kv_cross is precomputed once and shared across beams via ctx.
+        // GH #161: snapshot/restore per-layer self-attention KV on-device via
+        // a recycled buffer pool (no PCIe round-trip + sync per beam per step).
+        // A thin wrapper also carries the kv_self.n length counter.
+        std::vector<ggml_tensor*> kv_tensors;
+        kv_tensors.reserve(ctx->kv_self.k.size() + ctx->kv_self.v.size());
+        for (ggml_tensor* t : ctx->kv_self.k)
+            kv_tensors.push_back(t);
+        for (ggml_tensor* t : ctx->kv_self.v)
+            kv_tensors.push_back(t);
+        core_attn::kv_snapshot_pool kv_pool(std::move(kv_tensors));
+
         struct moonshine_kv_snap {
+            core_attn::kv_snapshot* t;
             int n;
-            std::vector<std::vector<uint8_t>> k_data;
-            std::vector<std::vector<uint8_t>> v_data;
         };
-        auto save = [](moonshine_context* c) -> moonshine_kv_snap* {
-            auto* s = new moonshine_kv_snap();
-            s->n = c->kv_self.n;
-            const int L = (int)c->kv_self.k.size();
-            s->k_data.resize((size_t)L);
-            s->v_data.resize((size_t)L);
-            for (int il = 0; il < L; il++) {
-                size_t kb = ggml_nbytes(c->kv_self.k[il]);
-                size_t vb = ggml_nbytes(c->kv_self.v[il]);
-                s->k_data[(size_t)il].resize(kb);
-                s->v_data[(size_t)il].resize(vb);
-                ggml_backend_tensor_get(c->kv_self.k[il], s->k_data[(size_t)il].data(), 0, kb);
-                ggml_backend_tensor_get(c->kv_self.v[il], s->v_data[(size_t)il].data(), 0, vb);
-            }
-            return s;
+        auto save = [&kv_pool](moonshine_context* c) -> moonshine_kv_snap* {
+            return new moonshine_kv_snap{kv_pool.save(), c->kv_self.n};
         };
-        auto restore = [](moonshine_context* c, moonshine_kv_snap* s) {
+        auto restore = [&kv_pool](moonshine_context* c, moonshine_kv_snap* s) {
             c->kv_self.n = s->n;
-            const int L = (int)c->kv_self.k.size();
-            for (int il = 0; il < L; il++) {
-                ggml_backend_tensor_set(c->kv_self.k[il], s->k_data[(size_t)il].data(), 0,
-                                        s->k_data[(size_t)il].size());
-                ggml_backend_tensor_set(c->kv_self.v[il], s->v_data[(size_t)il].data(), 0,
-                                        s->v_data[(size_t)il].size());
-            }
+            kv_pool.restore(s->t);
         };
-        auto snap_free = [](moonshine_kv_snap* s) { delete s; };
+        auto snap_free = [&kv_pool](moonshine_kv_snap* s) {
+            kv_pool.release(s->t);
+            delete s;
+        };
         std::vector<float> step_logits_buf;
         auto step = [&step_logits_buf](moonshine_context* c, int32_t tok, int /*n_past*/) -> float* {
             // n_past is implicit in c->kv_self.n (set by restore_fn just

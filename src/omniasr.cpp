@@ -1501,25 +1501,12 @@ static char* omniasr_transcribe_llm(omniasr_context* ctx, const std::vector<floa
         std::vector<int> seg_tokens;
 
         if (beam) {
-            struct omniasr_kv_snap {
-                std::vector<uint8_t> k_data;
-                std::vector<uint8_t> v_data;
-            };
-            auto save = [](omniasr_context* c) -> omniasr_kv_snap* {
-                auto* s = new omniasr_kv_snap();
-                const size_t kb = ggml_nbytes(c->kv_k);
-                const size_t vb = ggml_nbytes(c->kv_v);
-                s->k_data.resize(kb);
-                s->v_data.resize(vb);
-                ggml_backend_tensor_get(c->kv_k, s->k_data.data(), 0, kb);
-                ggml_backend_tensor_get(c->kv_v, s->v_data.data(), 0, vb);
-                return s;
-            };
-            auto restore = [](omniasr_context* c, omniasr_kv_snap* s) {
-                ggml_backend_tensor_set(c->kv_k, s->k_data.data(), 0, s->k_data.size());
-                ggml_backend_tensor_set(c->kv_v, s->v_data.data(), 0, s->v_data.size());
-            };
-            auto snap_free = [](omniasr_kv_snap* s) { delete s; };
+            // GH #161: snapshot/restore KV on-device via a recycled buffer
+            // pool (no PCIe round-trip + sync per beam per step).
+            core_attn::kv_snapshot_pool kv_pool(ctx->kv_k, ctx->kv_v);
+            auto save = [&kv_pool](omniasr_context*) -> core_attn::kv_snapshot* { return kv_pool.save(); };
+            auto restore = [&kv_pool](omniasr_context*, core_attn::kv_snapshot* s) { kv_pool.restore(s); };
+            auto snap_free = [&kv_pool](core_attn::kv_snapshot* s) { kv_pool.release(s); };
             std::vector<float> step_buf;
             auto step_fn = [&step_buf, perf](omniasr_context* c, int32_t tok, int n_past) -> float* {
                 int dummy = 0;

@@ -34,9 +34,17 @@
 #include "ggml.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
+
+// Declared in ggml-backend-impl.h, which is not on the public include path,
+// but the symbol is GGML_API-exported by the ggml backend library. Returns
+// true iff the backend performed a direct device-to-device tensor copy
+// (GH #161 — used to pick the KV-snapshot storage mode below).
+extern "C" bool ggml_backend_buffer_copy_tensor(const struct ggml_tensor* src, struct ggml_tensor* dst);
 
 namespace core_attn {
 
@@ -126,6 +134,160 @@ inline ggml_backend_t kv_backend_from_env(ggml_backend_t gpu_backend, ggml_backe
     }
     return cpu_backend;
 }
+
+// GH #161 — on-device KV-cache snapshot for branched beam search.
+//
+// `core_beam_decode::run_with_probs_branched` snapshots and restores the
+// decoder's KV cache once per surviving beam per step. The original
+// per-backend lambdas did this through host memory
+// (`ggml_backend_tensor_get` → std::vector → `ggml_backend_tensor_set`),
+// which on a GPU backend means a full KV round-trip over PCIe *plus* a
+// blocking device synchronize on every copy. With the default beam_size=5
+// that is ~B×(K+V) bytes of GPU↔CPU traffic per decode step — the bulk of
+// the #161 cohere regression (one core pegged in a sync-spin, time spent
+// entirely outside the profiled compute).
+//
+// `kv_snapshot_pool` instead keeps the snapshot resident on the *same*
+// buffer type as the cache, so save/restore are device-to-device blits with
+// no host transfer and no sync-to-host. It snapshots an arbitrary list of
+// live tensors, so it serves both the single `kv_k`/`kv_v` layout (cohere,
+// canary, kyutai_stt, omniasr) and the per-layer `kv.k[il]`/`kv.v[il]`
+// layout (moonshine).
+//
+// Allocating a fresh backend buffer per snapshot is itself expensive on a
+// GPU backend (MTLBuffer creation / cudaMalloc can synchronize the device),
+// and beam search saves O(B) snapshots *per step*. The pool therefore
+// recycles slots: at most ~beam_size+1 snapshots are ever live at once, so
+// after the first few steps every `save` reuses an idle slot.
+//
+// Two storage modes, chosen once from whether the cache backend supports a
+// direct device-to-device tensor copy:
+//   * DEVICE — discrete-VRAM backends (CUDA, Vulkan, ROCm). The snapshot
+//     lives in VRAM and save/restore are on-device blits: no PCIe transfer,
+//     no sync-to-host. This is the path that fixes #161.
+//   * HOST   — unified-memory / CPU backends (Metal, CPU), where the cache
+//     is already host-addressable and an on-device blit isn't implemented
+//     (and `ggml_backend_tensor_copy` would silently round-trip through a
+//     freshly malloc'd staging buffer). Here we snapshot into a recycled
+//     host buffer, identical cost to the original code minus the per-step
+//     allocation churn.
+struct kv_snapshot {
+    ggml_backend_buffer_t buf = nullptr;    // DEVICE mode (all tensors packed here)
+    ggml_context* meta = nullptr;           // DEVICE mode
+    std::vector<ggml_tensor*> dev;          // DEVICE mode: per-source snapshot tensor
+    std::vector<std::vector<uint8_t>> host; // HOST mode: per-source snapshot bytes
+    bool in_use = false;
+};
+
+struct kv_snapshot_pool {
+    std::vector<ggml_tensor*> live; // tensors to snapshot, in order
+    enum { UNKNOWN, DEVICE, HOST } mode = UNKNOWN;
+    std::vector<kv_snapshot*> slots;
+
+    explicit kv_snapshot_pool(std::vector<ggml_tensor*> tensors) : live(std::move(tensors)) {}
+    kv_snapshot_pool(ggml_tensor* k, ggml_tensor* v) : live{k, v} {}
+    kv_snapshot_pool(const kv_snapshot_pool&) = delete;
+    kv_snapshot_pool& operator=(const kv_snapshot_pool&) = delete;
+
+    ~kv_snapshot_pool() {
+        for (kv_snapshot* s : slots) {
+            if (s->buf)
+                ggml_backend_buffer_free(s->buf);
+            if (s->meta)
+                ggml_free(s->meta);
+            delete s;
+        }
+    }
+
+    void alloc_device(kv_snapshot* s) {
+        const ggml_init_params ip = {ggml_tensor_overhead() * (live.size() + 1) + 256, nullptr, /*no_alloc=*/true};
+        s->meta = ggml_init(ip);
+        size_t total = 0;
+        for (ggml_tensor* t : live)
+            total += ggml_nbytes(t);
+        ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(live[0]->buffer);
+        s->buf = ggml_backend_buft_alloc_buffer(buft, total);
+        char* base = (char*)ggml_backend_buffer_get_base(s->buf);
+        size_t off = 0;
+        s->dev.resize(live.size());
+        for (size_t i = 0; i < live.size(); i++) {
+            s->dev[i] = ggml_new_tensor(s->meta, live[i]->type, GGML_MAX_DIMS, live[i]->ne);
+            ggml_backend_tensor_alloc(s->buf, s->dev[i], base + off);
+            off += ggml_nbytes(live[i]);
+        }
+    }
+
+    void free_device(kv_snapshot* s) {
+        if (s->buf)
+            ggml_backend_buffer_free(s->buf);
+        if (s->meta)
+            ggml_free(s->meta);
+        s->buf = nullptr;
+        s->meta = nullptr;
+        s->dev.clear();
+    }
+
+    kv_snapshot* save() {
+        kv_snapshot* s = nullptr;
+        for (kv_snapshot* slot : slots) {
+            if (!slot->in_use) {
+                s = slot;
+                break;
+            }
+        }
+        const bool fresh = (s == nullptr);
+        if (fresh) {
+            s = new kv_snapshot();
+            slots.push_back(s);
+        }
+        s->in_use = true;
+
+        // Decide the storage mode the first time we see a real copy: try a
+        // device-to-device blit; if the backend can't do it, fall back to a
+        // host snapshot for this and every subsequent slot.
+        if (mode == UNKNOWN) {
+            alloc_device(s);
+            bool ok = true;
+            for (size_t i = 0; i < live.size(); i++)
+                ok = ok && ggml_backend_buffer_copy_tensor(live[i], s->dev[i]);
+            if (ok) {
+                mode = DEVICE;
+                return s;
+            }
+            mode = HOST;
+            free_device(s);
+        }
+
+        if (mode == DEVICE) {
+            if (fresh)
+                alloc_device(s);
+            for (size_t i = 0; i < live.size(); i++)
+                ggml_backend_buffer_copy_tensor(live[i], s->dev[i]);
+        } else {
+            s->host.resize(live.size());
+            for (size_t i = 0; i < live.size(); i++) {
+                s->host[i].resize(ggml_nbytes(live[i]));
+                ggml_backend_tensor_get(live[i], s->host[i].data(), 0, s->host[i].size());
+            }
+        }
+        return s;
+    }
+
+    void restore(const kv_snapshot* s) {
+        if (mode == DEVICE) {
+            for (size_t i = 0; i < live.size(); i++)
+                ggml_backend_buffer_copy_tensor(s->dev[i], live[i]);
+        } else {
+            for (size_t i = 0; i < live.size(); i++)
+                ggml_backend_tensor_set(live[i], s->host[i].data(), 0, s->host[i].size());
+        }
+    }
+
+    void release(kv_snapshot* s) {
+        if (s)
+            s->in_use = false;
+    }
+};
 
 // PLAN #73 — quant-safe per-step KV cache write. Replaces the inline
 // `ggml_cpy(K_perm, ggml_view_4d(kv_k, …))` pattern that several

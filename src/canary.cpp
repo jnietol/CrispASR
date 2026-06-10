@@ -1735,28 +1735,15 @@ static canary_result* canary_finish_from_encoder(canary_context* ctx, const floa
     // Cross-attention KV (cross_k/v) is shared across beams; only self-attention
     // KV (kv_k/kv_v) is snapshotted per beam.
     if (ctx->beam_size > 1) {
-        struct canary_kv_snap {
-            std::vector<uint8_t> k_data;
-            std::vector<uint8_t> v_data;
-        };
+        // GH #161: snapshot/restore self-attention KV on-device via a recycled
+        // buffer pool (no PCIe round-trip + sync per beam per step).
+        core_attn::kv_snapshot_pool kv_pool(ctx->kv_k, ctx->kv_v);
 
-        auto save_fn = [](canary_context* c) -> canary_kv_snap* {
-            auto* s = new canary_kv_snap();
-            size_t kb = ggml_nbytes(c->kv_k);
-            size_t vb = ggml_nbytes(c->kv_v);
-            s->k_data.resize(kb);
-            s->v_data.resize(vb);
-            ggml_backend_tensor_get(c->kv_k, s->k_data.data(), 0, kb);
-            ggml_backend_tensor_get(c->kv_v, s->v_data.data(), 0, vb);
-            return s;
-        };
+        auto save_fn = [&kv_pool](canary_context*) -> core_attn::kv_snapshot* { return kv_pool.save(); };
 
-        auto restore_fn = [](canary_context* c, canary_kv_snap* s) {
-            ggml_backend_tensor_set(c->kv_k, s->k_data.data(), 0, s->k_data.size());
-            ggml_backend_tensor_set(c->kv_v, s->v_data.data(), 0, s->v_data.size());
-        };
+        auto restore_fn = [&kv_pool](canary_context*, core_attn::kv_snapshot* s) { kv_pool.restore(s); };
 
-        auto snap_free_fn = [](canary_kv_snap* s) { delete s; };
+        auto snap_free_fn = [&kv_pool](core_attn::kv_snapshot* s) { kv_pool.release(s); };
 
         auto step_fn = [](canary_context* c, int32_t tok, int n_past) -> float* {
             auto lg = canary_decode_step(c, &tok, 1, n_past);

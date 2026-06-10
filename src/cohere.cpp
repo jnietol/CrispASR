@@ -112,15 +112,17 @@ static void cohere_log_tensor(const char* name, const struct ggml_tensor* t) {
 // ---------------------------------------------------------------------------
 
 struct cohere_perf {
-    int64_t t_features_us = 0;    // STFT + mel filterbank
-    int64_t t_enc_build_us = 0;   // encoder graph construction
-    int64_t t_enc_alloc_us = 0;   // encoder ggml_backend_sched_alloc_graph
-    int64_t t_enc_compute_us = 0; // encoder ggml_backend_sched_graph_compute
-    int64_t t_cross_kv_us = 0;    // copying cross-KV tensors from encoder output
-    int64_t t_dec_build_us = 0;   // decoder graph build (all steps summed)
-    int64_t t_dec_alloc_us = 0;   // decoder sched alloc (all steps summed)
-    int64_t t_dec_compute_us = 0; // decoder compute (all steps summed)
-    int64_t t_dec_logits_us = 0;  // decoder ggml_backend_tensor_get logits (all steps)
+    int64_t t_features_us = 0;     // STFT + mel filterbank
+    int64_t t_enc_build_us = 0;    // encoder graph construction
+    int64_t t_enc_alloc_us = 0;    // encoder ggml_backend_sched_alloc_graph
+    int64_t t_enc_compute_us = 0;  // encoder ggml_backend_sched_graph_compute
+    int64_t t_cross_kv_us = 0;     // copying cross-KV tensors from encoder output
+    int64_t t_crosskv_read_us = 0; // GPU->CPU readback of per-chunk cross-KV (#161 probe)
+    int64_t t_reserve_us = 0;      // one-time sched reserve of max-ctx decoder graph (#161 probe)
+    int64_t t_dec_build_us = 0;    // decoder graph build (all steps summed)
+    int64_t t_dec_alloc_us = 0;    // decoder sched alloc (all steps summed)
+    int64_t t_dec_compute_us = 0;  // decoder compute (all steps summed)
+    int64_t t_dec_logits_us = 0;   // decoder ggml_backend_tensor_get logits (all steps)
     int64_t t_dec_step_min_us = INT64_MAX;
     int64_t t_dec_step_max_us = 0;
     int n_dec_steps = 0;    // total autoregressive steps (prompt + generated)
@@ -179,6 +181,22 @@ static void cohere_perf_print(const cohere_perf& p, int n_samples, int sample_ra
                 p.t_dec_logits_us / 1e3 / p.n_dec_steps);
         fprintf(stderr, "cohere:  dec total        %7.1f ms\n",
                 (p.t_dec_build_us + p.t_dec_alloc_us + p.t_dec_compute_us + p.t_dec_logits_us) / 1e3);
+    }
+    // #161 probes: host-side work that lives in the gaps between the timed
+    // stages above (cross-KV GPU->CPU readback, one-time max-ctx sched
+    // reserve, and a UNACCOUNTED residual that catches any remaining gap —
+    // e.g. the beam-search KV snapshot that drove the #161 regression).
+    // Opt-in via COHERE_GAPS=1 (or COHERE_BENCH=1) to keep the default
+    // report compact.
+    if (std::getenv("COHERE_GAPS") || std::getenv("COHERE_BENCH")) {
+        const int64_t accounted = p.t_features_us + p.t_enc_build_us + p.t_enc_alloc_us + p.t_enc_compute_us +
+                                  p.t_cross_kv_us + p.t_crosskv_read_us + p.t_reserve_us + p.t_dec_build_us +
+                                  p.t_dec_alloc_us + p.t_dec_compute_us + p.t_dec_logits_us;
+        fprintf(stderr, "cohere: ----- untimed gaps (#161) -----\n");
+        fprintf(stderr, "cohere:  cross-kv readback%7.1f ms\n", p.t_crosskv_read_us / 1e3);
+        fprintf(stderr, "cohere:  sched reserve    %7.1f ms\n", p.t_reserve_us / 1e3);
+        fprintf(stderr, "cohere:  UNACCOUNTED     %7.1f ms   <- residual = total - all stages\n",
+                (p.t_total_us - accounted) / 1e3);
     }
     fprintf(stderr, "cohere: ----- memory -----\n");
     fprintf(stderr, "cohere:  model weights    %7.1f MiB\n", p.mem_model_buf / 1048576.0);
@@ -2289,6 +2307,7 @@ struct cohere_result* cohere_transcribe_ex(struct cohere_context* ctx, const flo
             // Extract cross-KV from this chunk's encoder graph into CPU vectors.
             // K shape: [head_dim, T_enc_c, n_heads] (raw F32 from encoder graph)
             // V shape: [T_enc_c, head_dim, n_heads] (raw F32 from encoder graph)
+            const int64_t t_ckr0 = ggml_time_us();
             for (int il = 0; il < hp.dec_n_layers; il++) {
                 char ck_name[32], cv_name[32];
                 snprintf(ck_name, sizeof(ck_name), "ck_%d", il);
@@ -2304,6 +2323,7 @@ struct cohere_result* cohere_transcribe_ex(struct cohere_context* ctx, const flo
                 ggml_backend_tensor_get(ck_src, partial_k[il].back().data(), 0, ggml_nbytes(ck_src));
                 ggml_backend_tensor_get(cv_src, partial_v[il].back().data(), 0, ggml_nbytes(cv_src));
             }
+            perf.t_crosskv_read_us += (ggml_time_us() - t_ckr0);
         } // end chunk loop
 
         if (do_chunked) {
@@ -2465,9 +2485,11 @@ struct cohere_result* cohere_transcribe_ex(struct cohere_context* ctx, const flo
     // the gallocr's size_max covers all future autoregressive steps, so
     // ggml_gallocr_needs_realloc returns false for every step and the plan is reused.
     {
+        const int64_t t_rsv0 = ggml_time_us();
         const int dummy_tok = 0;
         struct ggml_cgraph* gf_max = cohere_build_graph_decoder(ctx, &dummy_tok, 1, hp.dec_max_ctx - 1);
         ggml_backend_sched_reserve(ctx->ggml_alloc, gf_max);
+        perf.t_reserve_us += (ggml_time_us() - t_rsv0);
     }
 
     std::vector<int> generated;
@@ -2477,28 +2499,16 @@ struct cohere_result* cohere_transcribe_ex(struct cohere_context* ctx, const flo
     // Cross-attention KV (cross_kv_k/v) is shared across beams; only self-attention
     // KV (kv_k/kv_v) is snapshotted per beam.
     if (ctx->beam_size > 1) {
-        struct cohere_kv_snap {
-            std::vector<uint8_t> k_data;
-            std::vector<uint8_t> v_data;
-        };
+        // GH #161: snapshot/restore self-attention KV on-device via a recycled
+        // buffer pool (no PCIe round-trip + sync per beam per step). The pool
+        // outlives every snapshot produced by the beam search below.
+        core_attn::kv_snapshot_pool kv_pool(ctx->kv_k, ctx->kv_v);
 
-        auto save_fn = [](cohere_context* c) -> cohere_kv_snap* {
-            auto* s = new cohere_kv_snap();
-            size_t kb = ggml_nbytes(c->kv_k);
-            size_t vb = ggml_nbytes(c->kv_v);
-            s->k_data.resize(kb);
-            s->v_data.resize(vb);
-            ggml_backend_tensor_get(c->kv_k, s->k_data.data(), 0, kb);
-            ggml_backend_tensor_get(c->kv_v, s->v_data.data(), 0, vb);
-            return s;
-        };
+        auto save_fn = [&kv_pool](cohere_context*) -> core_attn::kv_snapshot* { return kv_pool.save(); };
 
-        auto restore_fn = [](cohere_context* c, cohere_kv_snap* s) {
-            ggml_backend_tensor_set(c->kv_k, s->k_data.data(), 0, s->k_data.size());
-            ggml_backend_tensor_set(c->kv_v, s->v_data.data(), 0, s->v_data.size());
-        };
+        auto restore_fn = [&kv_pool](cohere_context*, core_attn::kv_snapshot* s) { kv_pool.restore(s); };
 
-        auto snap_free_fn = [](cohere_kv_snap* s) { delete s; };
+        auto snap_free_fn = [&kv_pool](core_attn::kv_snapshot* s) { kv_pool.release(s); };
 
         // Capture T_enc so step_fn can pass it to cohere_decode_step.
         const int beam_T_enc = T_enc;

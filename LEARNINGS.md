@@ -10,6 +10,35 @@ If a lesson is still "live" (affects current work), it's linked from
 
 ---
 
+## Beam-search KV snapshots must stay on-device (#161)
+
+`core_beam_decode::run_with_probs_branched` saves+restores the decoder KV cache
+once per surviving beam per step. Doing that through host memory
+(`tensor_get` → `std::vector` → `tensor_set`) is invisible on a unified-memory
+backend (Metal/CPU) but on a discrete GPU it's a full KV round-trip over PCIe +
+a blocking sync per copy — at the whisper-default `beam_size=5` it dominated
+cohere wall time on CUDA (~10× regression, GH #161), entirely outside the per-op
+profile while one core sat in a sync-spin.
+
+- A per-op profile that's "unchanged" while wall time regresses points at
+  host-side glue, not kernels. Add a `total − Σstages` residual probe
+  (cohere's `UNACCOUNTED` line) — it localizes the gap in a single run. An A/B
+  on `-bs 1` (greedy, no snapshots) confirms the beam path is the culprit.
+- Use `core_attn::kv_snapshot_pool`. It blits **device-to-device** when the
+  cache backend implements `cpy_tensor` (CUDA/Vulkan — `ggml_backend_buffer_copy_tensor`
+  returns true) and falls back to **pooled host buffers** otherwise. The naive
+  `ggml_backend_tensor_copy` is a trap on Metal: shared-buffer `cpy_tensor`
+  returns false, so it silently `malloc`s a staging buffer and round-trips —
+  *worse* than the original per-step `std::vector`.
+- Pool the snapshot buffers. Allocating a backend buffer per snapshot
+  (`cudaMalloc` / `MTLBuffer`) per beam per step is its own regression
+  (`UNACCOUNTED` 705→2168 ms on Metal before pooling); only ~`beam_size+1` are
+  ever live at once.
+- `ggml_backend_buffer_is_host` does NOT distinguish Metal-unified from
+  CUDA-discrete — Metal shared buffers report `is_host=false` yet are
+  host-addressable. Probe actual device-to-device copy support, don't guess
+  from `is_host`.
+
 ## HF Space is a separate, FLAT repo that silently drifts from `hf-space/`
 
 The deployed Space (`huggingface.co/spaces/cstr/CrispASR`) is its own git

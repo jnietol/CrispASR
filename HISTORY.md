@@ -6,6 +6,46 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-06-10 #161 — cohere CUDA ASR 10× regression: beam-search KV snapshot through host memory
+
+Windows reporter (praxeo) measured cohere ASR ~10× slower on CUDA / ~2× on CPU
+between an early-May `main` build (`5c0ac1f`) and `v0.7.1`: per-op `COHERE_PROF`
+profiles unchanged, time lost entirely *outside* profiled compute, one CPU core
+pegged in a sync-spin, overhead scaling with audio length.
+
+**Reproduced on M1** (`cohere-transcribe-q4_k` + `samples/jfk.wav`) after adding
+an `UNACCOUNTED` residual probe to the `COHERE_BENCH` report (`total wall` minus
+every timed stage). The residual held the cost; an A/B with `-bs 1` collapsed it
+(`UNACCOUNTED` 705→28 ms, byte-identical transcript).
+
+**Root cause.** cohere's default `beam_size` resolves to 5 (the whisper
+beam-search default), so every transcribe runs
+`core_beam_decode::run_with_probs_branched`, which snapshots+restores the **whole
+self-attention KV cache per surviving beam per decode step**. The per-backend
+lambdas did this through host memory (`ggml_backend_tensor_get` → `std::vector` →
+`ggml_backend_tensor_set`) — on a discrete GPU that's a full KV round-trip over
+PCIe plus a blocking device sync per copy (~320 MB/step at beam_size=5). The fast
+build predated beam wiring (`52cfec83`, inside the reporter's regression window)
+and decoded greedy with no snapshots.
+
+**Fix:** `core_attn::kv_snapshot_pool` (`src/core/attention.h`) — a recycled
+snapshot pool with two auto-selected modes (it probes
+`ggml_backend_buffer_copy_tensor`): **DEVICE** (CUDA/Vulkan/discrete) keeps
+snapshots in VRAM and does device-to-device blits (no PCIe, no host sync);
+**HOST** (Metal/CPU/unified, where the on-device blit isn't implemented) uses
+pooled host buffers (no per-snapshot alloc churn, otherwise identical to before).
+Pooling matters: a first cut with a fresh device buffer per snapshot was *worse*
+on Metal (MTLBuffer alloc churn, `UNACCOUNTED` 705→2168 ms).
+
+Affects 6 branched-beam ASR runtimes; fixed cohere, canary, kyutai_stt, omniasr
+(single `kv_k`/`kv_v`) and moonshine (per-layer `kv_self.k[il]`, plus its `n`
+counter). `moonshine_streaming` already snapshots a host-resident CPU cache via
+`memcpy(->data)` — unaffected. Validated: cohere+canary transcripts byte-correct
+with default beam; Metal selects HOST mode (no regression); 399/399 unit tests
+pass. DEVICE mode confirmed correct by code (CUDA `cpy_tensor` =
+`cudaMemcpyDeviceToDevice`) but the wall-clock win needs the reporter's CUDA box.
+Diagnostic probes kept behind `COHERE_GAPS` / `COHERE_BENCH`. See LEARNINGS.
+
 ## 2026-06-10 WASM build — all backends, multithreaded
 
 Compiled the full CrispASR library (~70 ASR/TTS/LID/VAD backends) to
