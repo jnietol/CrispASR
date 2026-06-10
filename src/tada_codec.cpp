@@ -17,6 +17,7 @@
 //   Total upsample: 4×4×5×6 = 480. 50 Hz features → 24000 Hz audio.
 
 #include "tada_codec.h"
+#include "core/conv.h"
 #include "core/gguf_loader.h"
 
 #include "ggml.h"
@@ -43,8 +44,9 @@ namespace {
 
 // Conv weight (pre-materialized from weight-norm g*v/||v|| by the converter)
 struct wn_conv {
-    ggml_tensor* w = nullptr; // materialized weight
-    ggml_tensor* b = nullptr; // bias
+    ggml_tensor* w = nullptr;      // materialized weight
+    ggml_tensor* b = nullptr;      // bias
+    ggml_tensor* w_perm = nullptr; // pre-permuted for decomposed col2im path
 };
 
 struct tada_codec_attn_layer {
@@ -114,6 +116,8 @@ struct tada_codec_context {
     ggml_backend_t backend = nullptr;
     ggml_context* ctx_w = nullptr;
     ggml_backend_buffer_t buf_w = nullptr;
+    ggml_context* ctx_perm = nullptr;
+    ggml_backend_buffer_t buf_perm = nullptr;
     std::map<std::string, ggml_tensor*> tensors;
     std::vector<uint8_t> compute_meta;
 };
@@ -329,9 +333,15 @@ static ggml_tensor* wn_convt1d(ggml_context* ctx, ggml_tensor* x, const wn_conv&
         return x;
 
     const int K = (int)w->ne[0]; // kernel_size = 2*stride
+    const int pad = (stride + 1) / 2; // ceil(stride/2), matches Python
+
+    if (wn.w_perm) {
+        ggml_tensor* b = wn.b ? ggml_cast(ctx, wn.b, GGML_TYPE_F32) : nullptr;
+        return core_convt::convt1d_decomp(ctx, x, wn.w_perm, b, stride, K, pad, pad);
+    }
+
     const int Cout = (int)w->ne[1];
     const int T = (int)x->ne[1];
-    const int pad = (stride + 1) / 2; // ceil(stride/2), matches Python
     // PyTorch output: (T-1)*stride - 2*pad + K
     const int T_out = (T - 1) * stride - 2 * pad + K;
 
@@ -660,6 +670,19 @@ struct tada_codec_context* tada_codec_init_from_file(const char* path, int n_thr
     // Pre-compute 1/alpha for all Snake1d activations (avoids fused snake op)
     precompute_all_inv_alphas(c);
 
+    // Permute ConvTranspose1d weights for decomposed col2im path
+    {
+        const int n = 4;
+        ggml_tensor* srcs[4];
+        ggml_tensor** dsts[4];
+        for (int i = 0; i < n; i++) {
+            srcs[i] = wn_weight(c->blocks[i].up_conv);
+            dsts[i] = &c->blocks[i].up_conv.w_perm;
+        }
+        core_convt::permute_convt1d_weights_batch(srcs, dsts, n,
+                                                  c->backend, &c->ctx_perm, &c->buf_perm);
+    }
+
     fprintf(stderr, "tada-codec: loaded OK (%zu tensors)\n", c->tensors.size());
     return c;
 }
@@ -849,6 +872,10 @@ void tada_codec_pcm_free(float* pcm) {
 void tada_codec_free(struct tada_codec_context* ctx) {
     if (!ctx)
         return;
+    if (ctx->buf_perm)
+        ggml_backend_buffer_free(ctx->buf_perm);
+    if (ctx->ctx_perm)
+        ggml_free(ctx->ctx_perm);
     if (ctx->buf_w)
         ggml_backend_buffer_free(ctx->buf_w);
     if (ctx->ctx_w)

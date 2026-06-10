@@ -199,6 +199,11 @@ struct speecht5_tts_context {
     float threshold = 0.5f;
     int max_len = 0;
 
+    // Pre-permuted HiFi-GAN upsample weights for decomposed col2im path
+    std::vector<ggml_tensor*> ups_w_perm;
+    ggml_context* ctx_perm = nullptr;
+    ggml_backend_buffer_t buf_perm = nullptr;
+
     // Speaker embedding (512-dim x-vector)
     std::vector<float> speaker_emb;
 
@@ -1149,7 +1154,7 @@ static std::vector<float> run_vocoder(speecht5_tts_context* ctx,
     ggml_set_input(mel_in);
 
     // Run HiFi-GAN — input is (T, C_in) = (T_mel, mel_dim)
-    ggml_tensor* waveform = core_hifigan::forward(gc, mel_in, ts, "voc", vhp);
+    ggml_tensor* waveform = core_hifigan::forward(gc, mel_in, ts, "voc", vhp, ctx->ups_w_perm);
 
     ggml_set_name(waveform, "waveform");
 
@@ -1302,6 +1307,23 @@ struct speecht5_tts_context* speecht5_tts_init(const char* path, struct speecht5
         return nullptr;
     }
 
+    // Permute HiFi-GAN upsample ConvTranspose1d weights
+    {
+        const int n = ctx->voc_hp.num_upsamples();
+        std::vector<ggml_tensor*> srcs(n);
+        std::vector<ggml_tensor**> dsts(n);
+        ctx->ups_w_perm.resize(n, nullptr);
+        auto& ts = ctx->tensors();
+        for (int i = 0; i < n; i++) {
+            std::string wname = "voc.ups." + std::to_string(i) + ".weight";
+            auto it = ts.find(wname);
+            srcs[i] = (it != ts.end()) ? it->second : nullptr;
+            dsts[i] = &ctx->ups_w_perm[i];
+        }
+        core_convt::permute_convt1d_weights_batch(srcs.data(), dsts.data(), n,
+                                                  ctx->backend, &ctx->ctx_perm, &ctx->buf_perm);
+    }
+
     if (params.verbosity > 0) {
         fprintf(stderr, "speecht5: backend=%s\n", ggml_backend_name(ctx->backend));
         fprintf(stderr, "speecht5: loaded model — hidden=%d mel=%d enc=%d dec=%d vocab=%d\n", hp.hidden_size,
@@ -1439,5 +1461,11 @@ void speecht5_tts_pcm_free(float* pcm) {
 }
 
 void speecht5_tts_free(struct speecht5_tts_context* ctx) {
+    if (ctx) {
+        if (ctx->buf_perm)
+            ggml_backend_buffer_free(ctx->buf_perm);
+        if (ctx->ctx_perm)
+            ggml_free(ctx->ctx_perm);
+    }
     delete ctx;
 }

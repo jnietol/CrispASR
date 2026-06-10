@@ -278,6 +278,11 @@ struct kugelaudio_context {
 
     std::vector<uint8_t> compute_meta;
 
+    // Pre-permuted ConvTranspose1d weights for decomposed col2im path
+    std::vector<ggml_tensor*> dec_ups_w_perm;
+    ggml_context* ctx_perm = nullptr;
+    ggml_backend_buffer_t buf_perm = nullptr;
+
     // Voice cache
     std::vector<float> voice_acoustic_mean; // [n_voice_frames * vae_dim]
     int n_voice_frames = 0;
@@ -461,6 +466,24 @@ extern "C" struct kugelaudio_context* kugelaudio_init_from_file(const char* path
         ggml_backend_tensor_get(bf, &hp.speech_bias_factor, 0, sizeof(float));
     }
 
+    // Permute ConvTranspose1d upsample weights for decomposed col2im path
+    {
+        const int n_stages = (int)hp.decoder_ratios.size(); // 6
+        std::vector<ggml_tensor*> srcs(n_stages);
+        std::vector<ggml_tensor**> dsts(n_stages);
+        ctx->dec_ups_w_perm.resize(n_stages, nullptr);
+        for (int i = 0; i < n_stages; i++) {
+            char wn[256];
+            snprintf(wn, sizeof(wn), "model.acoustic_tokenizer.decoder.upsample_layers.%d.0.convtr.convtr.weight",
+                     i + 1);
+            auto it = m.tensors.find(wn);
+            srcs[i] = (it != m.tensors.end()) ? it->second : nullptr;
+            dsts[i] = &ctx->dec_ups_w_perm[i];
+        }
+        core_convt::permute_convt1d_weights_batch(srcs.data(), dsts.data(), n_stages,
+                                                  ctx->backend, &ctx->ctx_perm, &ctx->buf_perm);
+    }
+
     // Init RNG
     crispasr::core::mt19937_seed(ctx->rng, params.seed != 0 ? params.seed : (uint32_t)time(nullptr));
 
@@ -478,6 +501,10 @@ extern "C" struct kugelaudio_context* kugelaudio_init_from_file(const char* path
 extern "C" void kugelaudio_free(struct kugelaudio_context* ctx) {
     if (!ctx)
         return;
+    if (ctx->buf_perm)
+        ggml_backend_buffer_free(ctx->buf_perm);
+    if (ctx->ctx_perm)
+        ggml_free(ctx->ctx_perm);
     if (ctx->kv_neg_buf)
         ggml_backend_buffer_free(ctx->kv_neg_buf);
     if (ctx->kv_neg_ctx)
@@ -665,7 +692,12 @@ static ggml_tensor* build_causal_dw_conv1d(ggml_context* ctx0, ggml_tensor* x, g
 // ── Transposed Conv1d (upsample) ───────────────────────────────────────────
 
 static ggml_tensor* build_transposed_conv1d(ggml_context* ctx0, ggml_tensor* x, ggml_tensor* w, ggml_tensor* b,
-                                            int stride) {
+                                            int stride, ggml_tensor* w_perm = nullptr) {
+    if (w_perm) {
+        const int K = (int)w->ne[0];
+        return core_convt::convt1d_decomp(ctx0, x, w_perm, b, stride, K, /*crop_left=*/0, /*crop_right=*/K - stride);
+    }
+
     int T_in = (int)x->ne[1];
     x = ggml_cont(ctx0, ggml_transpose(ctx0, x)); // [C, T] → [T, C]
     x = ggml_conv_transpose_1d(ctx0, w, x, stride, 0, 1);
@@ -911,7 +943,8 @@ static ggml_cgraph* build_vae_decoder_graph(kugelaudio_context* ctx, int n_frame
         int stride = ratios[si - 1];
         KUGELAUDIO_TRACE("dec: stage %d upsample stride=%d h=[%lld,%lld]\n", si, stride, (long long)h->ne[0],
                          (long long)h->ne[1]);
-        h = build_transposed_conv1d(ctx0, h, G(wn), G(bn), stride);
+        ggml_tensor* wp = (si - 1 < (int)ctx->dec_ups_w_perm.size()) ? ctx->dec_ups_w_perm[si - 1] : nullptr;
+        h = build_transposed_conv1d(ctx0, h, G(wn), G(bn), stride, wp);
         KUGELAUDIO_TRACE("dec: stage %d upsample out=[%lld,%lld]\n", si, (long long)h->ne[0], (long long)h->ne[1]);
 
         int n_blocks = (si < (int)depths.size()) ? depths[si] : 3;

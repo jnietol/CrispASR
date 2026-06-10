@@ -193,6 +193,8 @@ struct parler_tts_context {
     ggml_context* ctx_w = nullptr;
     ggml_backend_buffer_t buf_w = nullptr;
     std::map<std::string, ggml_tensor*> tensors;
+    ggml_context* ctx_perm = nullptr;
+    ggml_backend_buffer_t buf_perm = nullptr;
 
     ggml_backend_t backend = nullptr;
     ggml_backend_t backend_cpu = nullptr;
@@ -711,6 +713,19 @@ struct parler_tts_context* parler_tts_init_from_file(const char* path_model, str
 
     bind_tensors(ctx);
 
+    // Permute DAC ConvTranspose1d weights for decomposed path
+    {
+        const int n = 4; // DAC always has 4 decoder blocks
+        std::vector<ggml_tensor*> srcs(n);
+        std::vector<ggml_tensor**> dsts(n);
+        for (int i = 0; i < n; i++) {
+            srcs[i] = ctx->model.dac.blocks[i].up_w;
+            dsts[i] = &ctx->model.dac.blocks[i].up_w_perm;
+        }
+        core_convt::permute_convt1d_weights_batch(srcs.data(), dsts.data(), n,
+                                                  ctx->backend, &ctx->ctx_perm, &ctx->buf_perm);
+    }
+
     if (params.verbosity >= 1) {
         auto& dc = ctx->model.dec_cfg;
         auto& tc = ctx->model.t5_cfg;
@@ -985,8 +1000,14 @@ static ggml_tensor* dac_conv1d(ggml_context* ctx, ggml_tensor* x, ggml_tensor* w
 
 // ConvTranspose1d: x is (C_in, T), w is (K, C_out, C_in) per ggml convention
 // Applies padding by cropping output. Returns (C_out, T_out).
-static ggml_tensor* dac_conv_transpose_1d(ggml_context* ctx, ggml_tensor* x, ggml_tensor* w, ggml_tensor* b, int stride,
-                                          int pad) {
+static ggml_tensor* dac_conv_transpose_1d(ggml_context* ctx, ggml_tensor* x, ggml_tensor* w, ggml_tensor* w_perm,
+                                          ggml_tensor* b, int stride, int pad) {
+    if (w_perm) {
+        const int K = (int)w->ne[0];
+        ggml_tensor* y = core_convt::convt1d_decomp(ctx, x, w_perm, nullptr, stride, K, pad, pad);
+        if (b) y = ggml_add(ctx, y, cast_f32(ctx, b));
+        return y;
+    }
     const int Cout = (int)w->ne[1];
     ggml_tensor* xt = ggml_cont(ctx, ggml_transpose(ctx, x)); // (T, C_in)
     ggml_tensor* y = ggml_conv_transpose_1d(ctx, w, xt, stride, 0, 1);
@@ -1099,7 +1120,7 @@ float* parler_tts_synthesize(struct parler_tts_context* ctx, const char* text, i
         x = core_dac::snake(ctx0, x, blk.snake_alpha);
 
         // ConvTranspose1d (upsample): padding = stride/2
-        x = dac_conv_transpose_1d(ctx0, x, blk.up_w, blk.up_b, stride, stride / 2);
+        x = dac_conv_transpose_1d(ctx0, x, blk.up_w, blk.up_w_perm, blk.up_b, stride, stride / 2);
 
         // 3 residual units with dilations 1, 3, 9
         for (int r = 0; r < 3; r++) {
@@ -1833,6 +1854,10 @@ void parler_tts_free(struct parler_tts_context* ctx) {
         return;
     if (ctx->sched)
         ggml_backend_sched_free(ctx->sched);
+    if (ctx->buf_perm)
+        ggml_backend_buffer_free(ctx->buf_perm);
+    if (ctx->ctx_perm)
+        ggml_free(ctx->ctx_perm);
     if (ctx->buf_w)
         ggml_backend_buffer_free(ctx->buf_w);
     if (ctx->ctx_w)

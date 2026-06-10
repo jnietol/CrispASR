@@ -14,6 +14,7 @@
 // Conv ops transpose to (T, C) for ggml and back.
 
 #include "audioseal.h"
+#include "core/conv.h"
 #include "core/gguf_loader.h"
 
 #include "ggml-backend.h"
@@ -66,6 +67,7 @@ struct audioseal_hparams {
 struct audioseal_conv {
     ggml_tensor* w = nullptr;
     ggml_tensor* b = nullptr;
+    ggml_tensor* w_perm = nullptr; // pre-permuted for decomposed col2im path
 };
 
 struct audioseal_resblock {
@@ -269,9 +271,17 @@ struct audioseal_ctx {
     bool has_generator = false;
     bool has_detector = false;
 
+    // Pre-permuted ConvTranspose1d weights for decomposed col2im path
+    ggml_context* ctx_perm = nullptr;
+    ggml_backend_buffer_t buf_perm = nullptr;
+
     std::vector<uint8_t> compute_meta;
 
     ~audioseal_ctx() {
+        if (buf_perm)
+            ggml_backend_buffer_free(buf_perm);
+        if (ctx_perm)
+            ggml_free(ctx_perm);
         if (ctx_w)
             ggml_free(ctx_w);
         if (buf_w)
@@ -561,21 +571,28 @@ static ggml_tensor* forward_decoder(ggml_context* ctx, ggml_tensor* x, const aud
             int pad_total = K - ratio;
             int pad_left = pad_total / 2;
             int pad_right = pad_total - pad_left;
-            // ggml_conv_transpose_1d has no padding — crop output manually
-            ggml_tensor* y = ggml_conv_transpose_1d(ctx, up[i].w, x, ratio, 0, 1);
-            y = ggml_reshape_2d(ctx, y, y->ne[0], y->ne[1]);
-            // Crop pad_right from start and pad_left from end (ggml dim-0
-            // convention is reversed from PyTorch — empirically verified
-            // via encoder stage comparison).
-            if (pad_total > 0) {
-                int out_t = (int)y->ne[0] - pad_left - pad_right;
-                y = ggml_view_2d(ctx, y, out_t, (int)y->ne[1], y->nb[1], (size_t)pad_right * sizeof(float));
-                y = ggml_cont(ctx, y);
+            if (up[i].w_perm) {
+                // Decomposed path: crop_left=pad_right, crop_right=pad_left
+                // (reversed from PyTorch convention — matches ggml dim-0 ordering)
+                x = core_convt::convt1d_decomp_tf(ctx, x, up[i].w_perm, up[i].b,
+                                                  ratio, K, /*crop_left=*/pad_right, /*crop_right=*/pad_left);
+            } else {
+                // ggml_conv_transpose_1d has no padding — crop output manually
+                ggml_tensor* y = ggml_conv_transpose_1d(ctx, up[i].w, x, ratio, 0, 1);
+                y = ggml_reshape_2d(ctx, y, y->ne[0], y->ne[1]);
+                // Crop pad_right from start and pad_left from end (ggml dim-0
+                // convention is reversed from PyTorch — empirically verified
+                // via encoder stage comparison).
+                if (pad_total > 0) {
+                    int out_t = (int)y->ne[0] - pad_left - pad_right;
+                    y = ggml_view_2d(ctx, y, out_t, (int)y->ne[1], y->nb[1], (size_t)pad_right * sizeof(float));
+                    y = ggml_cont(ctx, y);
+                }
+                if (up[i].b) {
+                    y = ggml_add(ctx, y, ggml_reshape_2d(ctx, up[i].b, 1, (int)up[i].b->ne[0]));
+                }
+                x = y;
             }
-            if (up[i].b) {
-                y = ggml_add(ctx, y, ggml_reshape_2d(ctx, up[i].b, 1, (int)up[i].b->ne[0]));
-            }
-            x = y;
         }
         x = build_resblock(ctx, x, res[i]);
     }
@@ -635,6 +652,19 @@ struct audioseal_ctx* audioseal_init_from_file(const char* path, struct audiosea
     if (!bind_tensors(c)) {
         delete c;
         return nullptr;
+    }
+
+    // Permute generator decoder upsample ConvTranspose1d weights
+    if (c->has_generator) {
+        const int n = 4;
+        ggml_tensor* srcs[4];
+        ggml_tensor** dsts[4];
+        for (int i = 0; i < n; i++) {
+            srcs[i] = c->gen_dec_up[i].w;
+            dsts[i] = &c->gen_dec_up[i].w_perm;
+        }
+        core_convt::permute_convt1d_weights_batch(srcs, dsts, n,
+                                                  c->backend, &c->ctx_perm, &c->buf_perm);
     }
 
     // Allocate compute scratch (generous for ~5M param model)

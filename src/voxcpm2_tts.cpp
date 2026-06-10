@@ -16,6 +16,7 @@ static int g_cpu_n_threads = 4;
 
 #include "voxcpm2_tts.h"
 #include "core/attention.h"
+#include "core/conv.h"
 #include "core/ffn.h"
 #include "core/gguf_loader.h"
 #include "core/torch_rng.h"
@@ -398,6 +399,10 @@ struct voxcpm2_context {
     ggml_context* vae_wn_ggml_ctx = nullptr;
     ggml_backend_buffer_t vae_wn_ggml_buf = nullptr;
     std::map<std::string, ggml_tensor*> vae_wn_ggml_tensors;
+
+    // Pre-permuted ConvTranspose1d weights for decomposed col2im path
+    ggml_context* vae_perm_ctx = nullptr;
+    ggml_backend_buffer_t vae_perm_buf = nullptr;
 
     // Cached TSLM step graphs (qwen3-style multi-bucket pattern). Each
     // bucket is topology-invariant across n_past because Lk is pinned
@@ -3351,6 +3356,31 @@ static bool vae_wn_init_ggml(voxcpm2_context* ctx) {
         }
     }
 
+    // Permute ConvTranspose1d upsample weights for decomposed col2im path.
+    // The 6 transposed conv weights are stored in M as "vae.dec.layer.{2..7}.block.1".
+    {
+        const int n = 6;
+        ggml_tensor* srcs[6];
+        ggml_tensor** dsts[6];
+        // Temporary storage for the permuted weight pointers; they'll be
+        // inserted into M after the batch call.
+        ggml_tensor* perm_ptrs[6] = {};
+        for (int b = 0; b < n; b++) {
+            std::string key = "vae.dec.layer." + std::to_string(b + 2) + ".block.1";
+            auto it = M.find(key);
+            srcs[b] = (it != M.end()) ? it->second : nullptr;
+            dsts[b] = &perm_ptrs[b];
+        }
+        core_convt::permute_convt1d_weights_batch(srcs, dsts, n,
+                                                  ctx->backend, &ctx->vae_perm_ctx, &ctx->vae_perm_buf);
+        for (int b = 0; b < n; b++) {
+            if (perm_ptrs[b]) {
+                std::string key = "vae.dec.layer." + std::to_string(b + 2) + ".block.1.perm";
+                M[key] = perm_ptrs[b];
+            }
+        }
+    }
+
     if (ctx->verbosity >= 1) {
         size_t total_bytes = 0;
         for (const auto& kv : M)
@@ -3499,7 +3529,18 @@ static std::vector<float> vae_decode_graph(voxcpm2_context* ctx, const std::vect
         }
 
         // Transposed conv (upsample)
-        cur = causal_transposed_conv1d_ggml(ctx0, cur, Wget(lp + ".block.1"), Bias(lp + ".block.1"), up_rates[b]);
+        {
+            ggml_tensor* wp = Wget(lp + ".block.1.perm");
+            if (wp) {
+                ggml_tensor* w = Wget(lp + ".block.1");
+                const int K = w ? (int)w->ne[0] : 2 * up_rates[b];
+                cur = core_convt::convt1d_decomp_tf(ctx0, cur, wp, Bias(lp + ".block.1"),
+                                                    up_rates[b], K, /*crop_left=*/0, /*crop_right=*/K - up_rates[b]);
+            } else {
+                cur = causal_transposed_conv1d_ggml(ctx0, cur, Wget(lp + ".block.1"), Bias(lp + ".block.1"),
+                                                    up_rates[b]);
+            }
+        }
         if (trace) {
             std::string nm = "g_block_" + std::to_string(b) + "_upsample";
             ggml_set_name(cur, nm.c_str());
@@ -5572,6 +5613,14 @@ void voxcpm2_free(struct voxcpm2_context* ctx) {
     if (ctx->ralm_kv_ctx) {
         ggml_free(ctx->ralm_kv_ctx);
         ctx->ralm_kv_ctx = nullptr;
+    }
+    if (ctx->vae_perm_buf) {
+        ggml_backend_buffer_free(ctx->vae_perm_buf);
+        ctx->vae_perm_buf = nullptr;
+    }
+    if (ctx->vae_perm_ctx) {
+        ggml_free(ctx->vae_perm_ctx);
+        ctx->vae_perm_ctx = nullptr;
     }
     if (ctx->vae_wn_ggml_buf) {
         ggml_backend_buffer_free(ctx->vae_wn_ggml_buf);

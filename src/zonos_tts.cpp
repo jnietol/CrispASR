@@ -195,6 +195,8 @@ struct zonos_tts_context {
     core_dac::DacWeights dac_w;
     ggml_context* dac_ctx_w = nullptr;
     ggml_backend_buffer_t dac_buf_w = nullptr;
+    ggml_context* dac_ctx_perm = nullptr;
+    ggml_backend_buffer_t dac_buf_perm = nullptr;
 
     // Sampler RNG
     uint64_t rng_state = 0xdeadbeefcafebabeULL;
@@ -2289,6 +2291,19 @@ static bool load_dac_codec(zonos_tts_context* ctx) {
         return false;
     }
 
+    // Permute DAC ConvTranspose1d weights for decomposed col2im path
+    {
+        const int n = 4;
+        ggml_tensor* srcs[4];
+        ggml_tensor** dsts_arr[4];
+        for (int i = 0; i < n; i++) {
+            srcs[i] = dw.blocks[i].up_w;
+            dsts_arr[i] = &dw.blocks[i].up_w_perm;
+        }
+        core_convt::permute_convt1d_weights_batch(srcs, dsts_arr, n,
+                                                  ctx->backend, &ctx->dac_ctx_perm, &ctx->dac_buf_perm);
+    }
+
     ctx->dac_loaded = true;
     if (ctx->params.verbosity >= 1) {
         fprintf(stderr, "zonos_tts: DAC codec loaded (%zu tensors)\n", wl.tensors.size());
@@ -2453,6 +2468,10 @@ void zonos_tts_free(struct zonos_tts_context* ctx) {
         return;
     if (ctx->sched)
         ggml_backend_sched_free(ctx->sched);
+    if (ctx->dac_buf_perm)
+        ggml_backend_buffer_free(ctx->dac_buf_perm);
+    if (ctx->dac_ctx_perm)
+        ggml_free(ctx->dac_ctx_perm);
     if (ctx->dac_buf_w)
         ggml_backend_buffer_free(ctx->dac_buf_w);
     if (ctx->dac_ctx_w)

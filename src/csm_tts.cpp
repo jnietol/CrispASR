@@ -23,6 +23,7 @@
 #include "csm_tts.h"
 
 #include "core/attention.h"
+#include "core/conv.h"
 #include "core/bpe.h"
 #include "core/ffn.h"
 #include "core/gguf_loader.h"
@@ -130,6 +131,7 @@ struct mimi_tfm_layer {
 struct seanet_conv {
     ggml_tensor* w = nullptr;
     ggml_tensor* b = nullptr;
+    ggml_tensor* w_perm = nullptr;
 };
 
 struct seanet_resblock {
@@ -190,6 +192,8 @@ struct csm_model {
     // Weight memory
     ggml_context* ctx_w = nullptr;
     ggml_backend_buffer_t buf_w = nullptr;
+    ggml_context* ctx_perm = nullptr;
+    ggml_backend_buffer_t buf_perm = nullptr;
 };
 
 } // namespace
@@ -243,6 +247,10 @@ struct csm_tts_context {
             ggml_backend_buffer_free(dd_kv_buf);
         if (dd_kv_ctx)
             ggml_free(dd_kv_ctx);
+        if (model.buf_perm)
+            ggml_backend_buffer_free(model.buf_perm);
+        if (model.ctx_perm)
+            ggml_free(model.ctx_perm);
         if (model.buf_w)
             ggml_backend_buffer_free(model.buf_w);
         if (model.ctx_w)
@@ -385,15 +393,18 @@ static ggml_tensor* resblock_fwd(ggml_context* ctx, const seanet_resblock& rb, g
 
 // Transposed conv1d for SEANet decoder (right-padded to match encoder's left-padded causal)
 static ggml_tensor* conv1d_transpose(ggml_context* ctx, const seanet_conv& conv, ggml_tensor* x, int stride) {
+    if (conv.w_perm) {
+        const int K = (int)conv.w->ne[0];
+        return core_convt::convt1d_decomp_tf(ctx, x, conv.w_perm, conv.b, stride, K, 0, K - stride);
+    }
     // ggml_conv_transpose_1d: kernel a, data b
     ggml_tensor* out = ggml_conv_transpose_1d(ctx, conv.w, x, stride, 0, 1);
     // Trim the right padding: output length should be stride * input_len
     int in_len = (int)x->ne[0];
-    int out_channels = (int)conv.w->ne[1]; // output channels for transpose
+    int out_channels = (int)conv.w->ne[1];
     int expected_len = in_len * stride;
     int actual_len = (int)out->ne[0];
     if (actual_len > expected_len) {
-        // Trim from the right
         out = ggml_view_2d(ctx, out, expected_len, out_channels, out->nb[1], 0);
         out = ggml_cont(ctx, out);
     }
@@ -1010,6 +1021,17 @@ extern "C" struct csm_tts_context* csm_tts_init_from_file(const char* path_model
         fprintf(stderr, "csm_tts: failed to bind weights\n");
         delete c;
         return nullptr;
+    }
+
+    // Permute ConvTranspose1d weights
+    {
+        ggml_tensor* srcs[4], **dsts_arr[4];
+        for (int i = 0; i < 4; i++) {
+            srcs[i] = c->model.seanet_dec.conv_stride[i].w;
+            dsts_arr[i] = &c->model.seanet_dec.conv_stride[i].w_perm;
+        }
+        core_convt::permute_convt1d_weights_batch(srcs, dsts_arr, 4,
+                                                  c->backend, &c->model.ctx_perm, &c->model.buf_perm);
     }
 
     // Scheduler

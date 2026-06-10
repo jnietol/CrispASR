@@ -26,6 +26,7 @@
 
 #include "pocket_tts.h"
 
+#include "core/conv.h"
 #include "core/gguf_loader.h"
 #include "core/sentencepiece.h"
 
@@ -194,6 +195,7 @@ struct seanet_decoder_stage {
     // Transposed conv for upsampling
     ggml_tensor* convtr_w = nullptr;
     ggml_tensor* convtr_b = nullptr;
+    ggml_tensor* convtr_w_perm = nullptr; // pre-permuted for decomposed col2im path
     // Residual blocks
     std::vector<seanet_resblock_weights> resblocks;
 };
@@ -299,6 +301,8 @@ struct pocket_tts_context {
     ggml_backend_sched_t sched = nullptr;
     ggml_context* ctx_w = nullptr;         // weight tensor metadata
     ggml_backend_buffer_t buf_w = nullptr; // weight data buffer
+    ggml_context* ctx_perm = nullptr;         // permuted ConvTranspose1d weights
+    ggml_backend_buffer_t buf_perm = nullptr;
 
     // KV caches
     pocket_tts_kv_cache backbone_kv;
@@ -1522,7 +1526,11 @@ static ggml_tensor* pocket_conv1d_causal(ggml_context* ctx, ggml_tensor* x, ggml
 // Input x: (T, Cin), weight w: ggml (K, Cout, Cin), bias b: (Cout,) or nullptr.
 // Returns (T_in * stride, Cout).
 static ggml_tensor* pocket_convtr1d_causal(ggml_context* ctx, ggml_tensor* x, ggml_tensor* w, ggml_tensor* b,
-                                           int stride) {
+                                           int stride, ggml_tensor* w_perm = nullptr) {
+    if (w_perm) {
+        const int K = (int)w->ne[0];
+        return core_convt::convt1d_decomp_tf(ctx, x, w_perm, b, stride, K, /*crop_left=*/0, /*crop_right=*/K - stride);
+    }
     int T_in = (int)x->ne[0];
     int Cout = (int)w->ne[1];
     ggml_tensor* out = ggml_conv_transpose_1d(ctx, w, x, stride, 0, 1);
@@ -1671,7 +1679,7 @@ static ggml_tensor* build_pocket_seanet_dec(ggml_context* ctx, const pocket_tts_
 
         // ConvTranspose1d (upsample by ratio) — causal trim
         if (stage.convtr_w) {
-            x = pocket_convtr1d_causal(ctx, x, stage.convtr_w, stage.convtr_b, ratio);
+            x = pocket_convtr1d_causal(ctx, x, stage.convtr_w, stage.convtr_b, ratio, stage.convtr_w_perm);
         }
 
         // Residual blocks
@@ -2760,6 +2768,22 @@ struct pocket_tts_context* pocket_tts_init_from_file(const char* path_model, str
     load_mimi_decoder_tensors(wl.tensors, ctx->model);
     load_mimi_encoder_tensors(wl.tensors, ctx->model);
 
+    // Permute SEANet decoder ConvTranspose1d weights for decomposed col2im path
+    {
+        auto& sd = ctx->model.seanet_dec;
+        const int n = (int)sd.stages.size();
+        if (n > 0) {
+            std::vector<ggml_tensor*> srcs(n);
+            std::vector<ggml_tensor**> dsts(n);
+            for (int i = 0; i < n; i++) {
+                srcs[i] = sd.stages[i].convtr_w;
+                dsts[i] = &sd.stages[i].convtr_w_perm;
+            }
+            core_convt::permute_convt1d_weights_batch(srcs.data(), dsts.data(), n,
+                                                      ctx->backend_cpu, &ctx->ctx_perm, &ctx->buf_perm);
+        }
+    }
+
     // ── Create backend scheduler ──
     {
         ggml_backend_t backends[2];
@@ -2805,6 +2829,10 @@ struct pocket_tts_context* pocket_tts_init_from_file(const char* path_model, str
 void pocket_tts_free(struct pocket_tts_context* ctx) {
     if (!ctx)
         return;
+    if (ctx->buf_perm)
+        ggml_backend_buffer_free(ctx->buf_perm);
+    if (ctx->ctx_perm)
+        ggml_free(ctx->ctx_perm);
     if (ctx->sched)
         ggml_backend_sched_free(ctx->sched);
     if (ctx->buf_w)

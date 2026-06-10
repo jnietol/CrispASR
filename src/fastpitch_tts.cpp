@@ -138,6 +138,11 @@ struct fastpitch_tts_context {
     // Pitch normalization (from training data stats)
     float pitch_mean = 0.0f;
     float pitch_std = 1.0f;
+
+    // Pre-permuted HiFi-GAN upsample weights for decomposed col2im path
+    std::vector<ggml_tensor*> ups_w_perm;
+    ggml_context* ctx_perm = nullptr;
+    ggml_backend_buffer_t buf_perm = nullptr;
 };
 
 // ── GGUF loading ─────────────────────────────────────────────────────
@@ -340,6 +345,22 @@ static fastpitch_tts_context* load_model(const char* path, fastpitch_tts_params 
             delete ctx;
             return nullptr;
         }
+    }
+
+    // Permute HiFi-GAN upsample ConvTranspose1d weights
+    {
+        const int n = hp.voc_hp.num_upsamples();
+        std::vector<ggml_tensor*> srcs(n);
+        std::vector<ggml_tensor**> dsts(n);
+        ctx->ups_w_perm.resize(n, nullptr);
+        for (int i = 0; i < n; i++) {
+            std::string wname = "voc.ups." + std::to_string(i) + ".weight";
+            auto it2 = ctx->tensors.find(wname);
+            srcs[i] = (it2 != ctx->tensors.end()) ? it2->second : nullptr;
+            dsts[i] = &ctx->ups_w_perm[i];
+        }
+        core_convt::permute_convt1d_weights_batch(srcs.data(), dsts.data(), n,
+                                                  ctx->backend, &ctx->ctx_perm, &ctx->buf_perm);
     }
 
     // Infer vocab size from embedding tensor
@@ -1051,7 +1072,7 @@ static int synthesize_internal(fastpitch_tts_context* ctx, const char* text, flo
             ggml_set_input(mel_in);
 
             // Run shared HiFi-GAN forward
-            ggml_tensor* audio = core_hifigan::forward(gc4, mel_in, ctx->tensors, "voc", hp.voc_hp);
+            ggml_tensor* audio = core_hifigan::forward(gc4, mel_in, ctx->tensors, "voc", hp.voc_hp, ctx->ups_w_perm);
 
             ggml_set_name(audio, "audio_out");
             ggml_set_output(audio);
@@ -1135,6 +1156,10 @@ struct fastpitch_tts_context* fastpitch_tts_init_from_file(const char* path_mode
 void fastpitch_tts_free(struct fastpitch_tts_context* ctx) {
     if (!ctx)
         return;
+    if (ctx->buf_perm)
+        ggml_backend_buffer_free(ctx->buf_perm);
+    if (ctx->ctx_perm)
+        ggml_free(ctx->ctx_perm);
     if (ctx->sched)
         ggml_backend_sched_free(ctx->sched);
     if (ctx->buf_w)
