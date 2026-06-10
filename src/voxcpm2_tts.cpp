@@ -3371,8 +3371,7 @@ static bool vae_wn_init_ggml(voxcpm2_context* ctx) {
             srcs[b] = (it != M.end()) ? it->second : nullptr;
             dsts[b] = &perm_ptrs[b];
         }
-        core_convt::permute_convt1d_weights_batch(srcs, dsts, n,
-                                                  ctx->backend, &ctx->vae_perm_ctx, &ctx->vae_perm_buf);
+        core_convt::permute_convt1d_weights_batch(srcs, dsts, n, ctx->backend, &ctx->vae_perm_ctx, &ctx->vae_perm_buf);
         for (int b = 0; b < n; b++) {
             if (perm_ptrs[b]) {
                 std::string key = "vae.dec.layer." + std::to_string(b + 2) + ".block.1.perm";
@@ -3534,11 +3533,11 @@ static std::vector<float> vae_decode_graph(voxcpm2_context* ctx, const std::vect
             if (wp) {
                 ggml_tensor* w = Wget(lp + ".block.1");
                 const int K = w ? (int)w->ne[0] : 2 * up_rates[b];
-                cur = core_convt::convt1d_decomp_tf(ctx0, cur, wp, Bias(lp + ".block.1"),
-                                                    up_rates[b], K, /*crop_left=*/0, /*crop_right=*/K - up_rates[b]);
+                cur = core_convt::convt1d_decomp_tf(ctx0, cur, wp, Bias(lp + ".block.1"), up_rates[b], K,
+                                                    /*crop_left=*/0, /*crop_right=*/K - up_rates[b]);
             } else {
-                cur = causal_transposed_conv1d_ggml(ctx0, cur, Wget(lp + ".block.1"), Bias(lp + ".block.1"),
-                                                    up_rates[b]);
+                cur =
+                    causal_transposed_conv1d_ggml(ctx0, cur, Wget(lp + ".block.1"), Bias(lp + ".block.1"), up_rates[b]);
             }
         }
         if (trace) {
@@ -4795,6 +4794,10 @@ static bool vox_load_weights(voxcpm2_context* ctx, const char* path) {
     W.stop_proj_w = try_get(T, "stop.proj.weight");
     W.stop_proj_b = try_get(T, "stop.proj.bias");
     W.stop_head_w = try_get(T, "stop.head.weight"); // [2048, 2], no bias
+    if (!W.stop_proj_w || !W.stop_proj_b) {
+        fprintf(stderr, "voxcpm2: WARNING: stop predictor weights missing — AR loop will run to max_len (%d steps)\n",
+                ctx->max_len);
+    }
 
     // VAE decoder (graceful degradation when absent)
     // vae_decode() accesses ctx->tensors directly; these fields are kept for reference.
@@ -4805,6 +4808,10 @@ static bool vox_load_weights(voxcpm2_context* ctx, const char* path) {
     W.vae_out_snake_a = try_get(T, "vae.dec.layer.8.alpha");
     W.vae_sr_cond_w = try_get(T, "vae.dec.sr_cond.2.scale_embed");
     W.vae_sr_cond_b = try_get(T, "vae.dec.sr_cond.2.bias_embed");
+    if (T.find("vae.dec.layer.0.weight_g") == T.end()) {
+        fprintf(stderr, "voxcpm2: WARNING: VAE decoder weights missing — output will be silent\n"
+                        "         Ensure audiovae.pth/safetensors was included during GGUF conversion.\n");
+    }
 
     // KV caches
     const int kv_max_ctx = 4096;
@@ -5100,6 +5107,27 @@ static float* vox_synthesize_internal(voxcpm2_context* ctx, const char* text, co
     float stop_thresh = 0.5f;
     int step = 0;
 
+    // Effective max_len: cap at user/default max_len, but also apply a
+    // text-length heuristic. At ~160 ms per AR step (48 kHz, 4 frames × 1920
+    // samples), English speech averages ~2–4 AR steps per text token.
+    // Use 8 steps/token as a generous upper bound to prevent runaway generation
+    // when the stop predictor fails. The user can override via VOXCPM2_MAX_LEN.
+    int n_text_tokens = have_ref ? ((int)pi.all_tokens.size() - pi.T_ref - 2) : (int)pi.all_tokens.size();
+    int text_based_ceil = std::max(20, n_text_tokens * 8);
+    int effective_max = std::min(ctx->max_len, text_based_ceil);
+    if (ctx->verbosity >= 2) {
+        fprintf(stderr, "voxcpm2: max_len=%d (text_ceil=%d, configured=%d)\n", effective_max, text_based_ceil,
+                ctx->max_len);
+    }
+
+    // Energy-based silence detection: if the last N consecutive patches all
+    // have near-zero energy (< eps), stop early — the model is generating
+    // silence and won't recover. This catches missing VAE weights, broken
+    // stop predictors, and degenerate model states.
+    const int silence_window = 5;
+    const float silence_eps = 1e-8f;
+    int consecutive_silent = 0;
+
     // Per-substep accumulators gated on VOXCPM2_BENCH=1. Cheap (one
     // vox_now_ms / step) but skips the prints when not requested.
     const bool bench = vox_env_bool("VOXCPM2_BENCH");
@@ -5124,7 +5152,7 @@ static float* vox_synthesize_internal(voxcpm2_context* ctx, const char* text, co
     // Python min_len=2 by default (stop only if step > min_len).
     int min_len = 2;
 
-    while (step < ctx->max_len) {
+    while (step < effective_max) {
         double t0_step = vox_now_ms();
 
         // 1a. CFM Euler solve (LocDiT)
@@ -5165,6 +5193,25 @@ static float* vox_synthesize_internal(voxcpm2_context* ctx, const char* text, co
         // 1e. Collect patch + update cond for next step
         patches.push_back(patch_tf);
         prev_patch_raw = patch_tf;
+
+        // 1f. Energy-based silence detection
+        {
+            float energy = 0.0f;
+            for (float v : patch_tf)
+                energy += v * v;
+            if (energy < silence_eps) {
+                consecutive_silent++;
+                if (consecutive_silent >= silence_window && step > min_len) {
+                    if (ctx->verbosity >= 1) {
+                        fprintf(stderr, "voxcpm2: stopped at step %d — %d consecutive silent patches (energy < %.1e)\n",
+                                step + 1, consecutive_silent, silence_eps);
+                    }
+                    break;
+                }
+            } else {
+                consecutive_silent = 0;
+            }
+        }
 
         // 2. Stop check — BEFORE TSLM step, using PREVIOUS tslm_hidden
         // Python: stop_head(stop_actn(stop_proj(lm_hidden))).argmax() == 1
@@ -5264,6 +5311,12 @@ static float* vox_synthesize_internal(voxcpm2_context* ctx, const char* text, co
         step++;
     }
 
+    if (step >= effective_max && ctx->verbosity >= 1) {
+        fprintf(stderr,
+                "voxcpm2: WARNING: AR loop hit max_len ceiling (%d steps) without stop predictor firing.\n"
+                "         Output may be longer than expected. Set VOXCPM2_MAX_LEN to override.\n",
+                effective_max);
+    }
     if (ctx->verbosity >= 1) {
         fprintf(stderr, "voxcpm2: AR loop %d steps, %.1f ms\n", step, vox_now_ms() - t0_ar);
     }
@@ -5319,7 +5372,7 @@ struct voxcpm2_context_params voxcpm2_context_default_params(void) {
     p.flash_attn = true;
     p.inference_steps = 10;
     p.cfg_value = 2.0f;
-    p.max_len = 2000;
+    p.max_len = 200;
     p.seed = 0;
     return p;
 }
@@ -5335,7 +5388,7 @@ struct voxcpm2_context* voxcpm2_init_from_file(const char* path_model, struct vo
     ctx->flash_attn = params.flash_attn;
     ctx->inference_steps = params.inference_steps > 0 ? params.inference_steps : 10;
     ctx->cfg_value = params.cfg_value > 0.0f ? params.cfg_value : 2.0f;
-    ctx->max_len = params.max_len > 0 ? params.max_len : 2000;
+    ctx->max_len = params.max_len > 0 ? params.max_len : 200;
     ctx->seed = params.seed;
 
     // Backend pool. With `use_gpu`, init_best picks Metal / Vulkan / CUDA.
