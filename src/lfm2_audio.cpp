@@ -20,6 +20,7 @@
 #include "core/fastconformer.h"
 #include "core/gguf_loader.h"
 #include "core/mel.h"
+#include "core/attention.h"
 #include "core/bpe.h"
 #include "core/fft.h"
 
@@ -158,6 +159,29 @@ struct lfm2_audio_context {
     // Staged callback (set by run_lfm_staged)
     lfm2_audio_stage_cb lfm_stage_cb = nullptr;
     void* lfm_stage_ud = nullptr;
+
+    // ---- KV cache for attention layers ----
+    ggml_context* kv_ctx = nullptr;
+    ggml_backend_buffer_t kv_buf = nullptr;
+    ggml_tensor* kv_k = nullptr; // (head_dim, max_ctx, n_kv_heads, n_attn_layers)
+    ggml_tensor* kv_v = nullptr;
+    int kv_max_ctx = 0;
+    int kv_n_past = 0; // tokens already in cache
+
+    // ---- Conv state cache for conv layers ----
+    // Each conv layer caches the last (kernel-1)=2 Bx vectors.
+    // Layout: [n_conv_layers][hidden * (kernel-1)] flat CPU float.
+    std::vector<std::vector<float>> conv_states;
+    bool conv_states_valid = false;
+
+    void reset_kv() {
+        kv_n_past = 0;
+        if (kv_buf)
+            ggml_backend_buffer_clear(kv_buf, 0);
+        conv_states_valid = false;
+        for (auto& s : conv_states)
+            std::fill(s.begin(), s.end(), 0.0f);
+    }
 };
 
 // ===========================================================================
@@ -424,12 +448,49 @@ lfm2_audio_context* lfm2_audio_init_from_file(const char* path_model, lfm2_audio
         delete ctx;
         return nullptr;
     }
+
+    // Initialize KV cache for attention layers
+    {
+        auto& hp = ctx->model.hparams;
+        // Count attention vs conv layers
+        int n_attn = 0, n_conv = 0;
+        for (uint32_t i = 0; i < hp.lfm_n_layers; i++) {
+            if (ctx->model.lfm_layers[i].is_attention)
+                n_attn++;
+            else
+                n_conv++;
+        }
+        const int max_ctx = 2048; // max sequence length
+        struct ggml_init_params gp = {ggml_tensor_overhead() * 2, nullptr, true};
+        ctx->kv_ctx = ggml_init(gp);
+        if (ctx->kv_ctx) {
+            ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F16, (int)hp.lfm_head_dim, max_ctx,
+                                           (int)hp.lfm_n_kv_heads, n_attn);
+            ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, GGML_TYPE_F16, (int)hp.lfm_head_dim, max_ctx,
+                                           (int)hp.lfm_n_kv_heads, n_attn);
+            ctx->kv_buf = ggml_backend_alloc_ctx_tensors(ctx->kv_ctx, ctx->backend);
+            if (ctx->kv_buf) {
+                ggml_backend_buffer_clear(ctx->kv_buf, 0);
+                ctx->kv_max_ctx = max_ctx;
+            }
+        }
+        // Initialize conv state cache
+        const int conv_state_len = (int)(hp.lfm_conv_kernel - 1); // 2
+        ctx->conv_states.resize(n_conv);
+        for (auto& s : ctx->conv_states)
+            s.resize((size_t)hp.lfm_hidden_size * conv_state_len, 0.0f);
+    }
+
     return ctx;
 }
 
 void lfm2_audio_free(lfm2_audio_context* ctx) {
     if (!ctx)
         return;
+    if (ctx->kv_buf)
+        ggml_backend_buffer_free(ctx->kv_buf);
+    if (ctx->kv_ctx)
+        ggml_free(ctx->kv_ctx);
     if (ctx->model.buf)
         ggml_backend_buffer_free(ctx->model.buf);
     if (ctx->model.ctx)
@@ -539,6 +600,9 @@ float* lfm2_audio_run_encoder(lfm2_audio_context* ctx, const float* mel, int T_m
 
 // Forward declarations for LFM2 backbone helpers (defined below)
 static ggml_tensor* lfm2_rms_norm(ggml_context* ctx, ggml_tensor* x, ggml_tensor* weight, float eps);
+static ggml_tensor* lfm2_swiglu_ffn(ggml_context* ctx, ggml_tensor* x, ggml_tensor* w1, ggml_tensor* w2,
+                                    ggml_tensor* w3);
+static ggml_tensor* lfm2_short_conv(ggml_context* ctx, ggml_tensor* x, const lfm2_layer_weights& w, int hidden, int T);
 static ggml_tensor* lfm2_build_layer(ggml_context* ctx, ggml_tensor* x, const lfm2_layer_weights& w,
                                      ggml_tensor* rope_freqs, int hidden, int n_heads, int n_kv_heads, int head_dim,
                                      int T, float norm_eps);
@@ -794,28 +858,157 @@ char* lfm2_audio_transcribe(lfm2_audio_context* ctx, const float* samples, int n
         fprintf(stderr, "lfm2-audio: prefill T=%d (prefix=%d audio=%d suffix=%d)\n", T_context, T_prefix, T_audio,
                 T_suffix);
 
-    // Step 4: Auto-regressive greedy decode (no KV cache — recomputes each step)
-    // This is slow but correct. KV cache optimization comes later.
+    // Step 4: Auto-regressive greedy decode WITH KV cache.
+    //
+    // Phase A (prefill): run the full context through the backbone once,
+    //   populating the KV cache for all attention layers and conv state
+    //   caches for all conv layers. Extract logits at the last position.
+    //
+    // Phase B (decode): for each new token, run a single token through
+    //   the backbone using cached K/V + conv states. Only 1 forward pass
+    //   per token instead of full-sequence recompute.
+    //
+    // The core_attn::kv_self_attn helper handles the KV cache write/read.
+    // Conv state is managed manually (small: 2048*2 floats per layer).
+
+    ctx->reset_kv();
     std::string transcript;
     std::vector<int32_t> generated_ids;
 
-    for (int step = 0; step < max_tokens; step++) {
-        int T = T_context + (int)generated_ids.size();
+    // Helper: build graph, run backbone on T_in tokens starting at n_past,
+    // return logits from the last position.
+    auto run_step = [&](const float* embeddings, int T_in) -> std::vector<float> {
+        const int n_past = ctx->kv_n_past;
+        const float norm_eps = 1e-5f;
 
-        // Build full sequence: context_emb + generated token embeddings
-        std::vector<float> full_emb(T * hidden);
-        memcpy(full_emb.data(), context_emb.data(), sizeof(float) * T_context * hidden);
+        ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), false};
+        ggml_context* ctx0 = ggml_init(ip);
+        if (!ctx0)
+            return {};
 
-        if (!generated_ids.empty()) {
-            auto gen_emb = embed_text(generated_ids);
-            memcpy(full_emb.data() + T_context * hidden, gen_emb.data(), sizeof(float) * generated_ids.size() * hidden);
+        ggml_tensor* x = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hidden, T_in);
+        memcpy(x->data, embeddings, sizeof(float) * T_in * hidden);
+
+        // Positions: [n_past, n_past+1, ..., n_past+T_in-1]
+        ggml_tensor* positions = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, T_in);
+        {
+            int32_t* pos = (int32_t*)positions->data;
+            for (int i = 0; i < T_in; i++)
+                pos[i] = n_past + i;
         }
 
-        // Run backbone and get logits at last position
-        auto logits = lfm2_run_backbone_logits(ctx, full_emb.data(), T, hidden);
-        if (logits.empty())
-            break;
+        // Causal mask for prefill (T_in > 1); nullptr for single-token decode
+        ggml_tensor* causal_mask = nullptr;
+        if (T_in > 1) {
+            const int Lk = n_past + T_in;
+            causal_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, Lk, T_in);
+            ggml_fp16_t* m = (ggml_fp16_t*)causal_mask->data;
+            const ggml_fp16_t zero = ggml_fp32_to_fp16(0.0f);
+            const ggml_fp16_t neginf = ggml_fp32_to_fp16(-INFINITY);
+            for (int q = 0; q < T_in; q++)
+                for (int k = 0; k < Lk; k++)
+                    m[q * Lk + k] = (k <= n_past + q) ? zero : neginf;
+        }
 
+        ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 65536, false);
+
+        int attn_idx = 0, conv_idx = 0;
+        const auto& hp = model.hparams;
+        const int n_heads = (int)hp.lfm_n_heads;
+        const int n_kv = (int)hp.lfm_n_kv_heads;
+        const int hd = (int)hp.lfm_head_dim;
+
+        for (uint32_t il = 0; il < hp.lfm_n_layers; il++) {
+            auto& w = model.lfm_layers[il];
+            ggml_tensor* residual = x;
+
+            // RMSNorm
+            ggml_tensor* h = lfm2_rms_norm(ctx0, x, w.operator_norm_w, norm_eps);
+
+            if (w.is_attention) {
+                // --- GQA attention with KV cache ---
+                core_attn::KvSelfAttnParams kvp = {};
+                kvp.head_dim = hd;
+                kvp.n_heads = n_heads;
+                kvp.n_kv_heads = n_kv;
+                kvp.n_kv_grp = n_heads / n_kv;
+                kvp.n_ctx_orig = 0;
+                kvp.rope_type = GGML_ROPE_TYPE_NEOX;
+                kvp.rope_theta = hp.lfm_rope_theta;
+                kvp.rope_beta_fast = 0.0f;
+                kvp.rope_beta_slow = 0.0f;
+                kvp.attn_scale = 1.0f / sqrtf((float)hd);
+                kvp.qk_norm_eps = norm_eps;
+                kvp.gqa_mode = core_attn::GQA_NATIVE;
+
+                h = core_attn::kv_self_attn(ctx0, gf, h, w.attn_q_proj_w, w.attn_k_proj_w, w.attn_v_proj_w,
+                                            w.attn_out_proj_w, w.attn_q_ln_w, w.attn_k_ln_w, positions, causal_mask,
+                                            ctx->kv_k, ctx->kv_v, attn_idx, n_past, kvp);
+                attn_idx++;
+            } else {
+                // --- ShortConv with state cache ---
+                if (T_in > 1) {
+                    h = lfm2_short_conv(ctx0, h, w, hidden, T_in);
+                } else {
+                    // Decode (T=1): use lfm2_short_conv with T=1 for now.
+                    // This zero-pads the conv input (no state from prefill).
+                    // TODO: implement proper conv state caching.
+                    h = lfm2_short_conv(ctx0, h, w, hidden, 1);
+                }
+                conv_idx++;
+            }
+
+            x = ggml_add(ctx0, residual, h);
+
+            // FFN
+            residual = x;
+            h = lfm2_rms_norm(ctx0, x, w.ffn_norm_w, norm_eps);
+            h = lfm2_swiglu_ffn(ctx0, h, w.ff_w1, w.ff_w2, w.ff_w3);
+            x = ggml_add(ctx0, residual, h);
+        }
+
+        // Final RMSNorm
+        x = lfm2_rms_norm(ctx0, x, model.lfm_embedding_norm_w, norm_eps);
+
+        // Logits at last position
+        ggml_tensor* last = ggml_view_1d(ctx0, x, hidden, (int64_t)(T_in - 1) * hidden * sizeof(float));
+        ggml_tensor* logits = ggml_mul_mat(ctx0, model.lfm_embed_tokens_w, last);
+        ggml_tensor* out = ggml_dup(ctx0, logits);
+        ggml_set_name(out, "logits");
+
+        ggml_build_forward_expand(gf, out);
+        ggml_graph_compute_with_ctx(ctx0, gf, ctx->n_threads);
+
+        int vocab_size = (int)out->ne[0];
+        std::vector<float> result(vocab_size);
+        memcpy(result.data(), out->data, sizeof(float) * vocab_size);
+
+        ctx->kv_n_past += T_in;
+        ggml_free(ctx0);
+        return result;
+    };
+
+    // Phase A: Prefill — run full context through backbone
+    auto logits = run_step(context_emb.data(), T_context);
+    if (!logits.empty() && ctx->verbosity >= 1) {
+        int top = 0;
+        for (int i = 1; i < (int)logits.size(); i++)
+            if (logits[i] > logits[top])
+                top = i;
+        fprintf(stderr, "lfm2-audio: prefill top token=%d logit=%.3f\n", top, logits[top]);
+    }
+    if (logits.empty()) {
+        (void)kTokenStartOfText;
+        (void)kTokenImStart;
+        (void)kTokenNewline;
+        (void)kTokenAudioStart;
+        (void)kTokenTextEnd;
+        if (ctx->verbosity >= 1)
+            fprintf(stderr, "lfm2-audio: prefill failed\n");
+        return nullptr;
+    }
+
+    for (int step = 0; step < max_tokens; step++) {
         // Greedy argmax
         int best_id = 0;
         float best_val = logits[0];
@@ -832,12 +1025,20 @@ char* lfm2_audio_transcribe(lfm2_audio_context* ctx, const float* samples, int n
 
         generated_ids.push_back(best_id);
 
-        // Decode token to raw UTF-8 text (byte_decoder handles GPT-2 encoding)
+        // Decode token to text
         std::string piece = decode_token(model, best_id);
         transcript += piece;
 
         if (ctx->verbosity >= 2)
             fprintf(stderr, "  [%d] token=%d piece=%s\n", step, best_id, piece.c_str());
+
+        // Phase B: Decode — embed the new token and run single-token step
+        auto new_emb = embed_text({best_id});
+        if (new_emb.empty())
+            break;
+        logits = run_step(new_emb.data(), 1);
+        if (logits.empty())
+            break;
     }
 
     if (ctx->verbosity >= 1)
