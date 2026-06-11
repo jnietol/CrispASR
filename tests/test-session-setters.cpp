@@ -94,3 +94,11 @@ TEST_CASE("session setter: set_fallback_thresholds null-handle → -1", "[unit][
 TEST_CASE("session setter: set_whisper_decode_extras null-handle → -1", "[unit][setters]") {
     REQUIRE(crispasr_session_set_whisper_decode_extras(nullptr, 0, nullptr, 0) == -1);
 }
+
+// ─── last_synth_error ─────────────────────────────────────────────────────
+
+TEST_CASE("session: last_synth_error null-handle → empty string", "[unit][setters]") {
+    const char* err = crispasr_session_last_synth_error(nullptr);
+    REQUIRE(err != nullptr);
+    REQUIRE(err[0] == '\0');
+}

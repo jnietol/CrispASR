@@ -610,6 +610,16 @@ CRISPASR_API int crispasr_session_set_whisper_decode_extras(struct crispasr_sess
                                                              int carry_initial_prompt);
 CRISPASR_API int crispasr_session_set_ask(struct crispasr_session* s, const char* prompt);
 
+// TTS synthesis — returns malloc'd float32 PCM at 24 kHz mono.
+// Caller frees with crispasr_pcm_free(). Returns nullptr on failure.
+CRISPASR_API float* crispasr_session_synthesize(struct crispasr_session* s, const char* text, int* out_n_samples);
+CRISPASR_API float* crispasr_session_synthesize_raw(struct crispasr_session* s, const char* text, int* out_n_samples);
+CRISPASR_API void crispasr_pcm_free(float* pcm);
+
+// Human-readable error from the last failed synthesize call. Empty string
+// when the last call succeeded. Pointer owned by the session.
+CRISPASR_API const char* crispasr_session_last_synth_error(struct crispasr_session* s);
+
 // Run the entire model: PCM -> log mel spectrogram -> encoder -> decoder -> text
 // Not thread safe for same context
 // Uses the specified decoding strategy to obtain the text.
