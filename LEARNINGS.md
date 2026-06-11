@@ -34,6 +34,22 @@ point `VK_ICD_FILENAMES` at MoltenVK's ICD, build `-DGGML_VULKAN=ON`, and a
 tiny `cpu_init()` vs `vk_init(0)` op harness gives a bit-exact diff. col2im_1d
 came out maxabs=0 vs CPU across the codec shapes. (Setup recipe in auto-memory.)
 
+## Measuring GPU perf on a thermally-throttling laptop GPU (RTX A1000)
+
+The A1000 Laptop (4 GB) down-clocks under sustained load: a no-fix cohere beam
+A/B climbed 15 → 36 s across 6 back-to-back rounds as the GPU heat-soaked.
+Block-comparing (run all of A, then all of B) is worthless — whichever build
+runs second is hotter and looks slower regardless of the code. Two rules that
+gave stable #161 numbers on this box:
+
+- **Interleave A,B,A,B and take the median *ratio* per round.** Each A/B pair
+  runs at near-identical temperature, so the ratio is thermal-independent — it
+  held at ~2.54× while the absolutes climbed 1.7 → 3.1× of the cool baseline.
+- **A single cold first run reads as a regression** (the #81 WDDM-warm effect).
+  Warm up first; report `min` for an absolute number, the interleaved ratio for
+  an A/B. The #161 DEVICE-mode win (above) was only visible this way — a naive
+  block A/B on this GPU would have buried it in thermal drift.
+
 ## Beam-search KV snapshots must stay on-device (#161)
 
 `core_beam_decode::run_with_probs_branched` saves+restores the decoder KV cache

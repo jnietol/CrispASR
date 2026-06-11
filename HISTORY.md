@@ -6,6 +6,33 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-06-11 #161 / #155 / #152 confirmed on CUDA (RTX A1000 4 GB, Windows) + #125 firered repro
+
+The #161 and #155 fixes were code-correct but their CUDA wall-clock wins were
+unverified — the M1 dev box has no discrete GPU and the reporters were on other
+hardware. Confirmed all three on an RTX A1000 Laptop (4 GB, CUDA 13.0 / MSVC,
+driver 596.36, Windows 11).
+
+- **#161** — built the fix-parent `3aff6014` (no-fix) and HEAD (`4b27392f`+) and
+  A/B'd `cohere-transcribe-q4_k` on a 35 s clip. Beam `-bs 5` is **2.54× faster**
+  with the on-device KV pool (thermal-matched interleaved median — the A1000
+  laptop GPU throttles hard, so block-comparison is useless, see LEARNINGS).
+  Greedy `-bs 1` is identical timing (2.89 s == 2.89 s), confirming the change is
+  beam-path-only. In cool state HEAD beam (3.13 s) ≈ pre-regression 0.6.11
+  (3.04 s) → fully restored. Our 2.5× is milder than praxeo's ~10× (A1000 vs
+  3090/3080, q4_k vs q6_k, CLI vs server-warm) but confirms DEVICE-mode delivers
+  on CUDA, not just by code inspection.
+- **#155** — `QWEN3_TTS_CODEC_GPU=1` on `qwen3-tts-customvoice` 0.6b, 87-frame
+  utterance (past the 59-frame TDR threshold): **no driver crash**, codec
+  **14027 ms (CPU) → 748 ms (GPU), 18.7×**, clean GPU teardown. First CUDA
+  confirmation — Rafa only had AMD HIP + Vulkan.
+- **#152** — the box builds + runs the CUDA 13.0 toolkit on Windows; `02fdc310`'s
+  runtime-version guard prints the "compiled 13.0, runtime 13.2" warning and
+  proceeds cleanly.
+- **#125** — firered-asr2 on > 50 s audio (`issue19-70s.wav`) hangs indefinitely
+  on CUDA (killed after ~5 min, no output); 5 s works but runs at 0.2× RT
+  (27.8 s for 5 s). Confirms montvid's "stuck on long audio" — fix pending.
+
 ## 2026-06-10 #155 — Vulkan col2im_1d kernel: full-GPU qwen3-tts codec on Vulkan
 
 Follow-up to the #155 codec fix. The codec's ConvTranspose1d was decomposed
