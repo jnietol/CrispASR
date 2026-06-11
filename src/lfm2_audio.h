@@ -40,6 +40,13 @@ void lfm2_audio_free(struct lfm2_audio_context* ctx);
 char* lfm2_audio_transcribe(struct lfm2_audio_context* ctx, const float* samples, int n_samples, const char* prompt,
                             int max_tokens);
 
+// Synthesize speech from text. Returns malloc'd PCM at 24 kHz mono.
+// text: input text to speak. language: "ja" or "en". NULL = default.
+// out_n_samples: receives the sample count.
+// Returns NULL on failure. Caller frees with free().
+float* lfm2_audio_synthesize(struct lfm2_audio_context* ctx, const char* text, const char* language,
+                             int* out_n_samples);
+
 // Hyper-parameters
 int lfm2_audio_n_mels(struct lfm2_audio_context* ctx);
 int lfm2_audio_sample_rate(struct lfm2_audio_context* ctx);

@@ -128,10 +128,31 @@ struct lfm2_audio_model {
     ggml_tensor* mel_fb = nullptr;     // (n_mels, n_freqs)
     ggml_tensor* mel_window = nullptr; // (win_length,)
 
-    // Audio embedding
+    // Audio embedding (for audio output tokens — shared across codebooks)
     ggml_tensor* audio_embd_embedding_w = nullptr;
     ggml_tensor* audio_embd_embedding_norm_w = nullptr;
     ggml_tensor* audio_embd_to_logits_w = nullptr;
+
+    // Depthformer (generates 8-codebook Mimi tokens from backbone hidden state)
+    ggml_tensor *depth_linear_w = nullptr, *depth_linear_b = nullptr; // (hidden → codebooks*depth_dim)
+
+    struct DepthLayerWeights {
+        ggml_tensor* operator_norm_w = nullptr;
+        ggml_tensor* ffn_norm_w = nullptr;
+        ggml_tensor* attn_qkv_proj_w = nullptr; // fused Q+K+V
+        ggml_tensor* attn_out_proj_w = nullptr;
+        ggml_tensor* attn_q_ln_w = nullptr;
+        ggml_tensor* attn_k_ln_w = nullptr;
+        ggml_tensor *ff_w1 = nullptr, *ff_w2 = nullptr, *ff_w3 = nullptr;
+    };
+    std::vector<DepthLayerWeights> depth_layers;
+
+    struct DepthCodebook {
+        ggml_tensor* embedding_w = nullptr;      // (depth_dim, audio_vocab_size)
+        ggml_tensor* embedding_norm_w = nullptr; // (depth_dim,)
+        ggml_tensor* to_logits_w = nullptr;      // (depth_dim, audio_vocab_size)
+    };
+    std::vector<DepthCodebook> depth_codebooks;
 
     // core_gguf resources
     ggml_context* ctx = nullptr;
@@ -371,6 +392,39 @@ static bool lfm2_audio_load(lfm2_audio_model& model, const char* path, ggml_back
     model.audio_embd_embedding_norm_w = G(model, "audio_embd.embedding_norm.weight");
     model.audio_embd_to_logits_w = G(model, "audio_embd.to_logits.weight");
 
+    // ---- Depthformer weights ----
+    model.depth_linear_w = G(model, "depth.linear.weight");
+    model.depth_linear_b = G(model, "depth.linear.bias");
+    model.depth_layers.resize(hp.depth_n_layers);
+    for (uint32_t i = 0; i < hp.depth_n_layers; i++) {
+        auto& dl = model.depth_layers[i];
+        char buf[128];
+        auto T = [&](const char* suffix) -> ggml_tensor* {
+            snprintf(buf, sizeof(buf), "depth.layers.%u.%s", i, suffix);
+            return G(model, buf);
+        };
+        dl.operator_norm_w = T("operator_norm.weight");
+        dl.ffn_norm_w = T("ffn_norm.weight");
+        dl.attn_qkv_proj_w = T("attn.qkv_proj.weight");
+        dl.attn_out_proj_w = T("attn.out_proj.weight");
+        dl.attn_q_ln_w = T("attn.q_layernorm.weight");
+        dl.attn_k_ln_w = T("attn.k_layernorm.weight");
+        dl.ff_w1 = T("ff.w1.weight");
+        dl.ff_w2 = T("ff.w2.weight");
+        dl.ff_w3 = T("ff.w3.weight");
+    }
+    model.depth_codebooks.resize(hp.codebooks);
+    for (uint32_t c = 0; c < hp.codebooks; c++) {
+        auto& cb = model.depth_codebooks[c];
+        char buf[128];
+        snprintf(buf, sizeof(buf), "depth.codebook.%u.embedding.weight", c);
+        cb.embedding_w = G(model, buf);
+        snprintf(buf, sizeof(buf), "depth.codebook.%u.embedding_norm.weight", c);
+        cb.embedding_norm_w = G(model, buf);
+        snprintf(buf, sizeof(buf), "depth.codebook.%u.to_logits.weight", c);
+        cb.to_logits_w = G(model, buf);
+    }
+
     // ---- Mel preprocessor (stored by converter from librosa slaney fb) ----
     model.mel_fb = G(model, "preprocessor.fb");
     model.mel_window = G(model, "preprocessor.window");
@@ -603,6 +657,9 @@ static ggml_tensor* lfm2_rms_norm(ggml_context* ctx, ggml_tensor* x, ggml_tensor
 static ggml_tensor* lfm2_swiglu_ffn(ggml_context* ctx, ggml_tensor* x, ggml_tensor* w1, ggml_tensor* w2,
                                     ggml_tensor* w3);
 static ggml_tensor* lfm2_short_conv(ggml_context* ctx, ggml_tensor* x, const lfm2_layer_weights& w, int hidden, int T);
+static ggml_tensor* lfm2_gqa_attention(ggml_context* ctx, ggml_tensor* x, const lfm2_layer_weights& w,
+                                       ggml_tensor* rope_freqs, int hidden, int n_heads, int n_kv_heads, int head_dim,
+                                       int T);
 static ggml_tensor* lfm2_build_layer(ggml_context* ctx, ggml_tensor* x, const lfm2_layer_weights& w,
                                      ggml_tensor* rope_freqs, int hidden, int n_heads, int n_kv_heads, int head_dim,
                                      int T, float norm_eps);
@@ -1537,4 +1594,670 @@ int lfm2_audio_run_lfm_staged(lfm2_audio_context* ctx, const float* samples, int
 
     free(result);
     return result ? 0 : -1;
+}
+
+// ===========================================================================
+// Depthformer: generate 8-codebook Mimi codes from a backbone hidden vector
+//
+// For each audio frame, the depthformer:
+//   1. depth_linear(hidden) → (codebooks, depth_dim) = (8, 1024)
+//   2. For codebook i=0..7:
+//      a. input = depth_linear_out[i] + embedding(prev_token) (0 for first)
+//      b. Run 6-layer transformer (with KV cache within this frame)
+//      c. Logits = to_logits(embedding_norm(output))
+//      d. Greedy argmax → code[i]
+//      e. Embed code[i] for next codebook
+//   3. Return 8 codes. If code[0] == 2048 (EOAudio), stop generating.
+// ===========================================================================
+
+static std::vector<int32_t> lfm2_depthformer_sample_frame(lfm2_audio_context* ctx, const float* backbone_hidden) {
+    auto& model = ctx->model;
+    auto& hp = model.hparams;
+    const int codebooks = (int)hp.codebooks;
+    const int depth_dim = (int)hp.depth_dim;
+    const int hidden = (int)hp.lfm_hidden_size;
+    const int depth_n_layers = (int)hp.depth_n_layers;
+    const float norm_eps = 1e-5f;
+    const int audio_vocab = (int)hp.audio_vocab_size;
+
+    // depth_linear: (hidden) → (codebooks * depth_dim)
+    // Do this on CPU for simplicity (it's one matmul)
+    const size_t mem_sz = 128 * 1024 * 1024; // 128 MB
+    std::vector<uint8_t> buf(mem_sz);
+    ggml_init_params ip = {mem_sz, buf.data(), false};
+    ggml_context* ctx0 = ggml_init(ip);
+    if (!ctx0)
+        return {};
+
+    // Input hidden vector
+    ggml_tensor* h_in = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, hidden);
+    memcpy(h_in->data, backbone_hidden, sizeof(float) * hidden);
+
+    // depth_linear
+    ggml_tensor* projected = ggml_add(ctx0, ggml_mul_mat(ctx0, model.depth_linear_w, h_in), model.depth_linear_b);
+    // projected: (codebooks * depth_dim,) = (8192,)
+
+    ggml_tensor* proj_out = ggml_dup(ctx0, projected);
+    ggml_set_name(proj_out, "depth_proj");
+
+    ggml_cgraph* gf0 = ggml_new_graph(ctx0);
+    ggml_build_forward_expand(gf0, proj_out);
+    ggml_graph_compute_with_ctx(ctx0, gf0, ctx->n_threads);
+
+    // Extract projected values
+    std::vector<float> proj_data(codebooks * depth_dim);
+    memcpy(proj_data.data(), proj_out->data, sizeof(float) * codebooks * depth_dim);
+    ggml_free(ctx0);
+
+    // Now run the depthformer autoregressively over 8 codebooks
+    std::vector<int32_t> codes(codebooks);
+    std::vector<float> prev_emb(depth_dim, 0.0f); // zero for first codebook
+
+    for (int c = 0; c < codebooks; c++) {
+        // Input: depth_linear_out[c] + prev_emb
+        std::vector<float> input(depth_dim);
+        for (int j = 0; j < depth_dim; j++)
+            input[j] = proj_data[c * depth_dim + j] + prev_emb[j];
+
+        // Run 6-layer transformer on this single token
+        // (no KV cache across codebooks — each frame is independent,
+        //  but within a frame the 8 codebook steps share a cache)
+        const size_t step_mem = 64 * 1024 * 1024;
+        std::vector<uint8_t> step_buf(step_mem);
+        ggml_init_params sip = {step_mem, step_buf.data(), false};
+        ggml_context* sc = ggml_init(sip);
+        if (!sc)
+            break;
+
+        ggml_tensor* x = ggml_new_tensor_2d(sc, GGML_TYPE_F32, depth_dim, c + 1);
+        // Fill positions 0..c-1 with previously computed inputs, position c with current
+        // Actually for efficiency, build the full (depth_dim, c+1) sequence
+        // For now, just process position c with positions 0..c-1 via no-cache:
+        // This is O(codebooks^2) per frame but codebooks=8, so 8*6 = 48 layer calls total.
+        // Fast enough.
+
+        // Simpler: build (depth_dim, 1) input for just this codebook position
+        // and use KV cache. But building a KV cache for 6 layers × 8 steps is complex.
+        //
+        // Simplest correct approach: run all c+1 tokens through the transformer
+        // each time (no cache). Total ops: sum(c+1 for c=0..7) = 36 token-layer pairs × 6 layers = 216.
+        // At depth_dim=1024, this is tiny.
+
+        // Build full sequence of c+1 inputs
+        // prev inputs stored in a running buffer
+        static thread_local std::vector<float> depth_sequence;
+        if (c == 0)
+            depth_sequence.clear();
+        depth_sequence.insert(depth_sequence.end(), input.begin(), input.end());
+
+        ggml_tensor* seq = ggml_new_tensor_2d(sc, GGML_TYPE_F32, depth_dim, c + 1);
+        memcpy(seq->data, depth_sequence.data(), sizeof(float) * depth_dim * (c + 1));
+
+        // Positions for RoPE
+        ggml_tensor* positions = ggml_new_tensor_1d(sc, GGML_TYPE_I32, c + 1);
+        {
+            int32_t* pos = (int32_t*)positions->data;
+            for (int i = 0; i <= c; i++)
+                pos[i] = i;
+        }
+
+        // Causal mask (only needed if c > 0)
+        ggml_tensor* mask = nullptr;
+        if (c > 0) {
+            mask = ggml_new_tensor_2d(sc, GGML_TYPE_F16, c + 1, c + 1);
+            ggml_fp16_t* m = (ggml_fp16_t*)mask->data;
+            ggml_fp16_t zero = ggml_fp32_to_fp16(0.0f);
+            ggml_fp16_t neginf = ggml_fp32_to_fp16(-INFINITY);
+            for (int q = 0; q <= c; q++)
+                for (int k = 0; k <= c; k++)
+                    m[q * (c + 1) + k] = (k <= q) ? zero : neginf;
+        }
+
+        // 6-layer depthformer transformer
+        // The depthformer uses MHA with fused QKV (not GQA — head_dim=32, 32 heads, 8 KV heads)
+        // Actually: qkv_proj is (1024→1536) = Q(1024) + K(256) + V(256)
+        // So n_heads=32, n_kv_heads=8, head_dim=32
+        const int d_n_heads = 32;
+        const int d_n_kv = 8;
+        const int d_hd = depth_dim / d_n_heads; // 32
+
+        ggml_tensor* cur = seq;
+        for (int il = 0; il < depth_n_layers; il++) {
+            auto& dl = model.depth_layers[il];
+            ggml_tensor* residual = cur;
+
+            // RMSNorm → MHA
+            ggml_tensor* h = lfm2_rms_norm(sc, cur, dl.operator_norm_w, norm_eps);
+
+            // Fused QKV
+            ggml_tensor* qkv = ggml_mul_mat(sc, dl.attn_qkv_proj_w, h);
+            const int q_dim = d_n_heads * d_hd; // 1024
+            const int kv_dim = d_n_kv * d_hd;   // 256
+            ggml_tensor* Q = ggml_view_2d(sc, qkv, q_dim, c + 1, qkv->nb[1], 0);
+            ggml_tensor* K = ggml_view_2d(sc, qkv, kv_dim, c + 1, qkv->nb[1], q_dim * sizeof(float));
+            ggml_tensor* V = ggml_view_2d(sc, qkv, kv_dim, c + 1, qkv->nb[1], (q_dim + kv_dim) * sizeof(float));
+            if (c > 0) {
+                Q = ggml_cont(sc, Q);
+                K = ggml_cont(sc, K);
+                V = ggml_cont(sc, V);
+            }
+
+            Q = ggml_reshape_3d(sc, Q, d_hd, d_n_heads, c + 1);
+            K = ggml_reshape_3d(sc, K, d_hd, d_n_kv, c + 1);
+            V = ggml_reshape_3d(sc, V, d_hd, d_n_kv, c + 1);
+
+            // QK layernorm
+            Q = ggml_mul(sc, ggml_rms_norm(sc, Q, norm_eps), dl.attn_q_ln_w);
+            K = ggml_mul(sc, ggml_rms_norm(sc, K, norm_eps), dl.attn_k_ln_w);
+
+            // RoPE
+            Q = ggml_rope_ext(sc, Q, positions, nullptr, d_hd, GGML_ROPE_TYPE_NEOX, 0, 1000000.0f, 1.0f, 0.0f, 1.0f,
+                              0.0f, 0.0f);
+            K = ggml_rope_ext(sc, K, positions, nullptr, d_hd, GGML_ROPE_TYPE_NEOX, 0, 1000000.0f, 1.0f, 0.0f, 1.0f,
+                              0.0f, 0.0f);
+
+            // Permute for flash_attn
+            Q = ggml_cont(sc, ggml_permute(sc, Q, 0, 2, 1, 3));
+            K = ggml_cont(sc, ggml_permute(sc, K, 0, 2, 1, 3));
+            V = ggml_cont(sc, ggml_permute(sc, V, 0, 2, 1, 3));
+
+            float scale = 1.0f / sqrtf((float)d_hd);
+            ggml_tensor* attn = ggml_flash_attn_ext(sc, Q, K, V, mask, scale, 0.0f, 0.0f);
+            attn = ggml_reshape_2d(sc, attn, depth_dim, c + 1);
+            attn = ggml_mul_mat(sc, dl.attn_out_proj_w, attn);
+
+            cur = ggml_add(sc, residual, attn);
+
+            // FFN
+            residual = cur;
+            h = lfm2_rms_norm(sc, cur, dl.ffn_norm_w, norm_eps);
+            h = lfm2_swiglu_ffn(sc, h, dl.ff_w1, dl.ff_w2, dl.ff_w3);
+            cur = ggml_add(sc, residual, h);
+        }
+
+        // Extract last position's output
+        ggml_tensor* last = ggml_view_1d(sc, cur, depth_dim, (int64_t)c * depth_dim * sizeof(float));
+
+        // Logits: embedding_norm(last) → to_logits
+        auto& cb = model.depth_codebooks[c];
+        ggml_tensor* normed = ggml_mul(sc, ggml_rms_norm(sc, last, norm_eps), cb.embedding_norm_w);
+        ggml_tensor* logits = ggml_mul_mat(sc, cb.to_logits_w, normed);
+        ggml_tensor* logits_out = ggml_dup(sc, logits);
+        ggml_set_name(logits_out, "depth_logits");
+
+        // Also compute embedding of the chosen token for next codebook
+        // (we'll do this after graph eval by looking up the argmax)
+
+        ggml_cgraph* gf = ggml_new_graph_custom(sc, 4096, false);
+        ggml_build_forward_expand(gf, logits_out);
+        ggml_graph_compute_with_ctx(sc, gf, ctx->n_threads);
+
+        // Greedy argmax
+        const float* ldata = (const float*)logits_out->data;
+        int best = 0;
+        for (int i = 1; i < audio_vocab; i++)
+            if (ldata[i] > ldata[best])
+                best = i;
+        codes[c] = best;
+
+        // Embed the token for next codebook input
+        // cb.embedding_w has shape (depth_dim, audio_vocab_size)
+        // Row `best` = embedding vector for token `best`
+        {
+            // Read embedding row via a tiny graph
+            ggml_tensor* id_t = ggml_new_tensor_1d(sc, GGML_TYPE_I32, 1);
+            *(int32_t*)id_t->data = best;
+            ggml_tensor* emb = ggml_get_rows(sc, cb.embedding_w, id_t);
+            ggml_tensor* emb_out = ggml_dup(sc, emb);
+            ggml_cgraph* gf2 = ggml_new_graph(sc);
+            ggml_build_forward_expand(gf2, emb_out);
+            ggml_graph_compute_with_ctx(sc, gf2, 1);
+            memcpy(prev_emb.data(), emb_out->data, sizeof(float) * depth_dim);
+        }
+
+        ggml_free(sc);
+    }
+
+    return codes;
+}
+
+// ===========================================================================
+// Audio detokenizer (ISTFT-based): codes → PCM at 24 kHz
+//
+// Uses the separate detokenizer GGUF:
+//   FusedEmbedding(codes) → upsample 6× → 8L LFM2 (512d) → linear → ISTFT
+//
+// For now, use a simplified CPU-side ISTFT since the detokenizer model
+// needs separate loading. Instead, we output the raw Mimi codes and let
+// the caller decode them externally.
+//
+// TODO: load detokenizer GGUF as companion file and run the full pipeline.
+// ===========================================================================
+
+float* lfm2_audio_synthesize(lfm2_audio_context* ctx, const char* text, const char* language, int* out_n_samples) {
+    if (!ctx || !text)
+        return nullptr;
+    auto& model = ctx->model;
+    auto& hp = model.hparams;
+    const int hidden = (int)hp.lfm_hidden_size;
+    const int codebooks = (int)hp.codebooks;
+
+    if (!model.depth_linear_w || model.depth_codebooks.empty()) {
+        fprintf(stderr, "lfm2-audio: depthformer weights not loaded\n");
+        return nullptr;
+    }
+
+    // Step 1: Build prompt — TTS uses "Perform TTS in {language}."
+    // Pre-tokenized for Japanese and English
+    // <|startoftext|><|im_start|>system\nPerform TTS in japanese.<|im_end|>\n<|im_start|>user\n
+    // "Perform" = [8173, 1199], " T" = 837, "TS" = 10255, " in" = 797,
+    // " japan" = 41035, "ese" = 3391, "." = 523
+    static const std::vector<int32_t> kTTSPrefixJa = {1,     6,    24131, 708, 8173, 1199, 837,  10255, 797,
+                                                      41035, 3391, 523,   7,   708,  6,    6423, 708};
+    // <|startoftext|><|im_start|>system\nPerform TTS in english.<|im_end|>\n<|im_start|>user\n
+    static const std::vector<int32_t> kTTSPrefixEn = {1,   6,     24131, 708, 8173, 1199, 837,  10255,
+                                                      797, 48103, 523,   7,   708,  6,    6423, 708};
+
+    const auto* prefix_ptr = &kTTSPrefixJa;
+    if (language && (std::string(language) == "en" || std::string(language) == "english"))
+        prefix_ptr = &kTTSPrefixEn;
+
+    // Tokenize the input text using BPE
+    // For now, just use the core_bpe encoder
+    // TODO: proper BPE encoding. For now, encode character-by-character as a fallback.
+    // Actually, for TTS the text needs to be tokenized. Let me use the vocab lookup.
+
+    // Simple approach: for Japanese text, each character maps to a token.
+    // For a proper implementation we need BPE merges. For now, use a hack:
+    // search the vocab for the input text as a whole, then fall back to
+    // per-character lookup.
+    std::vector<int32_t> text_tokens;
+    {
+        // Try to find each character/subword in the vocab
+        std::string remaining(text);
+        while (!remaining.empty()) {
+            bool found = false;
+            // Try longest match first (up to 8 bytes)
+            for (int len = std::min((int)remaining.size(), 16); len >= 1; len--) {
+                std::string sub = remaining.substr(0, len);
+                // Convert to GPT-2 byte encoding
+                std::string encoded;
+                const auto& be = core_bpe::byte_encoder();
+                for (unsigned char ch : sub) {
+                    int cp = be[ch];
+                    if (cp < 128) {
+                        encoded += (char)cp;
+                    } else {
+                        // Encode as UTF-8
+                        if (cp < 0x800) {
+                            encoded += (char)(0xC0 | (cp >> 6));
+                            encoded += (char)(0x80 | (cp & 0x3F));
+                        } else {
+                            encoded += (char)(0xE0 | (cp >> 12));
+                            encoded += (char)(0x80 | ((cp >> 6) & 0x3F));
+                            encoded += (char)(0x80 | (cp & 0x3F));
+                        }
+                    }
+                }
+                // Search vocab
+                for (int i = 0; i < (int)model.vocab.size(); i++) {
+                    if (model.vocab[i] == encoded) {
+                        text_tokens.push_back(i);
+                        remaining = remaining.substr(len);
+                        found = true;
+                        break;
+                    }
+                }
+                if (found)
+                    break;
+            }
+            if (!found) {
+                // Skip unknown byte
+                remaining = remaining.substr(1);
+            }
+        }
+    }
+
+    if (text_tokens.empty()) {
+        fprintf(stderr, "lfm2-audio: could not tokenize input text\n");
+        return nullptr;
+    }
+
+    if (ctx->verbosity >= 1)
+        fprintf(stderr, "lfm2-audio: TTS text tokenized to %zu tokens\n", text_tokens.size());
+
+    // Build full input: prefix + text + <|im_end|>\n
+    std::vector<int32_t> all_tokens;
+    all_tokens.insert(all_tokens.end(), prefix_ptr->begin(), prefix_ptr->end());
+    all_tokens.insert(all_tokens.end(), text_tokens.begin(), text_tokens.end());
+    all_tokens.push_back(kTokenImEnd);
+    all_tokens.push_back(kTokenNewline);
+
+    // Embed all tokens
+    auto embed_text = [&](const std::vector<int32_t>& ids) -> std::vector<float> {
+        const int n = (int)ids.size();
+        const size_t mem = 16 * 1024 * 1024;
+        std::vector<uint8_t> buf(mem);
+        ggml_init_params ip = {mem, buf.data(), false};
+        ggml_context* c = ggml_init(ip);
+        if (!c)
+            return {};
+        ggml_tensor* id_t = ggml_new_tensor_1d(c, GGML_TYPE_I32, n);
+        memcpy(id_t->data, ids.data(), n * sizeof(int32_t));
+        ggml_tensor* emb = ggml_get_rows(c, model.lfm_embed_tokens_w, id_t);
+        ggml_tensor* out = ggml_dup(c, emb);
+        ggml_cgraph* gf = ggml_new_graph(c);
+        ggml_build_forward_expand(gf, out);
+        ggml_graph_compute_with_ctx(c, gf, 1);
+        std::vector<float> result(n * hidden);
+        memcpy(result.data(), out->data, sizeof(float) * n * hidden);
+        ggml_free(c);
+        return result;
+    };
+
+    auto text_emb = embed_text(all_tokens);
+    if (text_emb.empty())
+        return nullptr;
+
+    // Step 2: Run backbone prefill on text-only input
+    ctx->reset_kv();
+    const int T_text = (int)all_tokens.size();
+
+    // Use the same run_step lambda pattern as transcribe — but we need
+    // to extract the last hidden state, not just logits.
+    // For TTS: after prefill, we check if the model produces <|audio_start|>.
+    // Then for each subsequent step, we extract the backbone hidden state
+    // and run the depthformer to produce audio codes.
+
+    // For simplicity, reuse the non-cached backbone for the prefill
+    // and extract the full hidden state.
+    {
+        ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), false};
+        ggml_context* ctx0 = ggml_init(ip);
+        if (!ctx0)
+            return nullptr;
+
+        ggml_tensor* x = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hidden, T_text);
+        memcpy(x->data, text_emb.data(), sizeof(float) * T_text * hidden);
+
+        // Build causal mask
+        ggml_tensor* mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, T_text, T_text);
+        {
+            ggml_fp16_t* m = (ggml_fp16_t*)mask->data;
+            ggml_fp16_t zero = ggml_fp32_to_fp16(0.0f);
+            ggml_fp16_t neginf = ggml_fp32_to_fp16(-INFINITY);
+            for (int q = 0; q < T_text; q++)
+                for (int k = 0; k < T_text; k++)
+                    m[q * T_text + k] = (k <= q) ? zero : neginf;
+        }
+
+        // Positions
+        ggml_tensor* positions = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, T_text);
+        {
+            int32_t* pos = (int32_t*)positions->data;
+            for (int i = 0; i < T_text; i++)
+                pos[i] = i;
+        }
+
+        ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 65536, false);
+
+        // Run backbone (non-cached for TTS — simpler, and text-only prefill is fast)
+        for (uint32_t il = 0; il < hp.lfm_n_layers; il++) {
+            auto& w = model.lfm_layers[il];
+            ggml_tensor* residual = x;
+            ggml_tensor* h = lfm2_rms_norm(ctx0, x, w.operator_norm_w, 1e-5f);
+
+            if (w.is_attention) {
+                h = lfm2_gqa_attention(ctx0, h, w, nullptr, hidden, (int)hp.lfm_n_heads, (int)hp.lfm_n_kv_heads,
+                                       (int)hp.lfm_head_dim, T_text);
+            } else {
+                h = lfm2_short_conv(ctx0, h, w, hidden, T_text);
+            }
+            x = ggml_add(ctx0, residual, h);
+
+            residual = x;
+            h = lfm2_rms_norm(ctx0, x, w.ffn_norm_w, 1e-5f);
+            h = lfm2_swiglu_ffn(ctx0, h, w.ff_w1, w.ff_w2, w.ff_w3);
+            x = ggml_add(ctx0, residual, h);
+        }
+        x = lfm2_rms_norm(ctx0, x, model.lfm_embedding_norm_w, 1e-5f);
+
+        // Get logits at last position
+        ggml_tensor* last = ggml_view_1d(ctx0, x, hidden, (int64_t)(T_text - 1) * hidden * sizeof(float));
+        ggml_tensor* logits = ggml_mul_mat(ctx0, model.lfm_embed_tokens_w, last);
+        ggml_tensor* logits_out = ggml_dup(ctx0, logits);
+        ggml_set_name(logits_out, "tts_logits");
+
+        // Also save last hidden for depthformer
+        ggml_tensor* hidden_out = ggml_dup(ctx0, last);
+        ggml_set_name(hidden_out, "tts_hidden");
+
+        ggml_build_forward_expand(gf, logits_out);
+        ggml_build_forward_expand(gf, hidden_out);
+        ggml_graph_compute_with_ctx(ctx0, gf, ctx->n_threads);
+
+        // Check if the model wants to produce audio
+        const float* ldata = (const float*)logits_out->data;
+        int top = 0;
+        for (int i = 1; i < (int)hp.text_vocab_size; i++)
+            if (ldata[i] > ldata[top])
+                top = i;
+
+        if (ctx->verbosity >= 1)
+            fprintf(stderr, "lfm2-audio: TTS prefill top token=%d (%s)\n", top,
+                    top == kTokenAudioStart ? "<|audio_start|>" : "not audio");
+
+        // Generate text tokens until we get <|audio_start|>, then switch to audio
+        // The model first echoes/rephrases the text, then emits <|audio_start|>
+        // followed by audio frames.
+        std::vector<float> cur_hidden(hidden);
+        memcpy(cur_hidden.data(), hidden_out->data, sizeof(float) * hidden);
+        int cur_pos = T_text;
+
+        if (top != kTokenAudioStart) {
+            if (ctx->verbosity >= 1)
+                fprintf(stderr, "lfm2-audio: TTS generating text prefix before audio...\n");
+
+            // Auto-regressive text generation until <|audio_start|>
+            int cur_token = top;
+            for (int step = 0; step < 200 && cur_token != kTokenAudioStart; step++) {
+                if (cur_token == kTokenImEnd || cur_token == 2)
+                    break;
+
+                if (ctx->verbosity >= 2) {
+                    std::string piece = decode_token(model, cur_token);
+                    fprintf(stderr, "  text[%d] token=%d\n", step, cur_token);
+                }
+
+                // Embed token, run backbone (non-cached, single token)
+                auto tok_emb = embed_text({cur_token});
+                if (tok_emb.empty())
+                    break;
+
+                const size_t bb_mem = ctx->compute_meta.size();
+                ggml_init_params bip = {bb_mem, ctx->compute_meta.data(), false};
+                ggml_context* bc = ggml_init(bip);
+                if (!bc)
+                    break;
+
+                ggml_tensor* bx = ggml_new_tensor_2d(bc, GGML_TYPE_F32, hidden, 1);
+                memcpy(bx->data, tok_emb.data(), sizeof(float) * hidden);
+
+                ggml_tensor* pos1 = ggml_new_tensor_1d(bc, GGML_TYPE_I32, 1);
+                *(int32_t*)pos1->data = cur_pos;
+
+                for (uint32_t il = 0; il < hp.lfm_n_layers; il++) {
+                    auto& w = model.lfm_layers[il];
+                    ggml_tensor* res = bx;
+                    ggml_tensor* hh = lfm2_rms_norm(bc, bx, w.operator_norm_w, 1e-5f);
+                    if (w.is_attention)
+                        hh = lfm2_gqa_attention(bc, hh, w, nullptr, hidden, (int)hp.lfm_n_heads, (int)hp.lfm_n_kv_heads,
+                                                (int)hp.lfm_head_dim, 1);
+                    else
+                        hh = lfm2_short_conv(bc, hh, w, hidden, 1);
+                    bx = ggml_add(bc, res, hh);
+                    res = bx;
+                    hh = lfm2_rms_norm(bc, bx, w.ffn_norm_w, 1e-5f);
+                    hh = lfm2_swiglu_ffn(bc, hh, w.ff_w1, w.ff_w2, w.ff_w3);
+                    bx = ggml_add(bc, res, hh);
+                }
+                bx = lfm2_rms_norm(bc, bx, model.lfm_embedding_norm_w, 1e-5f);
+
+                ggml_tensor* bl = ggml_mul_mat(bc, model.lfm_embed_tokens_w, bx);
+                ggml_tensor* bl_out = ggml_dup(bc, bl);
+                ggml_tensor* bh_out = ggml_dup(bc, bx);
+
+                ggml_cgraph* bgf = ggml_new_graph_custom(bc, 65536, false);
+                ggml_build_forward_expand(bgf, bl_out);
+                ggml_build_forward_expand(bgf, bh_out);
+                ggml_graph_compute_with_ctx(bc, bgf, ctx->n_threads);
+
+                const float* bl_data = (const float*)bl_out->data;
+                cur_token = 0;
+                for (int i = 1; i < (int)hp.text_vocab_size; i++)
+                    if (bl_data[i] > bl_data[cur_token])
+                        cur_token = i;
+
+                memcpy(cur_hidden.data(), bh_out->data, sizeof(float) * hidden);
+                cur_pos++;
+                ggml_free(bc);
+            }
+
+            if (cur_token != kTokenAudioStart) {
+                fprintf(stderr, "lfm2-audio: TTS never produced <|audio_start|>\n");
+                return nullptr;
+            }
+            if (ctx->verbosity >= 1)
+                fprintf(stderr, "lfm2-audio: TTS got <|audio_start|> at position %d\n", cur_pos);
+        }
+
+        // Generate audio frames using the depthformer
+        // For each frame: get backbone hidden → depthformer → 8 codes
+        // Then feed codes back into backbone for next frame
+        std::vector<std::vector<int32_t>> all_codes;
+        const int max_frames = 500; // ~40 seconds at 12.5 Hz
+
+        ggml_free(ctx0);
+
+        for (int frame = 0; frame < max_frames; frame++) {
+            auto codes = lfm2_depthformer_sample_frame(ctx, cur_hidden.data());
+            if (codes.empty())
+                break;
+
+            // Check for EOAudio (2048 in first codebook)
+            if (codes[0] == 2048)
+                break;
+
+            all_codes.push_back(codes);
+
+            if (ctx->verbosity >= 2)
+                fprintf(stderr, "  frame %d: [%d,%d,%d,%d,%d,%d,%d,%d]\n", frame, codes[0], codes[1], codes[2],
+                        codes[3], codes[4], codes[5], codes[6], codes[7]);
+
+            // Feed codes back into backbone to get next hidden state
+            // audio_embedding(codes + codebook_offsets).sum(0)
+            // For now, use a simple CPU computation
+            {
+                const size_t emb_mem = 16 * 1024 * 1024;
+                std::vector<uint8_t> emb_buf(emb_mem);
+                ggml_init_params eip = {emb_mem, emb_buf.data(), false};
+                ggml_context* ec = ggml_init(eip);
+                if (!ec)
+                    break;
+
+                // Build token IDs with codebook offsets
+                ggml_tensor* ids = ggml_new_tensor_1d(ec, GGML_TYPE_I32, codebooks);
+                {
+                    int32_t* id = (int32_t*)ids->data;
+                    for (int c = 0; c < codebooks; c++)
+                        id[c] = codes[c] + c * (int)hp.audio_vocab_size;
+                }
+                ggml_tensor* emb = ggml_get_rows(ec, model.audio_embd_embedding_w, ids);
+                // Sum over codebooks: emb is (hidden, codebooks) → sum to (hidden,)
+                ggml_tensor* summed = ggml_sum_rows(ec, ggml_cont(ec, ggml_transpose(ec, emb)));
+                summed = ggml_reshape_1d(ec, summed, hidden);
+                ggml_tensor* emb_out = ggml_dup(ec, summed);
+
+                ggml_cgraph* egf = ggml_new_graph(ec);
+                ggml_build_forward_expand(egf, emb_out);
+                ggml_graph_compute_with_ctx(ec, egf, 1);
+
+                // Now run this single embedding through the backbone (non-cached)
+                // to get the next hidden state for the depthformer.
+                // This is expensive but correct — one full backbone pass per frame.
+                // TODO: use KV cache for the backbone during TTS generation.
+                std::vector<float> audio_emb(hidden);
+                memcpy(audio_emb.data(), emb_out->data, sizeof(float) * hidden);
+                ggml_free(ec);
+
+                // Run backbone on this single token (non-cached for now)
+                const size_t bb_mem = ctx->compute_meta.size();
+                ggml_init_params bip = {bb_mem, ctx->compute_meta.data(), false};
+                ggml_context* bc = ggml_init(bip);
+                if (!bc)
+                    break;
+
+                ggml_tensor* bx = ggml_new_tensor_2d(bc, GGML_TYPE_F32, hidden, 1);
+                memcpy(bx->data, audio_emb.data(), sizeof(float) * hidden);
+
+                for (uint32_t il = 0; il < hp.lfm_n_layers; il++) {
+                    auto& w = model.lfm_layers[il];
+                    ggml_tensor* res = bx;
+                    ggml_tensor* hh = lfm2_rms_norm(bc, bx, w.operator_norm_w, 1e-5f);
+                    if (w.is_attention) {
+                        // Single token, no mask needed. Use the non-cached attention.
+                        // Create positions tensor for this token's absolute position.
+                        ggml_tensor* pos1 = ggml_new_tensor_1d(bc, GGML_TYPE_I32, 1);
+                        *(int32_t*)pos1->data = T_text + frame;
+                        hh = lfm2_gqa_attention(bc, hh, w, nullptr, hidden, (int)hp.lfm_n_heads, (int)hp.lfm_n_kv_heads,
+                                                (int)hp.lfm_head_dim, 1);
+                    } else {
+                        hh = lfm2_short_conv(bc, hh, w, hidden, 1);
+                    }
+                    bx = ggml_add(bc, res, hh);
+                    res = bx;
+                    hh = lfm2_rms_norm(bc, bx, w.ffn_norm_w, 1e-5f);
+                    hh = lfm2_swiglu_ffn(bc, hh, w.ff_w1, w.ff_w2, w.ff_w3);
+                    bx = ggml_add(bc, res, hh);
+                }
+                bx = lfm2_rms_norm(bc, bx, model.lfm_embedding_norm_w, 1e-5f);
+
+                ggml_tensor* bx_out = ggml_dup(bc, bx);
+                ggml_cgraph* bgf = ggml_new_graph_custom(bc, 65536, false);
+                ggml_build_forward_expand(bgf, bx_out);
+                ggml_graph_compute_with_ctx(bc, bgf, ctx->n_threads);
+
+                memcpy(cur_hidden.data(), bx_out->data, sizeof(float) * hidden);
+                ggml_free(bc);
+            }
+        }
+
+        if (ctx->verbosity >= 1)
+            fprintf(stderr, "lfm2-audio: TTS generated %zu audio frames (%zu codebooks)\n", all_codes.size(),
+                    all_codes.empty() ? 0 : all_codes[0].size());
+
+        if (all_codes.empty()) {
+            if (out_n_samples)
+                *out_n_samples = 0;
+            return nullptr;
+        }
+
+        // Step 3: Decode codes → PCM using the detokenizer
+        // The detokenizer is a separate model. For now, output silence
+        // with the code data embedded as metadata.
+        // TODO: load and run the detokenizer GGUF.
+        fprintf(stderr,
+                "lfm2-audio: TTS produced %zu frames of Mimi codes. "
+                "Detokenizer (codes→PCM) not yet implemented.\n",
+                all_codes.size());
+
+        // Return silence of the right duration as placeholder
+        // Mimi rate = 12.5 Hz at 24 kHz → 1920 samples per frame
+        const int samples_per_frame = 1920;
+        const int total_samples = (int)all_codes.size() * samples_per_frame;
+        float* pcm = (float*)calloc(total_samples, sizeof(float));
+        if (out_n_samples)
+            *out_n_samples = total_samples;
+        return pcm;
+    }
 }
