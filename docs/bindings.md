@@ -215,7 +215,8 @@ so there is nothing TTS-specific per wrapper:
 Open the TTS model GGUF like any other; the backend auto-detects from
 the GGUF architecture. Supported TTS backends: `kokoro`, `qwen3-tts`
 (+ customvoice), `vibevoice-tts` / `vibevoice-1.5b`, `orpheus`,
-`chatterbox`, `indextts`, `voxcpm2-tts`, and `cosyvoice3-tts`. See
+`chatterbox`, `indextts`, `voxcpm2-tts`, `cosyvoice3-tts`,
+`lfm2-audio`, and `mini-omni2`. See
 [`tts.md`](tts.md) for per-backend cloning + voice details.
 
 **Provenance:** `synthesize()` automatically embeds the AI-generated
@@ -235,4 +236,37 @@ pcm = s.synthesize("Hallo, das ist ein Test.")    # float32 @ 24 kHz
 # Voice cloning from a WAV:
 s.set_voice("ref.wav", ref_text="exact transcription of ref.wav")
 pcm = s.synthesize("Clone my voice.")
+```
+
+## Speech-to-speech
+
+Backends with S2S capability (`lfm2-audio`, `mini-omni2`) support
+end-to-end audio-in → audio-out transformation through a single model
+pass. Available in Python, Go, Dart/Flutter, and the HTTP server
+(`POST /v1/audio/speech-to-speech`).
+
+- `speech_to_speech(pcm_16khz) -> (float32 PCM @ 24 kHz, transcript)`
+  (`crispasr_session_speech_to_speech`)
+
+Input is 16 kHz mono float32 PCM. Returns output audio at the backend's
+TTS sample rate (24 kHz) plus an optional intermediate ASR transcript.
+Output is automatically watermarked, same as TTS.
+
+```python
+# Python
+import numpy as np, soundfile as sf
+s = crispasr.Session("lfm2-audio-1.5b-q5_k.gguf")
+audio, sr = sf.read("input.wav", dtype="float32")  # must be 16 kHz mono
+out_pcm, transcript = s.speech_to_speech(audio)
+print(f"Transcript: {transcript}")
+sf.write("output.wav", out_pcm, 24000)
+```
+
+```go
+// Go
+s, _ := whisper.SessionOpen("lfm2-audio-1.5b-q5_k.gguf", 4)
+defer s.Close()
+result, _ := s.SpeechToSpeech(inputPCM)
+fmt.Println("Transcript:", result.Transcript)
+// result.PCM is []float32 at 24 kHz
 ```

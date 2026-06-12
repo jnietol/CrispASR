@@ -60,6 +60,12 @@ crispasr --gpu-backend vulkan -dev 1 -m auto -f audio.wav
 # Half-VRAM voxtral4b
 CRISPASR_KV_QUANT=q4_0 CRISPASR_GGUF_MMAP=1 crispasr --backend voxtral4b -m auto -f audio.wav
 
+# TTS — synthesize speech from text
+crispasr --backend kokoro -m auto --tts "Hello, how are you?" -o output.wav
+
+# S2S — speech-to-speech (audio in → audio out)
+crispasr --backend lfm2-audio -m auto -f input.wav --s2s -o reply.wav
+
 # List every backend + capabilities
 crispasr --list-backends
 ```
@@ -73,6 +79,12 @@ crispasr --list-backends
 | `-f FNAME`, `--file FNAME` | Input audio (can repeat; also accepts positional filenames) |
 | `-t N`, `--threads N` | Thread count (default: `min(4, nproc)`) |
 | `-l LANG`, `--language LANG` | ISO-639-1 code (default: `en`) |
+| `--tts "TEXT"` | Synthesize speech from text (requires `CAP_TTS` backend). Output to `-o file.wav` |
+| `--tts-output FNAME` | Output path for TTS WAV (default: stdout / `tts_output.wav`) |
+| `--s2s` | Speech-to-speech mode: audio in → audio out (requires `CAP_S2S` backend, e.g. `lfm2-audio`, `mini-omni2`) |
+| `--s2s-output FNAME` | Output path for S2S WAV |
+| `--voice PATH` | Voice reference for TTS cloning (WAV file or GGUF voice pack) |
+| `--server` | Run as HTTP server with persistent model (see [`server.md`](server.md)) |
 | `--list-backends` | Print the capability matrix and exit |
 
 ## Output
@@ -1071,8 +1083,9 @@ Differences worth flagging:
   + every TTS-side env var (`QWEN3_TTS_CODEC_GPU`,
   `QWEN3_TTS_SKIP_REF_DECODE`, `QWEN3_TTS_O15`, `KOKORO_GEN_GPU`,
   `VIBEVOICE_VAE_BACKEND`, …)
-- [`docs/server.md`](server.md) — HTTP `/inference` and OpenAI-compat
-  `/v1/audio/transcriptions`
+- [`docs/server.md`](server.md) — HTTP `/inference`, OpenAI-compat
+  `/v1/audio/transcriptions`, `/v1/audio/speech` (TTS),
+  `/v1/audio/speech-to-speech` (S2S)
 - [`docs/bindings.md`](bindings.md) — Python / Rust / Dart / Go / Java
   / Ruby — every CLI feature is reachable through the C-ABI
 - [`docs/install.md`](install.md) — full build options, GPU backends,

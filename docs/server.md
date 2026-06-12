@@ -316,6 +316,34 @@ resp = client.audio.speech.create(
 resp.stream_to_file("out.wav")
 ```
 
+## Speech-to-speech endpoint
+
+`POST /v1/audio/speech-to-speech` runs end-to-end audio-in → audio-out
+on S2S-capable backends (`lfm2-audio`, `mini-omni2`). Non-S2S backends
+return 400.
+
+```bash
+crispasr --server --backend lfm2-audio -m lfm2-audio-1.5b-q5_k.gguf
+```
+
+```bash
+curl http://localhost:8080/v1/audio/speech-to-speech \
+  -F "file=@input.wav" \
+  -F "response_format=wav" \
+  -o output.wav -D -
+# X-Transcript header contains the intermediate ASR text (URL-encoded)
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `file` | (required) | Audio file upload (multipart). Decoded to 16 kHz mono float32 internally. |
+| `language` | `en` | Language hint passed to the backend. |
+| `response_format` | `wav` | Output encoding: `wav`, `pcm` (int16 LE), `f32` (raw float32), `mp3`, `opus`. |
+
+The intermediate ASR transcript (if the backend produces one) is
+returned in the `X-Transcript` response header (URL-encoded). Output
+audio is watermarked automatically, same as TTS.
+
 ### Deferred
 
 | Feature | Status |
