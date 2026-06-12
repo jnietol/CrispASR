@@ -8492,7 +8492,10 @@ Mimi) → ISTFT detokenizer → 24 kHz PCM.
 `tests/test_lfm2_audio_live.cpp`, `tests/CMakeLists.txt`, `tests/env-live-tests.sh`,
 `tools/kaggle/lfm2-audio-gpu-test/{kernel-metadata.json,lfm2-audio-gpu-test.py}`.
 
-**Remaining (tracked in PLAN §163 Phase 4):**
-- `ggml_backend_sched` migration for full GPU compute offload
-- Streaming Mimi decode
-- `causal_conv1d` CUDA kernel
+**Phase 4 — ALL DONE (4d5d3ff7):**
+- `ggml_backend_sched` → NOT NEEDED (gallocr works directly with CUDA)
+- Streaming Mimi decode → `lfm2_audio_synthesize_stream()` callback API
+- `causal_conv1d` CUDA kernel → migrated all 5 conv sites from `ggml_conv_2d_dw_direct`
+  to `ggml_conv_1d_dw` which has native CUDA dispatch via im2col+mul_mat
+- Prefill gallocr (TTS/S2S) → extracted shared `lfm2_backbone_step()` (55c90314)
+- Kaggle T4 GPU test → kernel COMPLETE, proved gallocr+CUDA works end-to-end

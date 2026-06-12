@@ -5473,7 +5473,7 @@ all working, fully wired per `docs/contributing.md`, Kaggle GPU-tested.
   interleaved generation → depthformer → detokenizer (audio out).
 - Returns both transcript text and output PCM.
 
-### Phase 4 — Performance — MOSTLY DONE
+### Phase 4 — Performance — ALL DONE
 
 | Optimization | Status | Speedup |
 |---|---|---|

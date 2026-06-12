@@ -9607,8 +9607,10 @@ conv1d with kernel_size=3. For T=1 decode, the conv needs the last K-1=2
 Bx columns from previous steps. Solution: store Bx columns in CPU-side
 float arrays (160 KB total for 10 layers × 2048 × 2). During decode:
 load cached columns → concat with new Bx via `ggml_concat` → run actual
-`ggml_conv_2d_dw_direct` on K=3 tokens → take last output. Shift cache
-left by 1 after each step.
+`ggml_conv_1d_dw` on K=3 tokens → take last output. Shift cache
+left by 1 after each step. (Originally used `ggml_conv_2d_dw_direct` with
+4D reshape/permute; migrated to `ggml_conv_1d_dw` which is cleaner and
+has native CUDA dispatch via im2col+mul_mat.)
 
 **Snapshot extraction:** To capture the Bx columns after prefill, compute
 Bx in a parallel graph branch (doesn't affect the main conv path, just
