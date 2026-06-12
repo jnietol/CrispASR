@@ -5513,4 +5513,11 @@ Current: ~47s for 11s audio (F16), ~31s (Q4_K). Target: <5s.
 | Batch prefill (overlap encoder with backbone) | ~1.1× | 0.5 day |
 | Flash attention for prefill | ~1.5× on long sequences | already enabled |
 | `causal_conv1d` kernel (CUDA) | ~1.2× (conv layers faster) | 1 day |
+| Depthformer KV cache | ~4× per TTS frame (8 vs 36 layer passes) | 0.5 day |
+
+**Depthformer KV cache note:** Attempted 2026-06-12 with `core_attn::kv_self_attn`
+but the fused QKV split in `kv_self_attn` produces degenerate codes (all codebooks
+identical). The issue is likely that `kv_self_attn` assumes `qkv_w` splits as
+`Q:n_heads*hd | K:n_kv*hd | V:n_kv*hd` but the depthformer QKV might have a
+different order. Needs per-codebook diff against the non-cached version to diagnose.
 
