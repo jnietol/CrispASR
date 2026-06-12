@@ -435,6 +435,32 @@ catch_discover_tests(test-lfm2-audio
         WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
+# ─── test - snac — unit + live tests for core/snac.h (SNAC 24kHz decoder)
+add_executable(test-snac
+    test_snac_unit.cpp
+)
+target_include_directories(test-snac PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(test-snac PRIVATE
+    Catch2::Catch2WithMain
+    snac
+)
+catch_discover_tests(test-snac
+    TEST_SPEC "[unit][snac]"
+    PROPERTIES
+        LABELS unit
+        SKIP_RETURN_CODE 4
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+catch_discover_tests(test-snac
+    TEST_SPEC "[live][snac]"
+    PROPERTIES
+        LABELS live
+        SKIP_RETURN_CODE 4
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
 # ─── test - mini-omni2 — live integration tests for Mini-Omni2 ASR + TTS + S2S
 add_executable(test-mini-omni2
     test_mini_omni2_live.cpp
