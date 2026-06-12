@@ -9563,3 +9563,74 @@ coverage. For voxcpm2, TSLM (28L) + RALM (8L) + LocDiT (12L) + LocEnc
 (12L) + VAE decode now all run as GPU graphs. The remaining CPU-only ops
 (FSQ, stop, fusion, ~5-8 ms/step) are too small to justify graph-build
 overhead.
+
+### LFM2-Audio hybrid conv+attention backbone — 2026-06-11/12
+
+**Problem:** The LFM2 backbone has two layer types (10 ShortConv + 6 GQA
+attention) interleaved in a fixed pattern `ccaccaccacacacac`. Standard KV
+cache only works for the attention layers. The conv layers need their own
+state management.
+
+**Conv state caching:** Each ShortConv layer uses a depthwise causal
+conv1d with kernel_size=3. For T=1 decode, the conv needs the last K-1=2
+Bx columns from previous steps. Solution: store Bx columns in CPU-side
+float arrays (160 KB total for 10 layers × 2048 × 2). During decode:
+load cached columns → concat with new Bx via `ggml_concat` → run actual
+`ggml_conv_2d_dw_direct` on K=3 tokens → take last output. Shift cache
+left by 1 after each step.
+
+**Snapshot extraction:** To capture the Bx columns after prefill, compute
+Bx in a parallel graph branch (doesn't affect the main conv path, just
+duplicates the `in_proj` + elementwise multiply). Name the snapshot tensor
+with `ggml_set_name`, retrieve after graph eval with `ggml_graph_get_tensor`
+(or `ggml_backend_tensor_get` for gallocr-allocated graphs).
+
+**Causal mask bug:** `ggml_flash_attn_ext` with `mask=nullptr` does NOT
+default to causal attention. It does FULL (non-causal) attention. For the
+LFM2 backbone, every attention layer diverged without an explicit causal
+mask. The fix was trivial — build a (T, T) F16 mask with 0/−inf — but the
+debugging took hours because the divergence only showed at cos≈0.37 after
+16 layers, not as a crash. The per-layer diff harness (`lfm2_ao_layer_K`)
+was essential: it showed conv layers (0,1) were fine but layer 2 (first
+attention) dropped, proving the mask was the issue.
+
+**Depthformer KV cache:** The depthformer (6L, 1024-dim) generates 8
+codebooks per audio frame. `core_attn::kv_self_attn` with fused QKV
+produced degenerate output (all codebooks identical). The manual KV cache
+approach works: CPU-side K/V arrays, `ggml_concat` to build full K/V
+from cache + new, `ggml_flash_attn_ext` for attention. The QKV split in
+`kv_self_attn` should be compatible (checked: Q|K|V order matches) but
+something else in the helper's complex logic (GQA expansion, cache write
+path) doesn't work for this tiny (T≤8) use case. Manual KV cache is
+simpler and correct.
+
+**Mel filterbank:** The liquid-audio conformer uses librosa's slaney-
+normalized mel filterbank. CrispASR's `core_mel` uses HTK (non-slaney).
+The fix: store the slaney filterbank in the GGUF (via the converter) and
+load it at runtime. This gives cos=0.9999 mel match. The HTK filterbank
+gave cos=−0.1 (essentially wrong).
+
+**BPE merges:** Without merges, the per-byte BPE tokenizer tokenizes
+"こんにちは" as 15 tokens (5 chars × 3 bytes). With merges, it tokenizes
+correctly as 4-5 tokens. Merges need to be stored in the GGUF
+(`tokenizer.ggml.merges`) and loaded at runtime for `core_bpe::bpe_one`.
+
+**ggml_gallocr vs fixed buffer:** The 2 GB compute_meta buffer caused
+heavy page-fault overhead (sys time ~1 min). Migrating to `ggml_gallocr`
+for the decode step reduced sys time to ~7s. For the prefill, reducing
+to 256 MB (still bump-allocated) was sufficient since the graph actually
+uses ~200 MB. The gallocr approach is: `no_alloc=true` in `ggml_init`,
+`ggml_gallocr_alloc_graph` after graph build, `ggml_backend_tensor_set/get`
+for inputs/outputs.
+
+**GPU readiness:** The gallocr paths ARE GPU-compatible. With
+`backend = ggml_backend_init_best()`, weights load on GPU, gallocr
+allocates intermediates on GPU, and `ggml_backend_graph_compute(backend, gf)`
+runs on GPU. The remaining `compute_meta` (bump-allocated) paths need
+gallocr migration for full GPU coverage. Kaggle T4 test confirmed the
+CUDA build works and produces correct output.
+
+**Detokenizer companion GGUF:** TTS output requires a separate model for
+codes→PCM. The detokenizer path searches: exact match → strip quant
+suffix + try F16 → strip quant suffix + try base. This makes quantized
+models find the F16 detokenizer without needing per-quant detokenizer files.

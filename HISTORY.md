@@ -8422,3 +8422,50 @@ not F16 KV. Likely a graph-topology-specific scheduling issue.
 `454e9ef8` (QKV fusion), `f94fec90` (final: split + fusion + KV-CPU).
 
 **Also:** merged stray PR #134 (session-beam test fixes).
+
+## §163 LFM2-Audio — ASR + TTS + S2S (complete)
+
+**Dates:** 2026-06-11 – 2026-06-12
+
+**Summary:** Full LiquidAI LFM2.5-Audio-1.5B backend: ASR, TTS, and
+speech-to-speech in a single model. 27 commits from `470d56f2` to
+`cd77c75e`. English and Japanese variants. HF repos:
+`cstr/lfm2-audio-1.5b-GGUF`, `cstr/lfm2-audio-1.5b-jp-GGUF`.
+
+**Architecture:** FastConformer encoder (17L, 512-dim) → audio adapter
+MLP → LFM2 hybrid backbone (16L, 2048-dim: 10 ShortConv + 6 GQA attn,
+interleaved `ccaccaccacacacac`) → depthformer (6L, 1024-dim, 8-codebook
+Mimi) → ISTFT detokenizer → 24 kHz PCM.
+
+**Key technical innovations:**
+- **Hybrid conv+attn caching:** KV cache for attention (core_attn) +
+  CPU-side Bx column cache for ShortConv layers (first such hybrid in CrispASR)
+- **Depthformer manual KV cache:** O(n) per audio frame via CPU-side K/V arrays
+  + ggml_concat (core_attn::kv_self_attn didn't work for fused QKV)
+- **Slaney mel filterbank:** stored in GGUF from librosa (cos=0.9999 match)
+- **BPE tokenizer with merges** from tokenizer.json
+- **Detokenizer fallback search** for quantized models
+
+**Performance (CPU, 4-core):**
+- ASR Q4_K: ~1m for 10s audio
+- TTS: ~1m per utterance
+- TTS→ASR roundtrip: "こんにちは" → "こんにちは。" verified
+
+**Files touched (28 total):**
+`src/lfm2_audio.{h,cpp}`, `models/convert-lfm2-audio-to-gguf.py`,
+`tools/reference_backends/lfm2_audio.py`, `tools/dump_reference.py`,
+`examples/cli/crispasr_backend_lfm2_audio.cpp`,
+`examples/cli/crispasr_backend.cpp`, `examples/cli/crispasr_diff_main.cpp`,
+`examples/cli/CMakeLists.txt`, `examples/crispasr-quantize/main.cpp`,
+`src/CMakeLists.txt`, `src/crispasr_c_api.cpp`, `src/crispasr_model_registry.cpp`,
+`python/crispasr/_binding.py`, `bindings/go/crispasr_session.go`,
+`flutter/crispasr/lib/src/crispasr.dart`,
+`README.md`, `docs/tts.md`, `docs/architecture.md`, `docs/performance.md`,
+`PLAN.md`, `LEARNINGS.md`,
+`tests/test_lfm2_audio_live.cpp`, `tests/CMakeLists.txt`, `tests/env-live-tests.sh`,
+`tools/kaggle/lfm2-audio-gpu-test/{kernel-metadata.json,lfm2-audio-gpu-test.py}`.
+
+**Remaining (tracked in PLAN §163 Phase 4):**
+- `ggml_backend_sched` migration for full GPU compute offload
+- Streaming Mimi decode
+- `causal_conv1d` CUDA kernel
