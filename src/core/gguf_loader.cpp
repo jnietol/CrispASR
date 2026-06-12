@@ -677,6 +677,7 @@ bool load_weights(const char* path, ggml_backend_t backend, const char* model_ta
         }
         const size_t data_off = gguf_get_data_offset(gctx);
         std::vector<uint8_t> tbuf;
+        bool load_ok = true;
         for (ggml_tensor* t = ggml_get_first_tensor(out.ctx); t; t = ggml_get_next_tensor(out.ctx, t)) {
             out.tensors[ggml_get_name(t)] = t;
             const int64_t tid = gguf_find_tensor(gctx, ggml_get_name(t));
@@ -687,17 +688,36 @@ bool load_weights(const char* path, ggml_backend_t backend, const char* model_ta
             if (tbuf.size() < nbytes)
                 tbuf.resize(nbytes);
 #if defined(_WIN32)
-            if (_fseeki64(fp, (int64_t)(data_off + off), SEEK_SET) != 0)
+            if (_fseeki64(fp, (int64_t)(data_off + off), SEEK_SET) != 0) {
+                fprintf(stderr, "%s: fseek failed for tensor '%s' — file truncated?\n", tag, ggml_get_name(t));
+                load_ok = false;
                 break;
+            }
 #else
-            if (fseeko(fp, (off_t)(data_off + off), SEEK_SET) != 0)
+            if (fseeko(fp, (off_t)(data_off + off), SEEK_SET) != 0) {
+                fprintf(stderr, "%s: fseek failed for tensor '%s' — file truncated?\n", tag, ggml_get_name(t));
+                load_ok = false;
                 break;
+            }
 #endif
-            if (fread(tbuf.data(), 1, nbytes, fp) != nbytes)
+            if (fread(tbuf.data(), 1, nbytes, fp) != nbytes) {
+                fprintf(stderr, "%s: short read for tensor '%s' (%zu bytes expected) — file truncated?\n",
+                        tag, ggml_get_name(t), nbytes);
+                load_ok = false;
                 break;
+            }
             ggml_backend_tensor_set(t, tbuf.data(), 0, nbytes);
         }
         fclose(fp);
+        if (!load_ok) {
+            fprintf(stderr, "%s: legacy loader failed — model file may be truncated or corrupt\n", tag);
+            gguf_free(gctx);
+            ggml_backend_buffer_free(out.buf);
+            out.buf = nullptr;
+            ggml_free(out.ctx);
+            out.ctx = nullptr;
+            return false;
+        }
     } else {
         const size_t data_off = gguf_get_data_offset(gctx);
         for (ggml_tensor* t = ggml_get_first_tensor(out.ctx); t; t = ggml_get_next_tensor(out.ctx, t)) {
@@ -707,6 +727,19 @@ bool load_weights(const char* path, ggml_backend_t backend, const char* model_ta
                 continue;
             const size_t off = gguf_get_tensor_offset(gctx, tid);
             const size_t nbytes = ggml_nbytes(t);
+            // Bounds check: prevent segfault on truncated GGUF files
+            if (data_off + off + nbytes > mf.size) {
+                fprintf(stderr,
+                        "%s: mmap legacy path: tensor '%s' exceeds file bounds "
+                        "(off=%zu + nbytes=%zu > file_size=%zu) — file truncated?\n",
+                        tag, ggml_get_name(t), data_off + off, nbytes, mf.size);
+                gguf_free(gctx);
+                ggml_backend_buffer_free(out.buf);
+                out.buf = nullptr;
+                ggml_free(out.ctx);
+                out.ctx = nullptr;
+                return false;
+            }
             ggml_backend_tensor_set(t, (const char*)mf.base + data_off + off, 0, nbytes);
         }
     }
