@@ -910,6 +910,292 @@ static std::vector<float> lfm2_embed_tokens(lfm2_audio_context* ctx, const std::
     return emb;
 }
 
+// ===========================================================================
+// Shared backbone forward step (gallocr, KV+conv cached).
+// Used by ASR decode, TTS prefill/decode, S2S prefill/decode.
+// Returns (logits, last_hidden) — both vectors may be empty on failure.
+// ===========================================================================
+
+struct Lfm2StepResult {
+    std::vector<float> logits;
+    std::vector<float> hidden;
+};
+
+static Lfm2StepResult lfm2_backbone_step(lfm2_audio_context* ctx, const float* embeddings, int T_in) {
+    auto& model = ctx->model;
+    auto& hp = model.hparams;
+    const int hidden = (int)hp.lfm_hidden_size;
+    const int n_past = ctx->kv_n_past;
+    const float norm_eps = 1e-5f;
+
+    // Use gallocr: build graph with no_alloc, then allocate exactly what's needed.
+    // This avoids the 2 GB fixed buffer and reduces memory pressure dramatically.
+    const size_t n_tensors_est = 2048;
+    ggml_init_params ip = {n_tensors_est * ggml_tensor_overhead() + ggml_graph_overhead_custom(65536, false), nullptr,
+                           true};
+    ggml_context* ctx0 = ggml_init(ip);
+    if (!ctx0)
+        return {};
+
+    ggml_tensor* x = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hidden, T_in);
+    ggml_set_name(x, "inp_emb");
+    ggml_set_input(x);
+
+    // Positions
+    ggml_tensor* positions = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, T_in);
+    ggml_set_name(positions, "inp_pos");
+    ggml_set_input(positions);
+
+    // Causal mask for prefill (T_in > 1); nullptr for single-token decode
+    ggml_tensor* causal_mask = nullptr;
+    if (T_in > 1) {
+        const int Lk = n_past + T_in;
+        causal_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, Lk, T_in);
+        ggml_set_name(causal_mask, "inp_mask");
+        ggml_set_input(causal_mask);
+    }
+
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 65536, false);
+
+    int attn_idx = 0, conv_idx = 0;
+    const int n_heads = (int)hp.lfm_n_heads;
+    const int n_kv = (int)hp.lfm_n_kv_heads;
+    const int hd = (int)hp.lfm_head_dim;
+
+    for (uint32_t il = 0; il < hp.lfm_n_layers; il++) {
+        auto& w = model.lfm_layers[il];
+        ggml_tensor* residual = x;
+
+        // RMSNorm
+        ggml_tensor* h = lfm2_rms_norm(ctx0, x, w.operator_norm_w, norm_eps);
+
+        if (w.is_attention) {
+            // --- GQA attention with KV cache ---
+            core_attn::KvSelfAttnParams kvp = {};
+            kvp.head_dim = hd;
+            kvp.n_heads = n_heads;
+            kvp.n_kv_heads = n_kv;
+            kvp.n_kv_grp = n_heads / n_kv;
+            kvp.n_ctx_orig = 0;
+            kvp.rope_type = GGML_ROPE_TYPE_NEOX;
+            kvp.rope_theta = hp.lfm_rope_theta;
+            kvp.rope_beta_fast = 0.0f;
+            kvp.rope_beta_slow = 0.0f;
+            kvp.attn_scale = 1.0f / sqrtf((float)hd);
+            kvp.qk_norm_eps = norm_eps;
+            kvp.gqa_mode = core_attn::GQA_NATIVE;
+
+            h = core_attn::kv_self_attn(ctx0, gf, h, w.attn_q_proj_w, w.attn_k_proj_w, w.attn_v_proj_w,
+                                        w.attn_out_proj_w, w.attn_q_ln_w, w.attn_k_ln_w, positions, causal_mask,
+                                        ctx->kv_k, ctx->kv_v, attn_idx, n_past, kvp);
+            attn_idx++;
+        } else {
+            // --- ShortConv with conv state cache ---
+            const int K = (int)hp.lfm_conv_kernel; // 3
+
+            if (T_in > 1) {
+                // PREFILL: run validated conv + snapshot last K-1 Bx columns
+                // Compute Bx in a parallel branch (doesn't affect the main conv path)
+                ggml_tensor* bcx_snap = ggml_mul_mat(ctx0, w.conv_in_proj_w, h);
+                ggml_tensor* B_snap = ggml_view_2d(ctx0, bcx_snap, hidden, T_in, bcx_snap->nb[1], 0);
+                ggml_tensor* x_snap =
+                    ggml_view_2d(ctx0, bcx_snap, hidden, T_in, bcx_snap->nb[1], 2 * hidden * sizeof(float));
+                ggml_tensor* Bx_snap = ggml_mul(ctx0, ggml_cont(ctx0, B_snap), ggml_cont(ctx0, x_snap));
+                // Take last K-1 columns
+                int tail_start = T_in - (K - 1);
+                if (tail_start < 0)
+                    tail_start = 0;
+                int tail_len = T_in - tail_start;
+                ggml_tensor* bx_tail = ggml_view_2d(ctx0, Bx_snap, hidden, tail_len, hidden * sizeof(float),
+                                                    (int64_t)tail_start * hidden * sizeof(float));
+                ggml_tensor* snap = ggml_dup(ctx0, bx_tail);
+                char sname[32];
+                snprintf(sname, sizeof(sname), "cs_%d", conv_idx);
+                ggml_set_name(snap, sname);
+                ggml_build_forward_expand(gf, snap);
+
+                // Main path: validated conv function
+                h = lfm2_short_conv(ctx0, h, w, hidden, T_in);
+            } else {
+                // DECODE (T=1): feed [cached_state | h] through the full
+                // ShortConv, treating it as T=K input. The conv's causal
+                // padding produces K outputs; we take the LAST one.
+                //
+                // This reuses the validated lfm2_short_conv path exactly,
+                // so the conv math is guaranteed correct.
+
+                // 1. in_proj the full K-token input
+                // Build (hidden, K) input: [cached_h_col0, cached_h_col1, h_new]
+                // BUT we don't have the cached pre-in_proj h — we have cached Bx.
+                // The ShortConv computes: BCx=in_proj(h), B*x=Bx, conv(Bx), C*conv, out_proj.
+                // We need to feed the cached Bx directly into the conv.
+                //
+                // So: compute in_proj for the new token only, get Bx_new.
+                // Then assemble [cached_Bx | Bx_new], run conv, get output.
+
+                ggml_tensor* bcx = ggml_mul_mat(ctx0, w.conv_in_proj_w, h);
+                ggml_tensor* B_part = ggml_view_1d(ctx0, bcx, hidden, 0);
+                ggml_tensor* C_part = ggml_view_1d(ctx0, bcx, hidden, hidden * sizeof(float));
+                ggml_tensor* x_inner = ggml_view_1d(ctx0, bcx, hidden, 2 * hidden * sizeof(float));
+                ggml_tensor* Bx_new = ggml_mul(ctx0, ggml_cont(ctx0, B_part), ggml_cont(ctx0, x_inner));
+
+                // 2. Assemble full Bx sequence: [cached | new] = (hidden, K)
+                ggml_tensor* cached = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hidden, K - 1);
+                {
+                    char cn[32];
+                    snprintf(cn, sizeof(cn), "conv_cache_%d", conv_idx);
+                    ggml_set_name(cached, cn);
+                    ggml_set_input(cached);
+                }
+                ggml_tensor* Bx_col = ggml_reshape_2d(ctx0, Bx_new, hidden, 1);
+                ggml_tensor* Bx_full = ggml_concat(ctx0, cached, Bx_col, 1); // (hidden, K)
+
+                // 3. Run depthwise conv on the K-length Bx sequence
+                // Same as lfm2_short_conv's conv section but with T=K
+                ggml_tensor* conv_w_f32 = ggml_cast(ctx0, w.conv_conv_w, GGML_TYPE_F32);
+                ggml_tensor* conv_w_4d = ggml_reshape_4d(ctx0, conv_w_f32, K, 1, 1, hidden);
+                ggml_tensor* Bx_t = ggml_cont(ctx0, ggml_transpose(ctx0, Bx_full)); // (K, hidden)
+                ggml_tensor* Bx_4d = ggml_reshape_4d(ctx0, Bx_t, K, 1, hidden, 1);
+                ggml_tensor* conv_raw = ggml_conv_2d_dw_direct(ctx0, conv_w_4d, Bx_4d, 1, 1, K - 1, 0, 1, 1);
+                // conv_raw shape: (K + K-1, 1, hidden, 1) = (2K-1, 1, hidden, 1)
+                // Permute to (hidden, 2K-1)
+                conv_raw = ggml_cont(ctx0, ggml_permute(ctx0, conv_raw, 1, 2, 0, 3));
+                int T_out = (int)conv_raw->ne[1];
+                conv_raw = ggml_reshape_2d(ctx0, conv_raw, hidden, T_out);
+                // Take the LAST column (position K-1 = the one corresponding
+                // to the new token with full causal context)
+                ggml_tensor* conv_out = ggml_view_2d(ctx0, conv_raw, hidden, 1, hidden * sizeof(float),
+                                                     (int64_t)(K - 1) * hidden * sizeof(float));
+                conv_out = ggml_cont(ctx0, conv_out);
+
+                // 4. y = C * conv_out, then out_proj
+                ggml_tensor* C_col = ggml_reshape_2d(ctx0, ggml_cont(ctx0, C_part), hidden, 1);
+                ggml_tensor* y = ggml_mul(ctx0, C_col, conv_out);
+                h = ggml_mul_mat(ctx0, w.conv_out_proj_w, y);
+
+                // 5. Snapshot Bx_new for state update
+                ggml_tensor* snap = ggml_dup(ctx0, Bx_new);
+                char sname[32];
+                snprintf(sname, sizeof(sname), "cs_%d", conv_idx);
+                ggml_set_name(snap, sname);
+                ggml_build_forward_expand(gf, snap);
+            }
+            conv_idx++;
+        }
+
+        x = ggml_add(ctx0, residual, h);
+
+        // FFN
+        residual = x;
+        h = lfm2_rms_norm(ctx0, x, w.ffn_norm_w, norm_eps);
+        h = lfm2_swiglu_ffn(ctx0, h, w.ff_w1, w.ff_w2, w.ff_w3);
+        x = ggml_add(ctx0, residual, h);
+    }
+
+    // Final RMSNorm
+    x = lfm2_rms_norm(ctx0, x, model.lfm_embedding_norm_w, norm_eps);
+
+    // Logits at last position
+    ggml_tensor* last = ggml_view_1d(ctx0, x, hidden, (int64_t)(T_in - 1) * hidden * sizeof(float));
+    ggml_tensor* logits = ggml_mul_mat(ctx0, model.lfm_embed_tokens_w, last);
+    ggml_tensor* out = ggml_dup(ctx0, logits);
+    ggml_set_name(out, "logits");
+
+    // Snap hidden state at last position for TTS/S2S
+    ggml_tensor* hid_snap = ggml_dup(ctx0, last);
+    ggml_set_name(hid_snap, "last_hidden");
+
+    ggml_build_forward_expand(gf, out);
+    ggml_build_forward_expand(gf, hid_snap);
+
+    // Allocate graph via gallocr — only allocates what's needed
+    ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(ctx->backend));
+    if (!ggml_gallocr_alloc_graph(galloc, gf)) {
+        ggml_gallocr_free(galloc);
+        ggml_free(ctx0);
+        return {};
+    }
+
+    // Set inputs via backend API (since no_alloc=true, ->data is on the backend)
+    ggml_backend_tensor_set(x, embeddings, 0, sizeof(float) * T_in * hidden);
+    {
+        std::vector<int32_t> pos_data(T_in);
+        for (int i = 0; i < T_in; i++)
+            pos_data[i] = n_past + i;
+        ggml_backend_tensor_set(positions, pos_data.data(), 0, T_in * sizeof(int32_t));
+    }
+    if (causal_mask) {
+        const int Lk = n_past + T_in;
+        std::vector<ggml_fp16_t> mask_data(Lk * T_in);
+        ggml_fp16_t zero = ggml_fp32_to_fp16(0.0f), neginf = ggml_fp32_to_fp16(-INFINITY);
+        for (int q = 0; q < T_in; q++)
+            for (int k = 0; k < Lk; k++)
+                mask_data[q * Lk + k] = (k <= n_past + q) ? zero : neginf;
+        ggml_backend_tensor_set(causal_mask, mask_data.data(), 0, mask_data.size() * sizeof(ggml_fp16_t));
+    }
+    // Set conv state inputs
+    if (T_in == 1) {
+        const int K = (int)model.hparams.lfm_conv_kernel;
+        int ci = 0;
+        for (uint32_t il = 0; il < model.hparams.lfm_n_layers; il++) {
+            if (model.lfm_layers[il].is_attention)
+                continue;
+            char cn[32];
+            snprintf(cn, sizeof(cn), "conv_cache_%d", ci);
+            ggml_tensor* ct = ggml_graph_get_tensor(gf, cn);
+            if (ct)
+                ggml_backend_tensor_set(ct, ctx->conv_states[ci].data(), 0, sizeof(float) * hidden * (K - 1));
+            ci++;
+        }
+    }
+
+    ggml_backend_graph_compute(ctx->backend, gf);
+
+    int vocab_size = (int)out->ne[0];
+    Lfm2StepResult result;
+    result.logits.resize(vocab_size);
+    result.hidden.resize(hidden);
+    ggml_backend_tensor_get(out, result.logits.data(), 0, sizeof(float) * vocab_size);
+    // Extract hidden state from last position
+    ggml_tensor* last_hid = ggml_graph_get_tensor(gf, "last_hidden");
+    if (last_hid)
+        ggml_backend_tensor_get(last_hid, result.hidden.data(), 0, sizeof(float) * hidden);
+
+    // Update conv state caches from graph snapshots
+    {
+        const int K = (int)hp.lfm_conv_kernel;
+        int ci = 0;
+        for (uint32_t il = 0; il < hp.lfm_n_layers; il++) {
+            if (model.lfm_layers[il].is_attention)
+                continue;
+            char sname[32];
+            snprintf(sname, sizeof(sname), "cs_%d", ci);
+            ggml_tensor* snap = ggml_graph_get_tensor(gf, sname);
+            if (snap) {
+                auto& state = ctx->conv_states[ci];
+                if (T_in > 1) {
+                    int snap_cols = (int)snap->ne[1];
+                    std::fill(state.begin(), state.end(), 0.0f);
+                    int offset = (K - 1) - snap_cols;
+                    if (offset < 0)
+                        offset = 0;
+                    ggml_backend_tensor_get(snap, state.data() + offset * hidden, 0,
+                                            sizeof(float) * snap_cols * hidden);
+                } else {
+                    memmove(state.data(), state.data() + hidden, sizeof(float) * hidden * ((K - 1) - 1));
+                    ggml_backend_tensor_get(snap, state.data() + hidden * ((K - 1) - 1), 0, sizeof(float) * hidden);
+                }
+            }
+            ci++;
+        }
+    }
+
+    ctx->kv_n_past += T_in;
+    ggml_gallocr_free(galloc);
+    ggml_free(ctx0);
+    return result;
+}
+
 char* lfm2_audio_transcribe(lfm2_audio_context* ctx, const float* samples, int n_samples, const char* prompt,
                             int max_tokens) {
     if (!ctx || !samples)
@@ -1018,270 +1304,10 @@ char* lfm2_audio_transcribe(lfm2_audio_context* ctx, const float* samples, int n
 
     // Helper: build graph, run backbone on T_in tokens starting at n_past,
     // return logits from the last position.
-    auto run_step = [&](const float* embeddings, int T_in) -> std::vector<float> {
-        const int n_past = ctx->kv_n_past;
-        const float norm_eps = 1e-5f;
-
-        // Use gallocr: build graph with no_alloc, then allocate exactly what's needed.
-        // This avoids the 2 GB fixed buffer and reduces memory pressure dramatically.
-        const size_t n_tensors_est = 2048;
-        ggml_init_params ip = {n_tensors_est * ggml_tensor_overhead() + ggml_graph_overhead_custom(65536, false),
-                               nullptr, true};
-        ggml_context* ctx0 = ggml_init(ip);
-        if (!ctx0)
-            return {};
-
-        ggml_tensor* x = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hidden, T_in);
-        ggml_set_name(x, "inp_emb");
-        ggml_set_input(x);
-
-        // Positions
-        ggml_tensor* positions = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, T_in);
-        ggml_set_name(positions, "inp_pos");
-        ggml_set_input(positions);
-
-        // Causal mask for prefill (T_in > 1); nullptr for single-token decode
-        ggml_tensor* causal_mask = nullptr;
-        if (T_in > 1) {
-            const int Lk = n_past + T_in;
-            causal_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, Lk, T_in);
-            ggml_set_name(causal_mask, "inp_mask");
-            ggml_set_input(causal_mask);
-        }
-
-        ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 65536, false);
-
-        int attn_idx = 0, conv_idx = 0;
-        const auto& hp = model.hparams;
-        const int n_heads = (int)hp.lfm_n_heads;
-        const int n_kv = (int)hp.lfm_n_kv_heads;
-        const int hd = (int)hp.lfm_head_dim;
-
-        for (uint32_t il = 0; il < hp.lfm_n_layers; il++) {
-            auto& w = model.lfm_layers[il];
-            ggml_tensor* residual = x;
-
-            // RMSNorm
-            ggml_tensor* h = lfm2_rms_norm(ctx0, x, w.operator_norm_w, norm_eps);
-
-            if (w.is_attention) {
-                // --- GQA attention with KV cache ---
-                core_attn::KvSelfAttnParams kvp = {};
-                kvp.head_dim = hd;
-                kvp.n_heads = n_heads;
-                kvp.n_kv_heads = n_kv;
-                kvp.n_kv_grp = n_heads / n_kv;
-                kvp.n_ctx_orig = 0;
-                kvp.rope_type = GGML_ROPE_TYPE_NEOX;
-                kvp.rope_theta = hp.lfm_rope_theta;
-                kvp.rope_beta_fast = 0.0f;
-                kvp.rope_beta_slow = 0.0f;
-                kvp.attn_scale = 1.0f / sqrtf((float)hd);
-                kvp.qk_norm_eps = norm_eps;
-                kvp.gqa_mode = core_attn::GQA_NATIVE;
-
-                h = core_attn::kv_self_attn(ctx0, gf, h, w.attn_q_proj_w, w.attn_k_proj_w, w.attn_v_proj_w,
-                                            w.attn_out_proj_w, w.attn_q_ln_w, w.attn_k_ln_w, positions, causal_mask,
-                                            ctx->kv_k, ctx->kv_v, attn_idx, n_past, kvp);
-                attn_idx++;
-            } else {
-                // --- ShortConv with conv state cache ---
-                const int K = (int)hp.lfm_conv_kernel; // 3
-
-                if (T_in > 1) {
-                    // PREFILL: run validated conv + snapshot last K-1 Bx columns
-                    // Compute Bx in a parallel branch (doesn't affect the main conv path)
-                    ggml_tensor* bcx_snap = ggml_mul_mat(ctx0, w.conv_in_proj_w, h);
-                    ggml_tensor* B_snap = ggml_view_2d(ctx0, bcx_snap, hidden, T_in, bcx_snap->nb[1], 0);
-                    ggml_tensor* x_snap =
-                        ggml_view_2d(ctx0, bcx_snap, hidden, T_in, bcx_snap->nb[1], 2 * hidden * sizeof(float));
-                    ggml_tensor* Bx_snap = ggml_mul(ctx0, ggml_cont(ctx0, B_snap), ggml_cont(ctx0, x_snap));
-                    // Take last K-1 columns
-                    int tail_start = T_in - (K - 1);
-                    if (tail_start < 0)
-                        tail_start = 0;
-                    int tail_len = T_in - tail_start;
-                    ggml_tensor* bx_tail = ggml_view_2d(ctx0, Bx_snap, hidden, tail_len, hidden * sizeof(float),
-                                                        (int64_t)tail_start * hidden * sizeof(float));
-                    ggml_tensor* snap = ggml_dup(ctx0, bx_tail);
-                    char sname[32];
-                    snprintf(sname, sizeof(sname), "cs_%d", conv_idx);
-                    ggml_set_name(snap, sname);
-                    ggml_build_forward_expand(gf, snap);
-
-                    // Main path: validated conv function
-                    h = lfm2_short_conv(ctx0, h, w, hidden, T_in);
-                } else {
-                    // DECODE (T=1): feed [cached_state | h] through the full
-                    // ShortConv, treating it as T=K input. The conv's causal
-                    // padding produces K outputs; we take the LAST one.
-                    //
-                    // This reuses the validated lfm2_short_conv path exactly,
-                    // so the conv math is guaranteed correct.
-
-                    // 1. in_proj the full K-token input
-                    // Build (hidden, K) input: [cached_h_col0, cached_h_col1, h_new]
-                    // BUT we don't have the cached pre-in_proj h — we have cached Bx.
-                    // The ShortConv computes: BCx=in_proj(h), B*x=Bx, conv(Bx), C*conv, out_proj.
-                    // We need to feed the cached Bx directly into the conv.
-                    //
-                    // So: compute in_proj for the new token only, get Bx_new.
-                    // Then assemble [cached_Bx | Bx_new], run conv, get output.
-
-                    ggml_tensor* bcx = ggml_mul_mat(ctx0, w.conv_in_proj_w, h);
-                    ggml_tensor* B_part = ggml_view_1d(ctx0, bcx, hidden, 0);
-                    ggml_tensor* C_part = ggml_view_1d(ctx0, bcx, hidden, hidden * sizeof(float));
-                    ggml_tensor* x_inner = ggml_view_1d(ctx0, bcx, hidden, 2 * hidden * sizeof(float));
-                    ggml_tensor* Bx_new = ggml_mul(ctx0, ggml_cont(ctx0, B_part), ggml_cont(ctx0, x_inner));
-
-                    // 2. Assemble full Bx sequence: [cached | new] = (hidden, K)
-                    ggml_tensor* cached = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hidden, K - 1);
-                    {
-                        char cn[32];
-                        snprintf(cn, sizeof(cn), "conv_cache_%d", conv_idx);
-                        ggml_set_name(cached, cn);
-                        ggml_set_input(cached);
-                    }
-                    ggml_tensor* Bx_col = ggml_reshape_2d(ctx0, Bx_new, hidden, 1);
-                    ggml_tensor* Bx_full = ggml_concat(ctx0, cached, Bx_col, 1); // (hidden, K)
-
-                    // 3. Run depthwise conv on the K-length Bx sequence
-                    // Same as lfm2_short_conv's conv section but with T=K
-                    ggml_tensor* conv_w_f32 = ggml_cast(ctx0, w.conv_conv_w, GGML_TYPE_F32);
-                    ggml_tensor* conv_w_4d = ggml_reshape_4d(ctx0, conv_w_f32, K, 1, 1, hidden);
-                    ggml_tensor* Bx_t = ggml_cont(ctx0, ggml_transpose(ctx0, Bx_full)); // (K, hidden)
-                    ggml_tensor* Bx_4d = ggml_reshape_4d(ctx0, Bx_t, K, 1, hidden, 1);
-                    ggml_tensor* conv_raw = ggml_conv_2d_dw_direct(ctx0, conv_w_4d, Bx_4d, 1, 1, K - 1, 0, 1, 1);
-                    // conv_raw shape: (K + K-1, 1, hidden, 1) = (2K-1, 1, hidden, 1)
-                    // Permute to (hidden, 2K-1)
-                    conv_raw = ggml_cont(ctx0, ggml_permute(ctx0, conv_raw, 1, 2, 0, 3));
-                    int T_out = (int)conv_raw->ne[1];
-                    conv_raw = ggml_reshape_2d(ctx0, conv_raw, hidden, T_out);
-                    // Take the LAST column (position K-1 = the one corresponding
-                    // to the new token with full causal context)
-                    ggml_tensor* conv_out = ggml_view_2d(ctx0, conv_raw, hidden, 1, hidden * sizeof(float),
-                                                         (int64_t)(K - 1) * hidden * sizeof(float));
-                    conv_out = ggml_cont(ctx0, conv_out);
-
-                    // 4. y = C * conv_out, then out_proj
-                    ggml_tensor* C_col = ggml_reshape_2d(ctx0, ggml_cont(ctx0, C_part), hidden, 1);
-                    ggml_tensor* y = ggml_mul(ctx0, C_col, conv_out);
-                    h = ggml_mul_mat(ctx0, w.conv_out_proj_w, y);
-
-                    // 5. Snapshot Bx_new for state update
-                    ggml_tensor* snap = ggml_dup(ctx0, Bx_new);
-                    char sname[32];
-                    snprintf(sname, sizeof(sname), "cs_%d", conv_idx);
-                    ggml_set_name(snap, sname);
-                    ggml_build_forward_expand(gf, snap);
-                }
-                conv_idx++;
-            }
-
-            x = ggml_add(ctx0, residual, h);
-
-            // FFN
-            residual = x;
-            h = lfm2_rms_norm(ctx0, x, w.ffn_norm_w, norm_eps);
-            h = lfm2_swiglu_ffn(ctx0, h, w.ff_w1, w.ff_w2, w.ff_w3);
-            x = ggml_add(ctx0, residual, h);
-        }
-
-        // Final RMSNorm
-        x = lfm2_rms_norm(ctx0, x, model.lfm_embedding_norm_w, norm_eps);
-
-        // Logits at last position
-        ggml_tensor* last = ggml_view_1d(ctx0, x, hidden, (int64_t)(T_in - 1) * hidden * sizeof(float));
-        ggml_tensor* logits = ggml_mul_mat(ctx0, model.lfm_embed_tokens_w, last);
-        ggml_tensor* out = ggml_dup(ctx0, logits);
-        ggml_set_name(out, "logits");
-
-        ggml_build_forward_expand(gf, out);
-
-        // Allocate graph via gallocr — only allocates what's needed
-        ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(ctx->backend));
-        if (!ggml_gallocr_alloc_graph(galloc, gf)) {
-            ggml_gallocr_free(galloc);
-            ggml_free(ctx0);
-            return {};
-        }
-
-        // Set inputs via backend API (since no_alloc=true, ->data is on the backend)
-        ggml_backend_tensor_set(x, embeddings, 0, sizeof(float) * T_in * hidden);
-        {
-            std::vector<int32_t> pos_data(T_in);
-            for (int i = 0; i < T_in; i++)
-                pos_data[i] = n_past + i;
-            ggml_backend_tensor_set(positions, pos_data.data(), 0, T_in * sizeof(int32_t));
-        }
-        if (causal_mask) {
-            const int Lk = n_past + T_in;
-            std::vector<ggml_fp16_t> mask_data(Lk * T_in);
-            ggml_fp16_t zero = ggml_fp32_to_fp16(0.0f), neginf = ggml_fp32_to_fp16(-INFINITY);
-            for (int q = 0; q < T_in; q++)
-                for (int k = 0; k < Lk; k++)
-                    mask_data[q * Lk + k] = (k <= n_past + q) ? zero : neginf;
-            ggml_backend_tensor_set(causal_mask, mask_data.data(), 0, mask_data.size() * sizeof(ggml_fp16_t));
-        }
-        // Set conv state inputs
-        if (T_in == 1) {
-            const int K = (int)model.hparams.lfm_conv_kernel;
-            int ci = 0;
-            for (uint32_t il = 0; il < model.hparams.lfm_n_layers; il++) {
-                if (model.lfm_layers[il].is_attention)
-                    continue;
-                char cn[32];
-                snprintf(cn, sizeof(cn), "conv_cache_%d", ci);
-                ggml_tensor* ct = ggml_graph_get_tensor(gf, cn);
-                if (ct)
-                    ggml_backend_tensor_set(ct, ctx->conv_states[ci].data(), 0, sizeof(float) * hidden * (K - 1));
-                ci++;
-            }
-        }
-
-        ggml_backend_graph_compute(ctx->backend, gf);
-
-        int vocab_size = (int)out->ne[0];
-        std::vector<float> result(vocab_size);
-        ggml_backend_tensor_get(out, result.data(), 0, sizeof(float) * vocab_size);
-
-        // Update conv state caches from graph snapshots
-        {
-            const int K = (int)hp.lfm_conv_kernel;
-            int ci = 0;
-            for (uint32_t il = 0; il < hp.lfm_n_layers; il++) {
-                if (model.lfm_layers[il].is_attention)
-                    continue;
-                char sname[32];
-                snprintf(sname, sizeof(sname), "cs_%d", ci);
-                ggml_tensor* snap = ggml_graph_get_tensor(gf, sname);
-                if (snap) {
-                    auto& state = ctx->conv_states[ci];
-                    if (T_in > 1) {
-                        int snap_cols = (int)snap->ne[1];
-                        std::fill(state.begin(), state.end(), 0.0f);
-                        int offset = (K - 1) - snap_cols;
-                        if (offset < 0)
-                            offset = 0;
-                        ggml_backend_tensor_get(snap, state.data() + offset * hidden, 0,
-                                                sizeof(float) * snap_cols * hidden);
-                    } else {
-                        memmove(state.data(), state.data() + hidden, sizeof(float) * hidden * ((K - 1) - 1));
-                        ggml_backend_tensor_get(snap, state.data() + hidden * ((K - 1) - 1), 0, sizeof(float) * hidden);
-                    }
-                }
-                ci++;
-            }
-        }
-
-        ctx->kv_n_past += T_in;
-        ggml_gallocr_free(galloc);
-        ggml_free(ctx0);
-        return result;
-    };
 
     // Phase A: Prefill — run full context through backbone
-    auto logits = run_step(context_emb.data(), T_context);
+    auto step_result = lfm2_backbone_step(ctx, context_emb.data(), T_context);
+    auto logits = step_result.logits;
     if (!logits.empty() && ctx->verbosity >= 1) {
         int top = 0;
         for (int i = 1; i < (int)logits.size(); i++)
@@ -1328,7 +1354,10 @@ char* lfm2_audio_transcribe(lfm2_audio_context* ctx, const float* samples, int n
         auto new_emb = embed_text({best_id});
         if (new_emb.empty())
             break;
-        logits = run_step(new_emb.data(), 1);
+        {
+            auto sr = lfm2_backbone_step(ctx, new_emb.data(), 1);
+            logits = sr.logits;
+        }
         if (logits.empty())
             break;
     }
@@ -2447,113 +2476,11 @@ float* lfm2_audio_synthesize(lfm2_audio_context* ctx, const char* text, const ch
     // Reuse the SAME cached backbone from the ASR transcribe path.
     ctx->reset_kv();
 
-    // Prefill: embed all text tokens and run through the cached backbone
-    auto prefill_result = [&]() -> std::pair<std::vector<float>, std::vector<float>> {
-        const int T = (int)all_tokens.size();
-        // Reuse the run_step from transcribe — same KV+conv cache pattern.
-        // We duplicate the code here to also return the hidden state.
-        ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), false};
-        ggml_context* ctx0 = ggml_init(ip);
-        if (!ctx0)
-            return {};
-
-        ggml_tensor* x = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hidden, T);
-        memcpy(x->data, text_emb.data(), sizeof(float) * T * hidden);
-        ggml_tensor* positions = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, T);
-        for (int i = 0; i < T; i++)
-            ((int32_t*)positions->data)[i] = i;
-        ggml_tensor* mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, T, T);
-        {
-            ggml_fp16_t *m = (ggml_fp16_t*)mask->data, z = ggml_fp32_to_fp16(0.0f), ni = ggml_fp32_to_fp16(-INFINITY);
-            for (int q = 0; q < T; q++)
-                for (int k = 0; k < T; k++)
-                    m[q * T + k] = (k <= q) ? z : ni;
-        }
-
-        ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 65536, false);
-        int ai = 0, ci = 0;
-        for (uint32_t il = 0; il < hp.lfm_n_layers; il++) {
-            auto& w = model.lfm_layers[il];
-            ggml_tensor* res = x;
-            ggml_tensor* h = lfm2_rms_norm(ctx0, x, w.operator_norm_w, 1e-5f);
-            if (w.is_attention) {
-                core_attn::KvSelfAttnParams kvp = {};
-                kvp.head_dim = (int)hp.lfm_head_dim;
-                kvp.n_heads = (int)hp.lfm_n_heads;
-                kvp.n_kv_heads = (int)hp.lfm_n_kv_heads;
-                kvp.n_kv_grp = kvp.n_heads / kvp.n_kv_heads;
-                kvp.rope_type = GGML_ROPE_TYPE_NEOX;
-                kvp.rope_theta = hp.lfm_rope_theta;
-                kvp.attn_scale = 1.0f / sqrtf((float)hp.lfm_head_dim);
-                kvp.qk_norm_eps = 1e-5f;
-                kvp.gqa_mode = core_attn::GQA_NATIVE;
-                h = core_attn::kv_self_attn(ctx0, gf, h, w.attn_q_proj_w, w.attn_k_proj_w, w.attn_v_proj_w,
-                                            w.attn_out_proj_w, w.attn_q_ln_w, w.attn_k_ln_w, positions, mask, ctx->kv_k,
-                                            ctx->kv_v, ai, 0, kvp);
-                ai++;
-            } else {
-                const int K = (int)hp.lfm_conv_kernel;
-                ggml_tensor* bc = ggml_mul_mat(ctx0, w.conv_in_proj_w, h);
-                ggml_tensor* Bs = ggml_view_2d(ctx0, bc, hidden, T, bc->nb[1], 0);
-                ggml_tensor* xs = ggml_view_2d(ctx0, bc, hidden, T, bc->nb[1], 2 * hidden * sizeof(float));
-                ggml_tensor* Bx = ggml_mul(ctx0, ggml_cont(ctx0, Bs), ggml_cont(ctx0, xs));
-                int tail = T - (K - 1);
-                if (tail < 0)
-                    tail = 0;
-                int tl = T - tail;
-                ggml_tensor* snap = ggml_dup(ctx0, ggml_view_2d(ctx0, Bx, hidden, tl, hidden * sizeof(float),
-                                                                (int64_t)tail * hidden * sizeof(float)));
-                char sn[16];
-                snprintf(sn, sizeof(sn), "cs_%d", ci);
-                ggml_set_name(snap, sn);
-                ggml_build_forward_expand(gf, snap);
-                h = lfm2_short_conv(ctx0, h, w, hidden, T);
-                ci++;
-            }
-            x = ggml_add(ctx0, res, h);
-            res = x;
-            h = lfm2_rms_norm(ctx0, x, w.ffn_norm_w, 1e-5f);
-            h = lfm2_swiglu_ffn(ctx0, h, w.ff_w1, w.ff_w2, w.ff_w3);
-            x = ggml_add(ctx0, res, h);
-        }
-        x = lfm2_rms_norm(ctx0, x, model.lfm_embedding_norm_w, 1e-5f);
-        ggml_tensor* last = ggml_view_1d(ctx0, x, hidden, (int64_t)(T - 1) * hidden * sizeof(float));
-        ggml_tensor* lg = ggml_dup(ctx0, ggml_mul_mat(ctx0, model.lfm_embed_tokens_w, last));
-        ggml_tensor* hd = ggml_dup(ctx0, last);
-        ggml_set_name(lg, "lg");
-        ggml_set_name(hd, "hd");
-        ggml_build_forward_expand(gf, lg);
-        ggml_build_forward_expand(gf, hd);
-        ggml_graph_compute_with_ctx(ctx0, gf, ctx->n_threads);
-        // Save conv states
-        ci = 0;
-        for (uint32_t il = 0; il < hp.lfm_n_layers; il++) {
-            if (model.lfm_layers[il].is_attention)
-                continue;
-            char sn[16];
-            snprintf(sn, sizeof(sn), "cs_%d", ci);
-            ggml_tensor* s = ggml_graph_get_tensor(gf, sn);
-            if (s) {
-                int sc = (int)s->ne[1];
-                auto& st = ctx->conv_states[ci];
-                std::fill(st.begin(), st.end(), 0.0f);
-                int off = (int)hp.lfm_conv_kernel - 1 - sc;
-                if (off < 0)
-                    off = 0;
-                memcpy(st.data() + off * hidden, s->data, sizeof(float) * sc * hidden);
-            }
-            ci++;
-        }
-        ctx->kv_n_past = T;
-        std::vector<float> rlg((int)lg->ne[0]);
-        memcpy(rlg.data(), lg->data, sizeof(float) * rlg.size());
-        std::vector<float> rhd(hidden);
-        memcpy(rhd.data(), hd->data, sizeof(float) * hidden);
-        ggml_free(ctx0);
-        return {rlg, rhd};
-    };
-
-    auto [logits, last_hidden] = prefill_result();
+    // Prefill: run all text tokens through cached backbone (gallocr, GPU-compatible)
+    ctx->reset_kv();
+    auto tts_step = lfm2_backbone_step(ctx, text_emb.data(), (int)all_tokens.size());
+    auto logits = tts_step.logits;
+    auto last_hidden = tts_step.hidden;
     if (logits.empty())
         return nullptr;
 
@@ -2831,29 +2758,42 @@ float* lfm2_audio_speech_to_speech(lfm2_audio_context* ctx, const float* in_samp
 
     // Step 3: Prefill cached backbone (same as TTS)
     ctx->reset_kv();
-    {
-        ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), false};
-        ggml_context* ctx0 = ggml_init(ip);
-        if (!ctx0)
-            return nullptr;
-        ggml_tensor* x = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hidden, T_total);
-        memcpy(x->data, context_emb.data(), sizeof(float) * T_total * hidden);
-        ggml_tensor* positions = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, T_total);
-        for (int i = 0; i < T_total; i++)
-            ((int32_t*)positions->data)[i] = i;
-        ggml_tensor* mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, T_total, T_total);
-        {
-            ggml_fp16_t *m = (ggml_fp16_t*)mask->data, z = ggml_fp32_to_fp16(0.0f), ni = ggml_fp32_to_fp16(-INFINITY);
-            for (int q = 0; q < T_total; q++)
-                for (int k = 0; k < T_total; k++)
-                    m[q * T_total + k] = (k <= q) ? z : ni;
-        }
-        ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 65536, false);
+    auto s2s_prefill = lfm2_backbone_step(ctx, context_emb.data(), T_total);
+    if (s2s_prefill.logits.empty())
+        return nullptr;
+
+    // Step 4: Interleaved decode (same loop as TTS synthesize)
+    auto argmax = [](const std::vector<float>& v) {
+        int b = 0;
+        for (int i = 1; i < (int)v.size(); i++)
+            if (v[i] > v[b])
+                b = i;
+        return b;
+    };
+    int cur_token = argmax(s2s_prefill.logits);
+    std::vector<float> cur_hidden = s2s_prefill.hidden;
+    enum { MOD_TEXT, MOD_AUDIO };
+    int cur_mod = MOD_TEXT, mod_left = n_text_budget;
+    bool text_done = false;
+    std::vector<std::vector<int32_t>> all_codes;
+    std::string transcript;
+
+    // Reuse the same backbone step1 lambda from synthesize — duplicate the pattern
+    auto step1 = [&](const float* emb) -> std::pair<std::vector<float>, std::vector<float>> {
+        ggml_init_params ip = {ctx->decode_meta.size(), ctx->decode_meta.data(), false};
+        ggml_context* c = ggml_init(ip);
+        if (!c)
+            return {};
+        ggml_tensor* x = ggml_new_tensor_2d(c, GGML_TYPE_F32, hidden, 1);
+        memcpy(x->data, emb, sizeof(float) * hidden);
+        ggml_tensor* pos = ggml_new_tensor_1d(c, GGML_TYPE_I32, 1);
+        *(int32_t*)pos->data = ctx->kv_n_past;
+        ggml_cgraph* gf = ggml_new_graph_custom(c, 65536, false);
         int ai = 0, ci = 0;
         for (uint32_t il = 0; il < hp.lfm_n_layers; il++) {
             auto& w = model.lfm_layers[il];
             ggml_tensor* res = x;
-            ggml_tensor* h = lfm2_rms_norm(ctx0, x, w.operator_norm_w, 1e-5f);
+            ggml_tensor* h = lfm2_rms_norm(c, x, w.operator_norm_w, 1e-5f);
             if (w.is_attention) {
                 core_attn::KvSelfAttnParams kvp = {};
                 kvp.head_dim = (int)hp.lfm_head_dim;
@@ -2865,45 +2805,52 @@ float* lfm2_audio_speech_to_speech(lfm2_audio_context* ctx, const float* in_samp
                 kvp.attn_scale = 1.0f / sqrtf((float)hp.lfm_head_dim);
                 kvp.qk_norm_eps = 1e-5f;
                 kvp.gqa_mode = core_attn::GQA_NATIVE;
-                h = core_attn::kv_self_attn(ctx0, gf, h, w.attn_q_proj_w, w.attn_k_proj_w, w.attn_v_proj_w,
-                                            w.attn_out_proj_w, w.attn_q_ln_w, w.attn_k_ln_w, positions, mask, ctx->kv_k,
-                                            ctx->kv_v, ai, 0, kvp);
+                h = core_attn::kv_self_attn(c, gf, h, w.attn_q_proj_w, w.attn_k_proj_w, w.attn_v_proj_w,
+                                            w.attn_out_proj_w, w.attn_q_ln_w, w.attn_k_ln_w, pos, nullptr, ctx->kv_k,
+                                            ctx->kv_v, ai, ctx->kv_n_past, kvp);
                 ai++;
             } else {
                 const int K = (int)hp.lfm_conv_kernel;
-                ggml_tensor* bc = ggml_mul_mat(ctx0, w.conv_in_proj_w, h);
-                ggml_tensor* Bs = ggml_view_2d(ctx0, bc, hidden, T_total, bc->nb[1], 0);
-                ggml_tensor* xs = ggml_view_2d(ctx0, bc, hidden, T_total, bc->nb[1], 2 * hidden * sizeof(float));
-                ggml_tensor* Bx = ggml_mul(ctx0, ggml_cont(ctx0, Bs), ggml_cont(ctx0, xs));
-                int tail = T_total - (K - 1);
-                if (tail < 0)
-                    tail = 0;
-                int tl = T_total - tail;
-                ggml_tensor* snap = ggml_dup(ctx0, ggml_view_2d(ctx0, Bx, hidden, tl, hidden * sizeof(float),
-                                                                (int64_t)tail * hidden * sizeof(float)));
+                ggml_tensor* bc = ggml_mul_mat(c, w.conv_in_proj_w, h);
+                ggml_tensor* Bp = ggml_view_1d(c, bc, hidden, 0);
+                ggml_tensor* Cp = ggml_view_1d(c, bc, hidden, hidden * sizeof(float));
+                ggml_tensor* xp = ggml_view_1d(c, bc, hidden, 2 * hidden * sizeof(float));
+                ggml_tensor* Bx = ggml_mul(c, ggml_cont(c, Bp), ggml_cont(c, xp));
+                ggml_tensor* cached = ggml_new_tensor_2d(c, GGML_TYPE_F32, hidden, K - 1);
+                memcpy(cached->data, ctx->conv_states[ci].data(), sizeof(float) * hidden * (K - 1));
+                ggml_tensor* Bxf = ggml_concat(c, cached, ggml_reshape_2d(c, Bx, hidden, 1), 1);
+                ggml_tensor* cw = ggml_cast(c, w.conv_conv_w, GGML_TYPE_F32);
+                ggml_tensor* cw4 = ggml_reshape_4d(c, cw, K, 1, 1, hidden);
+                ggml_tensor* Bt = ggml_cont(c, ggml_transpose(c, Bxf));
+                ggml_tensor* B4 = ggml_reshape_4d(c, Bt, K, 1, hidden, 1);
+                ggml_tensor* cr = ggml_conv_2d_dw_direct(c, cw4, B4, 1, 1, K - 1, 0, 1, 1);
+                cr = ggml_cont(c, ggml_permute(c, cr, 1, 2, 0, 3));
+                cr = ggml_reshape_2d(c, cr, hidden, (int)cr->ne[1]);
+                ggml_tensor* co = ggml_cont(c, ggml_view_2d(c, cr, hidden, 1, hidden * sizeof(float),
+                                                            (int64_t)(K - 1) * hidden * sizeof(float)));
+                ggml_tensor* y = ggml_mul(c, ggml_reshape_2d(c, ggml_cont(c, Cp), hidden, 1), co);
+                h = ggml_mul_mat(c, w.conv_out_proj_w, y);
+                ggml_tensor* snap = ggml_dup(c, Bx);
                 char sn[16];
                 snprintf(sn, sizeof(sn), "cs_%d", ci);
                 ggml_set_name(snap, sn);
                 ggml_build_forward_expand(gf, snap);
-                h = lfm2_short_conv(ctx0, h, w, hidden, T_total);
                 ci++;
             }
-            x = ggml_add(ctx0, res, h);
+            x = ggml_add(c, res, h);
             res = x;
-            h = lfm2_rms_norm(ctx0, x, w.ffn_norm_w, 1e-5f);
-            h = lfm2_swiglu_ffn(ctx0, h, w.ff_w1, w.ff_w2, w.ff_w3);
-            x = ggml_add(ctx0, res, h);
+            h = lfm2_rms_norm(c, x, w.ffn_norm_w, 1e-5f);
+            h = lfm2_swiglu_ffn(c, h, w.ff_w1, w.ff_w2, w.ff_w3);
+            x = ggml_add(c, res, h);
         }
-        x = lfm2_rms_norm(ctx0, x, model.lfm_embedding_norm_w, 1e-5f);
-        ggml_tensor* last = ggml_view_1d(ctx0, x, hidden, (int64_t)(T_total - 1) * hidden * sizeof(float));
-        ggml_tensor* lg = ggml_dup(ctx0, ggml_mul_mat(ctx0, model.lfm_embed_tokens_w, last));
-        ggml_tensor* hd = ggml_dup(ctx0, last);
+        x = lfm2_rms_norm(c, x, model.lfm_embedding_norm_w, 1e-5f);
+        ggml_tensor* lg = ggml_dup(c, ggml_mul_mat(c, model.lfm_embed_tokens_w, x));
+        ggml_tensor* hd = ggml_dup(c, x);
         ggml_set_name(lg, "lg");
         ggml_set_name(hd, "hd");
         ggml_build_forward_expand(gf, lg);
         ggml_build_forward_expand(gf, hd);
-        ggml_graph_compute_with_ctx(ctx0, gf, ctx->n_threads);
-        // Save conv states
+        ggml_graph_compute_with_ctx(c, gf, ctx->n_threads);
         ci = 0;
         for (uint32_t il = 0; il < hp.lfm_n_layers; il++) {
             if (model.lfm_layers[il].is_attention)
@@ -2912,205 +2859,88 @@ float* lfm2_audio_speech_to_speech(lfm2_audio_context* ctx, const float* in_samp
             snprintf(sn, sizeof(sn), "cs_%d", ci);
             ggml_tensor* s = ggml_graph_get_tensor(gf, sn);
             if (s) {
-                int sc = (int)s->ne[1];
                 auto& st = ctx->conv_states[ci];
-                std::fill(st.begin(), st.end(), 0.0f);
-                int off = (int)hp.lfm_conv_kernel - 1 - sc;
-                if (off < 0)
-                    off = 0;
-                memcpy(st.data() + off * hidden, s->data, sizeof(float) * sc * hidden);
+                memmove(st.data(), st.data() + hidden, sizeof(float) * hidden * ((int)hp.lfm_conv_kernel - 2));
+                memcpy(st.data() + hidden * ((int)hp.lfm_conv_kernel - 2), s->data, sizeof(float) * hidden);
             }
             ci++;
         }
-        ctx->kv_n_past = T_total;
+        ctx->kv_n_past++;
+        std::vector<float> rlg((int)lg->ne[0]);
+        memcpy(rlg.data(), lg->data, sizeof(float) * rlg.size());
+        std::vector<float> rhd(hidden);
+        memcpy(rhd.data(), hd->data, sizeof(float) * hidden);
+        ggml_free(c);
+        return {rlg, rhd};
+    };
 
-        // Get initial logits + hidden
-        std::vector<float> logits_v((int)lg->ne[0]);
-        memcpy(logits_v.data(), lg->data, sizeof(float) * logits_v.size());
-        std::vector<float> hidden_v(hidden);
-        memcpy(hidden_v.data(), hd->data, sizeof(float) * hidden);
-        ggml_free(ctx0);
-
-        // Step 4: Interleaved decode (same loop as TTS synthesize)
-        auto argmax = [](const std::vector<float>& v) {
-            int b = 0;
-            for (int i = 1; i < (int)v.size(); i++)
-                if (v[i] > v[b])
-                    b = i;
-            return b;
-        };
-        int cur_token = argmax(logits_v);
-        std::vector<float> cur_hidden = hidden_v;
-        enum { MOD_TEXT, MOD_AUDIO };
-        int cur_mod = MOD_TEXT, mod_left = n_text_budget;
-        bool text_done = false;
-        std::vector<std::vector<int32_t>> all_codes;
-        std::string transcript;
-
-        // Reuse the same backbone step1 lambda from synthesize — duplicate the pattern
-        auto step1 = [&](const float* emb) -> std::pair<std::vector<float>, std::vector<float>> {
-            ggml_init_params ip = {ctx->decode_meta.size(), ctx->decode_meta.data(), false};
-            ggml_context* c = ggml_init(ip);
-            if (!c)
-                return {};
-            ggml_tensor* x = ggml_new_tensor_2d(c, GGML_TYPE_F32, hidden, 1);
-            memcpy(x->data, emb, sizeof(float) * hidden);
-            ggml_tensor* pos = ggml_new_tensor_1d(c, GGML_TYPE_I32, 1);
-            *(int32_t*)pos->data = ctx->kv_n_past;
-            ggml_cgraph* gf = ggml_new_graph_custom(c, 65536, false);
-            int ai = 0, ci = 0;
-            for (uint32_t il = 0; il < hp.lfm_n_layers; il++) {
-                auto& w = model.lfm_layers[il];
-                ggml_tensor* res = x;
-                ggml_tensor* h = lfm2_rms_norm(c, x, w.operator_norm_w, 1e-5f);
-                if (w.is_attention) {
-                    core_attn::KvSelfAttnParams kvp = {};
-                    kvp.head_dim = (int)hp.lfm_head_dim;
-                    kvp.n_heads = (int)hp.lfm_n_heads;
-                    kvp.n_kv_heads = (int)hp.lfm_n_kv_heads;
-                    kvp.n_kv_grp = kvp.n_heads / kvp.n_kv_heads;
-                    kvp.rope_type = GGML_ROPE_TYPE_NEOX;
-                    kvp.rope_theta = hp.lfm_rope_theta;
-                    kvp.attn_scale = 1.0f / sqrtf((float)hp.lfm_head_dim);
-                    kvp.qk_norm_eps = 1e-5f;
-                    kvp.gqa_mode = core_attn::GQA_NATIVE;
-                    h = core_attn::kv_self_attn(c, gf, h, w.attn_q_proj_w, w.attn_k_proj_w, w.attn_v_proj_w,
-                                                w.attn_out_proj_w, w.attn_q_ln_w, w.attn_k_ln_w, pos, nullptr,
-                                                ctx->kv_k, ctx->kv_v, ai, ctx->kv_n_past, kvp);
-                    ai++;
-                } else {
-                    const int K = (int)hp.lfm_conv_kernel;
-                    ggml_tensor* bc = ggml_mul_mat(c, w.conv_in_proj_w, h);
-                    ggml_tensor* Bp = ggml_view_1d(c, bc, hidden, 0);
-                    ggml_tensor* Cp = ggml_view_1d(c, bc, hidden, hidden * sizeof(float));
-                    ggml_tensor* xp = ggml_view_1d(c, bc, hidden, 2 * hidden * sizeof(float));
-                    ggml_tensor* Bx = ggml_mul(c, ggml_cont(c, Bp), ggml_cont(c, xp));
-                    ggml_tensor* cached = ggml_new_tensor_2d(c, GGML_TYPE_F32, hidden, K - 1);
-                    memcpy(cached->data, ctx->conv_states[ci].data(), sizeof(float) * hidden * (K - 1));
-                    ggml_tensor* Bxf = ggml_concat(c, cached, ggml_reshape_2d(c, Bx, hidden, 1), 1);
-                    ggml_tensor* cw = ggml_cast(c, w.conv_conv_w, GGML_TYPE_F32);
-                    ggml_tensor* cw4 = ggml_reshape_4d(c, cw, K, 1, 1, hidden);
-                    ggml_tensor* Bt = ggml_cont(c, ggml_transpose(c, Bxf));
-                    ggml_tensor* B4 = ggml_reshape_4d(c, Bt, K, 1, hidden, 1);
-                    ggml_tensor* cr = ggml_conv_2d_dw_direct(c, cw4, B4, 1, 1, K - 1, 0, 1, 1);
-                    cr = ggml_cont(c, ggml_permute(c, cr, 1, 2, 0, 3));
-                    cr = ggml_reshape_2d(c, cr, hidden, (int)cr->ne[1]);
-                    ggml_tensor* co = ggml_cont(c, ggml_view_2d(c, cr, hidden, 1, hidden * sizeof(float),
-                                                                (int64_t)(K - 1) * hidden * sizeof(float)));
-                    ggml_tensor* y = ggml_mul(c, ggml_reshape_2d(c, ggml_cont(c, Cp), hidden, 1), co);
-                    h = ggml_mul_mat(c, w.conv_out_proj_w, y);
-                    ggml_tensor* snap = ggml_dup(c, Bx);
-                    char sn[16];
-                    snprintf(sn, sizeof(sn), "cs_%d", ci);
-                    ggml_set_name(snap, sn);
-                    ggml_build_forward_expand(gf, snap);
-                    ci++;
-                }
-                x = ggml_add(c, res, h);
-                res = x;
-                h = lfm2_rms_norm(c, x, w.ffn_norm_w, 1e-5f);
-                h = lfm2_swiglu_ffn(c, h, w.ff_w1, w.ff_w2, w.ff_w3);
-                x = ggml_add(c, res, h);
+    for (int step = 0; step < 1000; step++) {
+        mod_left--;
+        if (cur_mod == MOD_TEXT) {
+            if (cur_token == kTokenImEnd || cur_token == 2)
+                break;
+            if (cur_token == kTokenTextEnd)
+                text_done = true;
+            if (mod_left <= 0 || text_done) {
+                cur_mod = MOD_AUDIO;
+                mod_left = n_audio_budget;
             }
-            x = lfm2_rms_norm(c, x, model.lfm_embedding_norm_w, 1e-5f);
-            ggml_tensor* lg = ggml_dup(c, ggml_mul_mat(c, model.lfm_embed_tokens_w, x));
-            ggml_tensor* hd = ggml_dup(c, x);
-            ggml_set_name(lg, "lg");
-            ggml_set_name(hd, "hd");
-            ggml_build_forward_expand(gf, lg);
-            ggml_build_forward_expand(gf, hd);
-            ggml_graph_compute_with_ctx(c, gf, ctx->n_threads);
-            ci = 0;
-            for (uint32_t il = 0; il < hp.lfm_n_layers; il++) {
-                if (model.lfm_layers[il].is_attention)
-                    continue;
-                char sn[16];
-                snprintf(sn, sizeof(sn), "cs_%d", ci);
-                ggml_tensor* s = ggml_graph_get_tensor(gf, sn);
-                if (s) {
-                    auto& st = ctx->conv_states[ci];
-                    memmove(st.data(), st.data() + hidden, sizeof(float) * hidden * ((int)hp.lfm_conv_kernel - 2));
-                    memcpy(st.data() + hidden * ((int)hp.lfm_conv_kernel - 2), s->data, sizeof(float) * hidden);
-                }
-                ci++;
+            // Collect text for transcript
+            std::string piece = decode_token(model, cur_token);
+            transcript += piece;
+            auto te = embed_text_fn({cur_token});
+            if (te.empty())
+                break;
+            auto [lg, hd] = step1(te.data());
+            if (lg.empty())
+                break;
+            cur_token = argmax(lg);
+            cur_hidden = hd;
+        } else {
+            auto codes = lfm2_depthformer_sample_frame(ctx, cur_hidden.data());
+            if (codes.empty())
+                break;
+            if (codes[0] == 2048)
+                break;
+            all_codes.push_back(codes);
+            if (mod_left <= 0 && !text_done) {
+                cur_mod = MOD_TEXT;
+                mod_left = n_text_budget;
             }
-            ctx->kv_n_past++;
-            std::vector<float> rlg((int)lg->ne[0]);
-            memcpy(rlg.data(), lg->data, sizeof(float) * rlg.size());
-            std::vector<float> rhd(hidden);
-            memcpy(rhd.data(), hd->data, sizeof(float) * hidden);
-            ggml_free(c);
-            return {rlg, rhd};
-        };
-
-        for (int step = 0; step < 1000; step++) {
-            mod_left--;
-            if (cur_mod == MOD_TEXT) {
-                if (cur_token == kTokenImEnd || cur_token == 2)
-                    break;
-                if (cur_token == kTokenTextEnd)
-                    text_done = true;
-                if (mod_left <= 0 || text_done) {
-                    cur_mod = MOD_AUDIO;
-                    mod_left = n_audio_budget;
-                }
-                // Collect text for transcript
-                std::string piece = decode_token(model, cur_token);
-                transcript += piece;
-                auto te = embed_text_fn({cur_token});
-                if (te.empty())
-                    break;
-                auto [lg, hd] = step1(te.data());
-                if (lg.empty())
-                    break;
-                cur_token = argmax(lg);
-                cur_hidden = hd;
-            } else {
-                auto codes = lfm2_depthformer_sample_frame(ctx, cur_hidden.data());
-                if (codes.empty())
-                    break;
-                if (codes[0] == 2048)
-                    break;
-                all_codes.push_back(codes);
-                if (mod_left <= 0 && !text_done) {
-                    cur_mod = MOD_TEXT;
-                    mod_left = n_text_budget;
-                }
-                auto ae = lfm2_embed_audio_codes(ctx, codes);
-                if (ae.empty())
-                    break;
-                auto [lg, hd] = step1(ae.data());
-                if (lg.empty())
-                    break;
-                cur_token = argmax(lg);
-                cur_hidden = hd;
-            }
+            auto ae = lfm2_embed_audio_codes(ctx, codes);
+            if (ae.empty())
+                break;
+            auto [lg, hd] = step1(ae.data());
+            if (lg.empty())
+                break;
+            cur_token = argmax(lg);
+            cur_hidden = hd;
         }
-
-        if (ctx->verbosity >= 1)
-            fprintf(stderr, "lfm2-audio: S2S generated %zu audio frames, transcript: %s\n", all_codes.size(),
-                    transcript.c_str());
-
-        // Return transcript if requested
-        if (out_text && !transcript.empty()) {
-            *out_text = (char*)malloc(transcript.size() + 1);
-            memcpy(*out_text, transcript.c_str(), transcript.size());
-            (*out_text)[transcript.size()] = '\0';
-        }
-
-        // Decode audio codes → PCM
-        if (all_codes.empty()) {
-            if (out_n_samples)
-                *out_n_samples = 0;
-            return nullptr;
-        }
-        float* pcm = lfm2_detokenize(ctx, all_codes, out_n_samples);
-        if (!pcm) {
-            const int total = (int)all_codes.size() * 1920;
-            pcm = (float*)calloc(total, sizeof(float));
-            if (out_n_samples)
-                *out_n_samples = total;
-        }
-        return pcm;
     }
+
+    if (ctx->verbosity >= 1)
+        fprintf(stderr, "lfm2-audio: S2S generated %zu audio frames, transcript: %s\n", all_codes.size(),
+                transcript.c_str());
+
+    // Return transcript if requested
+    if (out_text && !transcript.empty()) {
+        *out_text = (char*)malloc(transcript.size() + 1);
+        memcpy(*out_text, transcript.c_str(), transcript.size());
+        (*out_text)[transcript.size()] = '\0';
+    }
+
+    // Decode audio codes → PCM
+    if (all_codes.empty()) {
+        if (out_n_samples)
+            *out_n_samples = 0;
+        return nullptr;
+    }
+    float* pcm = lfm2_detokenize(ctx, all_codes, out_n_samples);
+    if (!pcm) {
+        const int total = (int)all_codes.size() * 1920;
+        pcm = (float*)calloc(total, sizeof(float));
+        if (out_n_samples)
+            *out_n_samples = total;
+    }
+    return pcm;
 }
