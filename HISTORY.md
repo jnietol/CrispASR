@@ -6,6 +6,22 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-06-12 §164 Mini-Omni2 — full ASR+TTS+S2S backend
+
+New multimodal speech backend: Whisper-small (80 mel, 12L, 768d) +
+whisperMLP SwiGLU adapter (768→4864→896) + Qwen2-0.5B LLM (896d, 24L,
+GQA 14/2, RoPE θ=1M). ASR, TTS (SNAC 24kHz), and speech-to-speech.
+
+Diff-validated: mel, encoder, adapter all cos_min=1.000. All 3 quants
+(F16/Q8_0/Q4_K) produce identical ASR transcripts. Uploaded to
+`cstr/mini-omni2-GGUF`. Also refactored SNAC to `core/snac.{h,cpp}`.
+
+Key discoveries: 400-point DFT (not 512), periodic Hann window, `_asr`
+token for transcription mode, `pad_a` not `eoa` for decode, audio features
+in streams 0-6 only, LitGPT fused QKV interleaved per query group.
+
+10 commits, 13 files, ~2500 LOC. See PLAN §164.
+
 ## 2026-06-11 #161 / #155 / #152 confirmed on CUDA (RTX A1000 4 GB, Windows) + #125 firered repro
 
 The #161 and #155 fixes were code-correct but their CUDA wall-clock wins were

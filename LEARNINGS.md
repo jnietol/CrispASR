@@ -10,6 +10,37 @@ If a lesson is still "live" (affects current work), it's linked from
 
 ---
 
+## FFT size must match upstream exactly (Mini-Omni2 / Whisper mel)
+
+Whisper's `torch.stft(n_fft=400)` runs a 400-point DFT. Zero-padding to
+512 (next power of 2) changes the frequency bin spacing from `k*sr/400`
+to `k*sr/512`. The mel filterbank expects bins at `k*40 Hz`; zero-padded
+bins land at `k*31.25 Hz`. Result: cos_min≈0.8 on mel comparison. Fix:
+use a 400-point DFT directly (O(N*N_freqs) is fast enough for N=400).
+
+Related: `torch.hann_window(N)` (periodic) differs from
+`np.hanning(N+1)[:-1]` (symmetric) by ~2.4e-7 per sample. Enough to
+cause cos_min≈0.95 on mel. Store the upstream variant in the GGUF.
+
+Also: Whisper drops the last STFT frame (`stft[..., :-1]`). core_mel
+produces one extra frame. Truncate: `T_mel = n_samples / hop_length`.
+
+## Multi-stream token architecture (Mini-Omni2)
+
+Models that interleave text + audio codec streams (8 in mini-omni2) embed
+each stream separately and average all 8 into a single hidden state per
+timestep. Key pitfalls:
+
+1. Audio features replace pad positions in **audio streams only** (0-6),
+   NOT the text stream (7). The Python `concat_feat` does `for i in range(7)`.
+2. Special task tokens at the end of each stream select the mode:
+   `_asr=151940` for transcription, `_answer_t` for chat/S2S.
+3. Decode step uses `snac_config.end_of_audio=4097` (pad_a), not `eoa=4096`.
+4. LitGPT's fused QKV is interleaved per query group: `[Q0×7, K0, V0, Q1×7,
+   K1, V1]`, not `[Q_all, K_all, V_all]`. Must deinterleave in converter.
+5. Batch all 8 token embeddings in one `ggml_get_rows` call per decode step
+   instead of 8 separate graph builds — ~4× speedup.
+
 ## Decompose ConvTranspose1d → mul_mat + col2im_1d; port col2im per-backend (#155)
 
 The native `conv_transpose_1d` GPU kernel is slow (each output thread loops the

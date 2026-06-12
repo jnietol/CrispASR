@@ -5525,3 +5525,61 @@ all working, fully wired per `docs/contributing.md`, Kaggle GPU-tested.
 - [x] `tools/kaggle/lfm2-audio-gpu-test/` — Kaggle GPU kernel
 - [x] HF repos: `cstr/lfm2-audio-1.5b-GGUF`, `cstr/lfm2-audio-1.5b-jp-GGUF`
 
+
+## §164 Mini-Omni2 — ASR + TTS + S2S (DONE)
+
+**Status**: Complete. 10 commits `4b87893e`–`9104eafa`. ASR + TTS + S2S
+all working, fully wired per `docs/contributing.md`, Kaggle-converted,
+uploaded to `cstr/mini-omni2-GGUF`.
+
+Architecture: Whisper-small (80 mel, 12L, 768d) + whisperMLP SwiGLU adapter
+(768→4864→896) + Qwen2-0.5B LLM (896d, 24L, GQA 14/2, RoPE θ=1M).
+
+### ASR — DONE
+
+- Diff-validated: mel cos_min=1.000, encoder cos_min=1.000, adapter cos_min=1.000
+- Uses `_asr` token (151940) for pure transcription mode
+- JFK 11s: "and so my fellow americans ask not what your country can do
+  for you ask what you can do for your country"
+- 8-stream averaging with audio features in streams 0-6 only
+
+### TTS — DONE
+
+- BPE tokenizer via `core/bpe.h` (151387 merge rules from tokenizer.json)
+- 7-stream SNAC token generation + deinterleave to 3 codebooks
+- SNAC 24kHz decoder via `core/snac.h` (shared with orpheus)
+- Verified: "Hi" → 102400 samples @ 24kHz (4.27s) WAV output
+
+### S2S — DONE
+
+- Audio in → Whisper encoder → adapter → 8-stream LLM → SNAC decode
+- Verified: JFK → 102400 samples + text "I cannot do that."
+
+### Quantization — DONE
+
+- F16 1.46 GiB, Q8_0 1.15 GiB, Q4_K 0.99 GiB — all identical ASR
+- Encoder/adapter/embeddings kept at F16 in quantizer
+- Kaggle kernel: convert + quantize + diff-test + HF upload
+
+### Wiring — DONE
+
+- [x] `src/mini_omni2.{h,cpp}` — C runtime (ASR/TTS/S2S/set_ask/load_snac)
+- [x] `examples/cli/crispasr_backend_mini_omni2.cpp` — CLI adapter (CAP_TTS)
+- [x] `examples/cli/crispasr_backend.cpp` — factory + auto-detection
+- [x] `src/crispasr_c_api.cpp` — session API (init/transcribe/synthesize/free/set_ask)
+- [x] `src/crispasr_model_registry.cpp` — Q4_K auto-download + SNAC companion
+- [x] `examples/crispasr-quantize/main.cpp` — tensor protection rules
+- [x] `tools/reference_backends/mini_omni2.py` + `tools/dump_reference.py`
+- [x] `examples/cli/crispasr_diff_main.cpp` — diff harness (mel/enc/adapter/transcribe/s2s)
+- [x] `models/convert-mini-omni2-to-gguf.py` — converter (litgpt + whisper + BPE)
+- [x] `README.md` + `docs/architecture.md` — documentation
+- [x] `tests/test_mini_omni2_live.cpp` + `tests/env-live-tests.sh` — 3 live tests
+- [x] `tests/test_snac_unit.cpp` — 3 unit + 3 live SNAC tests
+- [x] `tools/kaggle/mini-omni2-convert/` — Kaggle conversion kernel
+- [x] HF repo: `cstr/mini-omni2-GGUF` (F16 + Q8_0 + Q4_K)
+
+### SNAC reorg — DONE
+
+- Moved `orpheus_snac.{h,cpp}` → `core/snac.{h,cpp}` as standalone target
+- Shared by orpheus and mini-omni2 (was orpheus-only)
+- `orpheus_snac.h` remains as thin redirect for compat
