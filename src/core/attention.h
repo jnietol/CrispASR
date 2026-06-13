@@ -752,8 +752,15 @@ static inline ggml_tensor* kv_self_attn(ggml_context* ctx0, ggml_cgraph* gf, ggm
     }
 
     // ---- Permute new K/V to (hd, T, n_kv) for cache write ----
-    ggml_tensor* K_new_perm = ggml_permute(ctx0, K, 0, 2, 1, 3);
-    ggml_tensor* V_new_perm = ggml_permute(ctx0, V, 0, 2, 1, 3);
+    // ggml_cont after permute ensures the tensor is fully contiguous.
+    // Without cont, the permuted view has swapped strides that cause
+    // ggml_set_rows on CUDA to SIGABRT (the kernel's stride arithmetic
+    // assumes contiguous source rows, but the swapped nb[1]/nb[2] from
+    // the permute can cause out-of-bounds writes). The ggml_cpy path
+    // works without cont because the destination view fully specifies
+    // the layout, but ggml_set_rows reads src with its own strides.
+    ggml_tensor* K_new_perm = ggml_cont(ctx0, ggml_permute(ctx0, K, 0, 2, 1, 3));
+    ggml_tensor* V_new_perm = ggml_cont(ctx0, ggml_permute(ctx0, V, 0, 2, 1, 3));
 
     // ---- Write into the persistent KV cache at [n_past, n_past+T) ----
     // The default ggml_cpy(F32, slice-of-cache) path requires the
