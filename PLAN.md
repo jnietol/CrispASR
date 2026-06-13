@@ -97,13 +97,28 @@ test-all-backends.py passes 18/18 transcribe + 51/54 feature tests (3 stream ski
 
 ---
 
-## §165 Server fails to launch on Vulkan build (GitHub #165) — OPEN tail
+## §165 Server fails to launch on Vulkan build (GitHub #165) — RESOLVED; perf follow-ups
 
-`--no-warmup` opt-out + guarded warmup + two server-robustness fixes shipped
-2026-06-13 (see HISTORY). **Open:** reporter to confirm `--no-warmup` unblocks
-them on the AMD Radeon 780M Vulkan build (could not reproduce on M1/MoltenVK). If
-a specific parakeet warmup op crashes their RADV/proprietary driver, a minimal
-Vulkan repro + upstream report would be the proper fix.
+Launch bug **fixed + reporter-confirmed**: `--no-warmup` opt-out + guarded warmup
+(see HISTORY 2026-06-13). The AMD Radeon 780M Vulkan server now launches and
+serves. The reporter then profiled server-vs-CLI speed; two follow-ups remain:
+
+1. **Server long-audio slicing is coarser than the CLI.** On a 2-min clip the CLI
+   makes 2 slices (19.0×) but the server makes 4 fixed ~30 s slices (16.6×) — same
+   VAD segments, but the server's `crispasr_compute_audio_slices` cuts fixed
+   `chunk_seconds=30` while the CLI consolidates VAD segments into fewer/larger
+   slices. More slices ⇒ more boundary-overlap recompute ⇒ ~11 % slower.
+   **Workaround:** per-request `chunk_seconds=120` (param now exists). **Proper
+   fix:** make the server slicing VAD-segment-aware (consolidate like the CLI) or
+   align the default chunk size.
+2. **LID resident — DONE** (`crispasr_lid_free_cache` moved to shutdown; LID model
+   loads once, not per request). VAD was already resident (#132). Smaller
+   remaining bit: the silero/firered/ecapa LID backends `_init`/`_free` inline
+   (no cache) — only the default whisper-LID is cached; add caching to the others
+   if a non-whisper LID backend is used on a server.
+
+Best first move for (1) is letting the server reuse the dispatcher's VAD slices
+instead of fixed `chunk_seconds` cuts.
 
 ---
 
