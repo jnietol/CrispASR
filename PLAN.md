@@ -5670,3 +5670,28 @@ Root cause: `vae_decode_graph` mixed CPU-resident bias/alpha tensors
 Fix (`7449f793`): `vae_wn_init_ggml` now creates GPU copies of all bias
 and alpha tensors; `Bias()`/`Alpha()` lambdas prefer the GPU copy.
 Confirmed working on P100 CUDA (5 Kaggle runs, exit 0, audio produced).
+
+### Handover notes (2026-06-13 session, ~18 hours)
+
+**What works:** converter (681 tensors), F16 GGUF on HF, pre-encode (cos=1.0),
+mel, CLI wiring, model registry, Kaggle diff harness. Fixes: siglu, mel
+normalize=NA, causal pre-encode, causal DW conv, prompt kernel, lang mapping,
+exact-size graphs, chunked encoder with per-layer cache.
+
+**What doesn't work:** RNNT decoder emits 0 tokens in ALL configurations
+tested (batch bidirectional, batch + window mask, chunked with full-block
+re-processing, chunked with staged streaming block).
+
+**Root cause analysis:**
+1. Batch bidirectional: model is streaming-only, full attention → out-of-distribution
+2. Window mask: banded mask alone insufficient (all-blank even in Python ref)
+3. Chunked + full-block: re-processing cached frames corrupts LayerNorm statistics
+4. Chunked + staged block: crashes (ggml optimizes away cache output tensor);
+   also missing rel-pos bias for asymmetric Q/K attention
+
+**Recommended next step:** Write a Python-only chunked encoder that matches
+NeMo's exact `cache_last_channel` + `cache_last_time` flow (using the
+`tools/kaggle/nemotron-diff/nemotron_diff.py` framework). Validate that the
+Python chunked encoder produces tokens on JFK. Then port that exact logic
+to C++, matching each intermediate tensor. The Kaggle diff harness and ref
+GGUF are ready for this.
