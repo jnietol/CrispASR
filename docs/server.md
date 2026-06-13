@@ -100,6 +100,9 @@ curl http://localhost:8080/v1/audio/transcriptions \
 | `punctuation` | `true`/`false` — enable/disable punctuation (default: `true`; `false` strips punctuation from output) |
 | `diarize` | `true`/`false` — enable speaker diarization |
 | `diarize_method` | `energy`, `xcorr`, `vad-turns`, `pyannote`, `sherpa` (default: `energy`) |
+| `diarize_embedder` | Speaker-embedding model for cross-slice clustering (path or `auto`) |
+| `diarize_cluster_threshold` | Cosine merge threshold for embedding clustering (default: 0.5) |
+| `diarize_max_speakers` | Upper bound on speaker cluster count (default: 8) |
 | `vad` | `true`/`false` — enable VAD pre-processing |
 | `vad_threshold` | VAD speech probability threshold (default: 0.5) |
 | `vad_min_speech_duration_ms` | Minimum speech segment duration in ms (default: 250) |
@@ -120,12 +123,26 @@ curl http://localhost:8080/v1/audio/transcriptions \
 | `temperature_inc` | Temperature increment for fallback retries |
 | `no_fallback` | `true`/`false` — disable temperature fallback |
 | `detect_language` | `true`/`false` — run language detection |
+| `lid_backend` | Language-ID backend (`whisper`/`silero`/`firered`; `off`/`none` to disable) |
+| `lid_model` | Optional language-ID model path |
 | `no_timestamps` | `true`/`false` — omit timestamps from output |
 | `split_on_word` | `true`/`false` — split segments on word boundaries |
 | `max_len` | Maximum segment length in characters |
 | `chunk_seconds` | Maximum chunk duration for long audio (default: 30) |
 
 The `/inference` endpoint accepts the same CrispASR extension fields.
+
+### Server startup flags (resident post-processors)
+
+A few options are set once at launch rather than per request — the model is
+loaded resident and applied to every transcription:
+
+- `--punc-model auto|firered|fullstop|punctuate-all|pcs|<path>` — restore
+  punctuation on backends that emit none (parakeet RNNT/CTC, etc.). Auto-enabled
+  for non-PnC CTC backends, matching the CLI.
+- `--truecase-model auto|crf|lstm|<path>` — truecasing applied after punctuation.
+- `--no-warmup` (or `CRISPASR_NO_WARMUP=1`) — skip the startup warmup transcribe
+  (workaround for GPU drivers that hang/crash in warmup; see #165).
 
 ### Diarization example
 
@@ -353,6 +370,51 @@ audio is watermarked automatically, same as TTS.
 | `POST /v1/voices` (multipart upload for runtime provisioning) | Pending — security review (size limits, content-type validation, disk quota). |
 | `DELETE /v1/voices/{name}` | Pending alongside upload. |
 | Native-backend `speed` (duration knobs vs server-side resample) | Pending — backend-by-backend. |
+
+## Translation endpoint
+
+`POST /v1/translate` is the text-to-text translation counterpart — the HTTP
+analogue of the CLI `--text` mode. Available whenever the loaded backend has
+`CAP_TRANSLATE` (e.g. `m2m100`).
+
+```bash
+crispasr --server -m m2m100-418m-q8_0.gguf --backend m2m100 &
+
+curl http://localhost:8080/v1/translate \
+  -H "Content-Type: application/json" \
+  -d '{"input": "Hello world, how are you today?", "source_lang": "en", "target_lang": "de"}'
+# {"text": "Hallo Welt, wie bist du heute?"}
+```
+
+| Field | Meaning |
+|---|---|
+| `input` | Text to translate (required; `text` also accepted) |
+| `source_lang` | Source language (falls back to the server's `--tr-sl`/`-sl` default) |
+| `target_lang` | Target language (required unless a server default is set) |
+| `max_tokens` | Optional output-token cap |
+
+Returns `400` if the loaded backend lacks `CAP_TRANSLATE` or `input` is missing.
+
+## Real-time streaming (WebSocket)
+
+Pass `--ws-port N` to expose a real-time streaming-ASR WebSocket alongside the
+HTTP server (`-1` = off, the default; `0` = HTTP port + 1; `N` = port N). This
+is the server analogue of the CLI `--stream` path.
+
+```bash
+crispasr --server -m ggml-base.en.bin --backend whisper --ws-port 0
+# → WS ws://127.0.0.1:8081
+```
+
+Clients connect, send binary frames of 16 kHz mono **float32** PCM, and receive
+JSON updates as audio accumulates:
+
+```json
+{"text": "And so my fellow Americans", "t0": 0.0, "t1": 30.0, "counter": 1}
+{"text": "...ask what you can do for your country", "t0": 0.0, "t1": 30.0, "counter": 3, "final": true}
+```
+
+Whisper-only today. (Each connection opens its own streaming session.)
 
 ## Docker Compose
 

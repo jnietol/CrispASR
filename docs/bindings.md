@@ -33,6 +33,7 @@ backend doesn't expose that knob, but the call is safe to make.
 | `set_alt_n(n)` | `set_alt_n` / `set_alt_n` / `SetAltN` / `setAltN` | Per-token alternative candidates (whisper greedy) |
 | `set_whisper_decode_extras(...)` | `set_whisper_decode_extras` / `set_whisper_decode_extras` / `SetWhisperDecodeExtras` / `setWhisperDecodeExtras` | suppress_nst, suppress_regex, carry_initial_prompt |
 | `set_ask(prompt)` | `set_ask` / `set_ask` / `SetAsk` / `setAsk` | Free-form prompt for instruct-tuned audio-LLM backends (granite, voxtral, qwen3-asr, glm-asr, gemma4-e2b, mimo-asr). Empty string clears. |
+| `set_punc_model(alias\|path)` | `set_punc_model` / — / `SetPuncModel` / `setPuncModel` (Dart) | Load FireRedPunc/PCS punctuation restoration on the session (`auto`/`firered`/`fullstop`/`punctuate-all`/`pcs`/path; auto-downloads). Restores punctuation on backends that emit none (parakeet RNNT/CTC, …). `"none"`/`""` unloads. |
 
 > **Tip — chunk-boundary dedup for bindings.** When a binding drives a
 > CAP_UNBOUNDED_INPUT backend (parakeet, canary, …) chunk-by-chunk and
@@ -187,6 +188,28 @@ segs = sess.transcribe(pcm)
 ```
 
 Gem: `bindings/ruby/`.
+
+## Node.js addon
+
+`examples/addon.node` is a native N-API addon (built via cmake-js). Besides the
+legacy whisper-only `whisper()` entry point, it exposes `transcribeSession()`
+over the `crispasr_session` C-ABI — reaching every ASR backend plus the session
+post-processors (punctuation, `punc_model`, beam, translate, src/tgt lang):
+
+```js
+const { transcribeSession } = require('./build/Release/addon.node');
+const { promisify } = require('util');
+const run = promisify(transcribeSession);
+
+const r = await run({
+  model: 'parakeet.gguf', backend: 'parakeet', language: 'en',
+  punctuation: true, punc_model: 'fullstop',   // restore punctuation
+  fname_inp: 'audio.wav',
+});
+// { language, transcription: [[t0, t1, text], ...] }
+```
+
+For browser / pure-WASM use, see `bindings/javascript` (emscripten).
 
 ## Mobile
 

@@ -85,6 +85,8 @@ crispasr --list-backends
 | `--s2s-output FNAME` | Output path for S2S WAV |
 | `--voice PATH` | Voice reference for TTS cloning (WAV file or GGUF voice pack) |
 | `--server` | Run as HTTP server with persistent model (see [`server.md`](server.md)) |
+| `--ws-port N` | Server: real-time WebSocket ASR streaming port (`-1` off, `0` = HTTP port + 1) |
+| `--no-warmup` | Server: skip the startup warmup transcribe (workaround for GPU drivers that hang in warmup, #165) |
 | `--list-backends` | Print the capability matrix and exit |
 
 ## Output

@@ -4,6 +4,10 @@ CrispASR supports three streaming modes — pipe input, microphone
 capture, and continuous live mode — and per-token confidence output.
 All work with every supported backend.
 
+> Over HTTP, the server exposes the same streaming decoder as a WebSocket
+> endpoint — start it with `--ws-port` and send binary float32 PCM frames. See
+> [`server.md`](server.md#real-time-streaming-websocket).
+
 ## Pipe mode (`--stream`)
 
 ```bash
