@@ -5398,6 +5398,30 @@ static float* vox_synthesize_internal(voxcpm2_context* ctx, const char* text, co
         if (bench)
             sum_enc_to_lm += vox_now_ms() - tb;
 
+        // NaN check on the AR loop inputs (#164 diagnosis).
+        if (ctx->verbosity >= 1 && step < 3) {
+            bool cfm_nan = false, enc_nan = false, elm_nan = false;
+            for (float v : patch)
+                if (std::isnan(v)) {
+                    cfm_nan = true;
+                    break;
+                }
+            for (float v : enc_out)
+                if (std::isnan(v)) {
+                    enc_nan = true;
+                    break;
+                }
+            for (float v : enc_lm)
+                if (std::isnan(v)) {
+                    elm_nan = true;
+                    break;
+                }
+            if (cfm_nan || enc_nan || elm_nan) {
+                fprintf(stderr, "voxcpm2: step %d NaN source: cfm=%d locenc=%d enc_lm=%d\n", step, cfm_nan, enc_nan,
+                        elm_nan);
+            }
+        }
+
         // 1e. Collect patch + update cond for next step
         patches.push_back(patch_tf);
         prev_patch_raw = patch_tf;
