@@ -77,6 +77,24 @@ duplicate, pin the duplicate against the original with a test (here:
 `tests/test-dry-run-resolve.sh`). Same lesson as the §166 punc-model resolver
 being shared across CLI/server/C-ABI rather than copied three times.
 
+## Graph input tensors that nothing consumes are invisible to `ggml_graph_get_tensor` (#164)
+
+`ggml_set_input(t)` marks a tensor as a graph input, but if no operation in the
+graph actually reads `t`, it's never added to the graph's leafs/nodes arrays.
+`ggml_graph_get_tensor(gf, name)` only searches those arrays, so it returns NULL
+for a "created but unused" input — even though the tensor exists in the ggml
+context.
+
+This bit VoxCPM2's RALM: `positions` was created and set as input, but after the
+RoPE skip fix (`rope_theta=0`), no op consumed it (RoPE skipped + F32 KV cache
+uses `ggml_cpy` not `ggml_set_rows`). The null-guard treated NULL positions as
+fatal and returned all-zero hidden states → noise output. Fix: make the positions
+tensor optional — if the graph doesn't need it, don't require it.
+
+**Rule:** if a graph input is conditionally consumed (e.g. only used when RoPE is
+active), the setter code must tolerate `ggml_graph_get_tensor` returning NULL for
+it. Don't fail on a legitimately unused input.
+
 ## `ggml_backend_cpu_set_n_threads` asserts CPU — guard it after `init_best()`
 
 `ggml_backend_init_best()` returns the *best* backend (Metal on Apple Silicon,

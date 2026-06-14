@@ -32,11 +32,17 @@ VAE decode Vulkan crash (separate, Part 3 of §166) was already fixed in
 `7449f793` (GPU copies of bias/alpha tensors). graph=0 path unaffected
 throughout.
 
-**Validated on Kaggle T4 (2026-06-13):** all 3 configs pass — nograph
-(stop at step 7, 0.999), graph_default (stop at step 6, 0.881, 4.1s),
-graph_fa_cpu (stop at step 6, 0.861, 12.9s). Graph path is 5× faster
-than legacy. FA_CPU only needed on P100 (sm_60) where F16 flash_attn
-accumulator overflows.
+**Layer 4 — RALM noise on Vulkan (2026-06-14):** HubSana retested on
+Arc B580 — crash gone but audio was static. RALM `positions` tensor was
+unused after RoPE skip (rope_theta=0 + F32 KV cache = no consumer), so
+`ggml_graph_get_tensor` returned NULL and the null-guard returned zeros.
+Fix (`602308fc`): positions is optional in `ralm_step_graph`.
+
+**Validated with ASR roundtrip on Kaggle T4 (2026-06-14):** all 3 configs
+pass — stop fires at step 7, audio is speech (RMS 2500-3070, 1.12s), and
+parakeet ASR transcribes "Hello world." on every path. Graph path 5×
+faster (4.5s vs 21.9s). FA_CPU only needed on P100 (sm_60) where F16
+flash_attn accumulator overflows. Awaiting HubSana re-test on Arc B580.
 
 ## 2026-06-13 #165 server perf round — resident LID, CLI-matching VAD slicing, silero GPU crash
 

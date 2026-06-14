@@ -5657,11 +5657,20 @@ RALM → mu → CFM → LocEnc → enc_lm → TSLM input from pos=5 onwards.
    null-checking. Any future graph change would SIGABRT again.
    **Fix:** null-guard every call; graceful fallback to CPU or zero-fill.
 
-**Status: DONE.** Validated on Kaggle T4 (2026-06-13): all 3 configs pass
-(nograph, graph_default, graph_fa_cpu). Stop predictor fires correctly on
-all paths (step 6-7, scores 0.86-0.99). graph_default 5× faster than
-nograph (4.1s vs 20.6s). FA_CPU only needed on P100 (sm_60) where F16
-flash_attn overflows. Awaiting HubSana Vulkan re-test on Arc B580.
+**RALM noise fix (2026-06-14):** HubSana retested on Arc B580 Vulkan
+(`452aa2fd`): SIGABRT gone, stop fires, but audio was pure noise. Root
+cause: RALM `rope_theta=0` + RoPE skip meant the `positions` input
+tensor was never consumed by any graph node, so
+`ggml_graph_get_tensor("ralm_positions")` returned NULL. The null-guard
+treated this as fatal and returned all-zero RALM hidden states → noise.
+**Fix:** `602308fc` — positions is optional in `ralm_step_graph`.
+
+**Status: DONE.** Validated on Kaggle T4 with ASR roundtrip (2026-06-14,
+`chr1s4/crispasr-voxcpm2-164-v8`): all 3 configs pass — stop fires
+(step 7), audio is speech (RMS 2500-3070), and parakeet ASR transcribes
+back "Hello world." on every path. graph_default 5× faster (4.5s vs
+21.9s). FA_CPU only needed on P100 (sm_60). Awaiting HubSana Vulkan
+re-test on Arc B580 with `602308fc`.
 
 ### Part 3 — VAE decode crash on Vulkan — DONE
 
