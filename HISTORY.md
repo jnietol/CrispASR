@@ -6,6 +6,33 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-06-15 #81 nemotron-3.5-asr-streaming — first working transcription
+
+nvidia/nemotron-3.5-asr-streaming-0.6b (39-language streaming ASR) now
+produces correct output. Root cause of blank output across 3 days of
+debugging: **GLU gate/value swap** in the conformer conv module.
+
+`ggml_siglu` computes `sigmoid(first_half) * second_half`, but NeMo's
+`nn.functional.glu` computes `first_half * sigmoid(second_half)`. Every
+conformer block's conv module had the gate and value reversed. One-line
+fix: `ggml_siglu` → `ggml_siglu_swapped`.
+
+Additional fixes required:
+- Tensor name mismatches: GGUF `conv.bn.*` vs runtime `conv.ln.*`,
+  `prompt_kernel.linear1.*` vs `prompt_kernel.0.*`
+- Prompt_id mapping: NeMo uses en-US=0 (custom order), not alphabetical 7
+- Mel computation: `drop_last_frame=false` (NeMo keeps all STFT frames)
+- Pre-encode padding: `ggml_pad_ext` for true asymmetric causal padding
+- Pre-encode weights: F32 in converter (F16 accumulated 1.56 max error
+  across the 4352-dim linear projection)
+- Attention mask: `chunked_limited` (chunk-based block-diagonal, not banded)
+
+Validated on Kaggle against NeMo ground truth: encoder output matches
+per-frame to 4+ decimal places, prompted output min/max within 0.002 of
+NeMo's, transcription text identical.
+
+---
+
 ## 2026-06-13 #164 voxcpm2 graph path — NaN + SIGABRT fix
 
 Three-layer bug in the `VOXCPM2_USE_GRAPH=1` fast path, reported by HubSana

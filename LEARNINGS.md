@@ -39,6 +39,25 @@ CPU stop fallback) until the RoPE skip was needed to fix the graph path. If a
 model's attention has `rope_theta <= 0`, gate the RoPE call; don't pass zero
 through and hope the math works out.
 
+## `ggml_siglu` ≠ PyTorch `glu` — the gate/value halves are SWAPPED (#81)
+
+`ggml_siglu(x)` computes `sigmoid(first_half) * second_half`.
+PyTorch `F.glu(x, dim)` computes `first_half * sigmoid(second_half)`.
+These are NOT the same — the gate and value are reversed. Use
+`ggml_siglu_swapped` to match PyTorch's `glu`.
+
+This one-line bug caused the nemotron conformer conv module to produce
+completely wrong output in every layer, making the entire encoder diverge
+from NeMo despite matching pre-encode, mel, attention, and FFN stages.
+It took 3 days of debugging (mel comparison, per-layer dumps, per-sub-
+module hooks, Kaggle NeMo ground truth) to isolate because the global
+encoder statistics (min/max) happened to look plausible — only the
+per-frame values were wrong.
+
+**Rule:** When porting a GLU activation, always verify which half is the
+gate and which is the value. `ggml_siglu` = `σ(a) × b` (swapped from the
+PyTorch convention). `ggml_siglu_swapped` = `a × σ(b)` (matches PyTorch).
+
 ## A feature has ~8 front-ends — wiring it into one isn't "done" (§166)
 
 A user-facing option in this repo must be threaded through every surface or it

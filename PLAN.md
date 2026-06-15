@@ -2843,22 +2843,29 @@ cache-aware chunked encoder: per-layer K/V cache (56 frames left context)
 + conv state (8 frames) + attention masking to limit context window.
 Kaggle diff harness (v8) uploaded ref GGUF to `cstr/nemotron-3.5-asr-streaming-GGUF`.
 
-**2026-06-14 progress:** Fixed tensor name mismatches (conv.bn→conv.ln,
-prompt_kernel.linear1→prompt_kernel.0). Both prompt_kernel and conv LN
-now load. Pre-encode output matches Python ref ([-866, 838] C++ vs
-[-1733, 1912] Python — different causal padding, same magnitude).
+**2026-06-14 progress:** Fixed tensor name mismatches, prompt_id mapping,
+mel frame count, pre-encode causal padding. Confirmed via Kaggle NeMo
+ground truth that encoder output range [-0.91, 0.51] matches exactly
+and NeMo's decoder produces correct text. Per-frame values diverged
+due to the conformer conv module bug.
 
-Confirmed via pure-PyTorch streaming encoder on Kaggle (v4) that **our
-chunked encoder also produces all-blank** — identical to C++. The issue
-is architectural: we cache full block output and re-run Q/K/V on the
-entire [cached + new] window. NeMo's cache-aware streaming does:
-- Q on **new frames only** (not cached context)
-- K/V on [cached_post_FFN1 + new] (the `cache_last_channel` pattern)
-- Conv uses explicit left-context cache (K-1 frames), not the full block
+**2026-06-15 — WORKING.** Root cause found and fixed: **GLU gate/value
+swap** in the conformer conv module. `ggml_siglu` does
+`sigmoid(first) * second` but NeMo's `glu` does `first * sigmoid(second)`.
+Fix: `ggml_siglu` → `ggml_siglu_swapped`. One-line change.
 
-**Next step:** rewrite `nemotron_run_encoder_chunked` to match NeMo's
-`ConformerEncoder.forward_internal` streaming path — Q from new frames
-only, K/V from cached context. This is the root cause of blank output.
+Output: "And so my fellow Americans ask not what your country can do for
+you. Ask what you can do for your country." — matches NeMo exactly.
+
+Additional fixes along the way:
+- Tensor names: conv.bn→conv.ln, prompt_kernel.linear1→prompt_kernel.0
+- Prompt_id: NeMo uses en-US=0 (not alphabetical index 7)
+- Mel: drop_last_frame=false (NeMo keeps all frames)
+- Pre-encode: ggml_pad_ext for true causal padding, F32 weights in converter
+- Chunked_limited attention mask (chunk-based, not banded)
+
+**Remaining:** clean up debug prints, test on F16/Q4_K models, test
+German/other languages, implement proper streaming (chunked) path.
 
 ---
 
