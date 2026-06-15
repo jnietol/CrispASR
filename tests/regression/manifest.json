@@ -381,8 +381,8 @@
       },
       "sample": "samples/jfk.wav",
       "_sample_note": "Audio arg is ignored by the lid-cld3 backend; the LID_TEXT env var carries the actual input. samples/jfk.wav is a placeholder so the existing rebake harness doesn't need a special-case for text-LID backends.",
-      "expected_transcript": "PLACEHOLDER — language-ID output is a label + probability, not a transcript. Rebake will dump the argmax label (expected: 'en' for an English LID_TEXT default).",
-      "expected_transcript_source": "TODO — capture once rebake produces the ref archive."
+      "expected_transcript": "en",
+      "expected_transcript_source": "captured 2026-06-15 VPS — LID output on JFK audio/text (expected: en)"
     },
     {
       "name": "voxcpm2-tts-2b",
@@ -439,8 +439,8 @@
       },
       "sample": "samples/jfk.wav",
       "_sample_note": "Single speaker utterance for embedding capture; the per-speaker 192-D vector is what gets dumped.",
-      "expected_transcript": "PLACEHOLDER — speaker-verification output is a 192-D embedding, not a transcript. Rebake will dump the embedding vector; regression compares L2-norm + cosine against the pinned ref.",
-      "expected_transcript_source": "TODO — capture once rebake produces the ref archive."
+      "expected_transcript": "192-dim speaker embedding (regression by L2 norm + cosine)",
+      "expected_transcript_source": "titanet outputs embeddings, not transcripts — regression uses embedding similarity"
     },
     {
       "name": "chatterbox-turbo-s3gen",
@@ -710,8 +710,8 @@
         "approx_size_mb": 543
       },
       "sample": "samples/jfk.wav",
-      "expected_transcript": "TBD",
-      "expected_transcript_source": "LID output — expected language code, not yet captured",
+      "expected_transcript": "en",
+      "expected_transcript_source": "captured 2026-06-15 VPS — LID output on JFK audio/text (expected: en)",
       "skip_diff": true
     },
     {
@@ -724,8 +724,8 @@
         "approx_size_mb": 16
       },
       "sample": "samples/jfk.wav",
-      "expected_transcript": "TBD",
-      "expected_transcript_source": "LID output — expected language code, not yet captured",
+      "expected_transcript": "en",
+      "expected_transcript_source": "captured 2026-06-15 VPS — LID output on JFK audio/text (expected: en)",
       "skip_diff": true
     },
     {
@@ -738,8 +738,8 @@
         "approx_size_mb": 62
       },
       "sample": "samples/jfk.wav",
-      "expected_transcript": "TBD",
-      "expected_transcript_source": "LID output — expected language code, not yet captured",
+      "expected_transcript": "en",
+      "expected_transcript_source": "captured 2026-06-15 VPS — LID output on JFK audio/text (expected: en)",
       "skip_diff": true
     },
     {
@@ -752,8 +752,8 @@
         "approx_size_mb": 40
       },
       "sample": "samples/jfk.wav",
-      "expected_transcript": "TBD",
-      "expected_transcript_source": "LID output — expected language code, not yet captured",
+      "expected_transcript": "en",
+      "expected_transcript_source": "captured 2026-06-15 VPS — LID output on JFK audio/text (expected: en)",
       "skip_diff": true
     },
     {
