@@ -278,7 +278,17 @@ unchanged — `parakeet-tdt_ctc-*.gguf` matches "parakeet" with the
 
 **Still open:**
 - **`nvidia/parakeet_realtime_eou_120m-v1`** — streaming + end-of-utterance head. Needs cache-aware FastConformer streaming (cf. PLAN #81 Nemotron), plus an EOU head. Not a converter-only job.
-- **`nvidia/parakeet-unified-en-0.6b`** — recent "unified" variant; needs a model-card / architecture read before scoping.
+- **`nvidia/parakeet-unified-en-0.6b`** — **surveyed 2026-06-15 via Kaggle kernel.**
+  Target class: `EncDecRNNTBPEModel` (same as other parakeets). Encoder:
+  `ConformerEncoder` with new `att_chunk_context_size` param (dynamic chunked
+  convolutions for unified offline+streaming). Kaggle NeMo 2.7.3 lacks this
+  param — needs `nemo_toolkit>=2.8` or later. Alternatively: extract weights
+  directly from the .nemo zip (torch checkpoint format) + read config from the
+  Hydra config embedded in `save_restore_connector`. The existing
+  `convert-parakeet-to-gguf.py` should work once the model loads — same
+  `EncDecRNNTBPEModel` class, same weight naming. The C++ runtime needs
+  `att_chunk_context_size` support in `core/fastconformer.h` (dynamic conv
+  kernel selection per chunk, similar to nemotron's streaming conv cache).
 
 ### Won't do
 
