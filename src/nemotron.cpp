@@ -675,9 +675,12 @@ static std::vector<ggml_fp16_t> build_window_mask(int T, int left, int right) {
 // pos_enc:   (d, 2*(T_cache+T_new)-1) — rel-pos for the full window
 // Output:    (d, T_new) — block output for new frames only
 // Also tags "cache_ch_out" = post-FFN1 new frames for caching.
+// conv_cache_in: (d, K-1) tensor of pre-DW-conv signal from previous chunk (or nullptr for first chunk).
+// NeMo's CausalConv1D.update_cache prepends this instead of zero-padding.
 static ggml_tensor* nemotron_build_block_streaming(ggml_context* ctx0, ggml_tensor* new_in, ggml_tensor* cache_ch,
-                                                   ggml_tensor* pos_enc, int T_new, int T_cache,
-                                                   const nemotron_enc_layer& e, const core_conformer::BlockParams& p) {
+                                                   ggml_tensor* conv_cache_in, ggml_tensor* pos_enc, int T_new,
+                                                   int T_cache, const nemotron_enc_layer& e,
+                                                   const core_conformer::BlockParams& p) {
     const int d = p.d;
     const int n_heads = p.n_heads;
     const int head_dim = p.head_dim;
@@ -765,19 +768,49 @@ static ggml_tensor* nemotron_build_block_streaming(ggml_context* ctx0, ggml_tens
     attn_out = mm_bias(e.attn_out_w, attn_out, e.attn_out_b);
     cur = ggml_add(ctx0, inpAttn, attn_out);
 
-    // ---- Conv module (new frames only, causal padding) ----
+    // ---- Conv module (new frames only, with conv state cache) ----
     ggml_tensor* inpConv = cur;
     x = ggml_norm_affine(ctx0, cur, e.norm_conv_w, e.norm_conv_b, eps);
     ggml_tensor* pw1_w = ggml_reshape_2d(ctx0, e.conv_pw1_w, d, 2 * d);
     ggml_tensor* cnv = mm_bias(pw1_w, x, e.conv_pw1_b);
     cnv = ggml_siglu_swapped(ctx0, cnv);
 
-    // DW conv with causal padding
+    // Save post-GLU signal for conv cache output (last K-1 frames)
+    // NeMo's CausalConv1D.update_cache stores this for the next chunk.
+    {
+        // cnv is (d, T_new). We need the last (K-1) frames.
+        int cache_frames = K - 1;
+        ggml_tensor* conv_cache_new;
+        if (T_new >= cache_frames) {
+            int offset_frames = T_new - cache_frames;
+            conv_cache_new = ggml_view_2d(ctx0, cnv, d, cache_frames, cnv->nb[1], (size_t)offset_frames * cnv->nb[1]);
+        } else {
+            // T_new < K-1: prepend part of old cache + all new frames
+            // This case handles very small chunks; for simplicity, just save what we have
+            conv_cache_new = cnv;
+        }
+        conv_cache_new = ggml_cont(ctx0, conv_cache_new);
+        ggml_set_name(conv_cache_new, "conv_cache_out");
+        ggml_set_output(conv_cache_new);
+    }
+
+    // DW conv: prepend conv cache (or zero-pad) for left context
     ggml_tensor* dw_w_f32 = ggml_cast(ctx0, e.conv_dw_w, GGML_TYPE_F32);
     ggml_tensor* dw_w_4d = ggml_reshape_4d(ctx0, dw_w_f32, K, 1, 1, d);
-    cnv = ggml_cont(ctx0, ggml_transpose(ctx0, cnv));
-    cnv = ggml_reshape_4d(ctx0, cnv, T_new, 1, d, 1);
-    cnv = ggml_conv_2d_dw_direct(ctx0, dw_w_4d, cnv, 1, 1, K - 1, 0, 1, 1);
+
+    if (conv_cache_in) {
+        // Prepend cached frames: [conv_cache_in (d,K-1), cnv (d,T_new)] → (d, K-1+T_new)
+        ggml_tensor* cnv_padded = ggml_concat(ctx0, conv_cache_in, cnv, 1);
+        cnv_padded = ggml_cont(ctx0, ggml_transpose(ctx0, cnv_padded));
+        cnv_padded = ggml_reshape_4d(ctx0, cnv_padded, K - 1 + T_new, 1, d, 1);
+        // Conv with no padding — output is (T_new, 1, d, 1)
+        cnv = ggml_conv_2d_dw_direct(ctx0, dw_w_4d, cnv_padded, 1, 1, 0, 0, 1, 1);
+    } else {
+        // First chunk: zero-pad left by K-1 (same as NeMo's first-call behavior)
+        cnv = ggml_cont(ctx0, ggml_transpose(ctx0, cnv));
+        cnv = ggml_reshape_4d(ctx0, cnv, T_new, 1, d, 1);
+        cnv = ggml_conv_2d_dw_direct(ctx0, dw_w_4d, cnv, 1, 1, K - 1, 0, 1, 1);
+    }
     {
         cnv = ggml_view_4d(ctx0, cnv, T_new, cnv->ne[1], cnv->ne[2], cnv->ne[3], cnv->nb[1], cnv->nb[2], cnv->nb[3], 0);
         cnv = ggml_cont(ctx0, cnv);
@@ -1136,8 +1169,9 @@ static bool nemotron_run_encoder_chunked(nemotron_context* ctx, const float* pre
     };
     std::map<std::tuple<int, int, int>, layer_graph> graph_cache;
 
-    auto get_or_build = [&](int il, int T_new, int T_cache) -> layer_graph& {
-        auto key = std::make_tuple(il, T_new, T_cache);
+    auto get_or_build = [&](int il, int T_new, int T_cache, bool has_conv_cache) -> layer_graph& {
+        // Key includes has_conv_cache (bit-packed into T_cache sign is awkward; use a 4th field)
+        auto key = std::make_tuple(il, T_new, T_cache + (has_conv_cache ? 10000 : 0));
         auto it = graph_cache.find(key);
         if (it != graph_cache.end())
             return it->second;
@@ -1161,6 +1195,14 @@ static bool nemotron_run_encoder_chunked(nemotron_context* ctx, const float* pre
             ggml_set_input(cache_ch);
         }
 
+        // Conv cache: last K-1 frames of pre-DW-conv signal from previous chunk
+        ggml_tensor* conv_cache = nullptr;
+        if (has_conv_cache) {
+            conv_cache = ggml_new_tensor_2d(lg.ctx0, GGML_TYPE_F32, d, K - 1);
+            ggml_set_name(conv_cache, "conv_cache_in");
+            ggml_set_input(conv_cache);
+        }
+
         // Pos enc covers the full attention window
         int T_full = T_cache + T_new;
         ggml_tensor* pos2 = ggml_new_tensor_2d(lg.ctx0, GGML_TYPE_F32, d, 2 * T_full - 1);
@@ -1168,18 +1210,16 @@ static bool nemotron_run_encoder_chunked(nemotron_context* ctx, const float* pre
         ggml_set_input(pos2);
 
         ggml_tensor* out2 =
-            nemotron_build_block_streaming(lg.ctx0, inp_new, cache_ch, pos2, T_new, T_cache, m.enc[il], bp);
+            nemotron_build_block_streaming(lg.ctx0, inp_new, cache_ch, conv_cache, pos2, T_new, T_cache, m.enc[il], bp);
         ggml_set_name(out2, "block_out");
         ggml_set_output(out2);
         ggml_build_forward_expand(lg.gf, out2);
 
-        // Also expand cache_ch_out (post-FFN1) — it's a ggml_dup inside the
-        // streaming block that's not reachable from block_out's dependency tree.
-        // Find it by scanning the ggml context's tensor list.
+        // Also expand cache outputs — they're not reachable from block_out's
+        // dependency tree. Find them by scanning the ggml context's tensor list.
         for (ggml_tensor* t = ggml_get_first_tensor(lg.ctx0); t; t = ggml_get_next_tensor(lg.ctx0, t)) {
-            if (t->name && std::string(t->name) == "cache_ch_out") {
+            if (t->name && (std::string(t->name) == "cache_ch_out" || std::string(t->name) == "conv_cache_out")) {
                 ggml_build_forward_expand(lg.gf, t);
-                break;
             }
         }
 
@@ -1204,7 +1244,8 @@ static bool nemotron_run_encoder_chunked(nemotron_context* ctx, const float* pre
             auto& cache = ctx->enc_cache[il];
             int n_ctx = std::min(cache.n_cached, L);
 
-            auto& lg = get_or_build(il, n_new, n_ctx);
+            bool has_conv = (cache.conv_cached > 0);
+            auto& lg = get_or_build(il, n_new, n_ctx, has_conv);
 
             ggml_backend_sched_reset(ctx->sched);
             if (!ggml_backend_sched_alloc_graph(ctx->sched, lg.gf)) {
@@ -1230,6 +1271,14 @@ static bool nemotron_run_encoder_chunked(nemotron_context* ctx, const float* pre
                 int off = cache.n_cached - n_ctx;
                 ggml_backend_tensor_set(cache_t, cache.k_cache.data() + (size_t)off * d, 0,
                                         (size_t)n_ctx * d * sizeof(float));
+            }
+
+            // Set conv cache (pre-DW-conv signal from previous chunk)
+            if (has_conv) {
+                ggml_tensor* cc_t = ggml_graph_get_tensor(lg.gf, "conv_cache_in");
+                if (cc_t) {
+                    ggml_backend_tensor_set(cc_t, cache.conv_cache.data(), 0, (size_t)(K - 1) * d * sizeof(float));
+                }
             }
 
             // Set pos enc for the full attention window (cache + new)
@@ -1265,6 +1314,24 @@ static bool nemotron_run_encoder_chunked(nemotron_context* ctx, const float* pre
                     int excess = cache.n_cached - L;
                     cache.k_cache.erase(cache.k_cache.begin(), cache.k_cache.begin() + (size_t)excess * d);
                     cache.n_cached = L;
+                }
+            }
+
+            // Read conv cache output (last K-1 frames of pre-DW-conv signal)
+            ggml_tensor* conv_out = ggml_graph_get_tensor(lg.gf, "conv_cache_out");
+            if (conv_out) {
+                int conv_frames = (int)conv_out->ne[1];
+                if (conv_frames == K - 1) {
+                    cache.conv_cache.resize((size_t)(K - 1) * d);
+                    ggml_backend_tensor_get(conv_out, cache.conv_cache.data(), 0, (size_t)(K - 1) * d * sizeof(float));
+                    cache.conv_cached = K - 1;
+                } else {
+                    // Small chunk: save what we have, pad rest with zeros
+                    cache.conv_cache.assign((size_t)(K - 1) * d, 0.0f);
+                    size_t copy = (size_t)conv_frames * d;
+                    size_t offset = (size_t)(K - 1 - conv_frames) * d;
+                    ggml_backend_tensor_get(conv_out, cache.conv_cache.data() + offset, 0, copy * sizeof(float));
+                    cache.conv_cached = K - 1;
                 }
             }
 
