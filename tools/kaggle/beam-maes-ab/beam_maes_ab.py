@@ -48,9 +48,12 @@ if not CRISPASR_DIR.exists():
     subprocess.check_call(["git", "clone", "--depth", "1", CRISPASR_URL, str(CRISPASR_DIR)])
 
 sys.path.insert(0, str(CRISPASR_DIR / "tools" / "kaggle"))
-# Fallback to bundled harness
-if str(CRISPASR_DIR / "tools" / "kaggle") not in sys.path:
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Fallback to bundled harness (same dir as this script)
+try:
+    _script_dir = str(Path(__file__).resolve().parent)
+except NameError:
+    _script_dir = str(WORK)
+sys.path.insert(0, _script_dir)
 
 import kaggle_harness as kh
 kh.init_progress()
@@ -71,7 +74,7 @@ subprocess.check_call([
 ], env={**os.environ, "CCACHE_DIR": str(WORK / ".ccache")})
 
 # Build (heartbeat to avoid Kaggle timeout)
-with kh.build_heartbeat():
+with kh.build_heartbeat("cuda-build"):
     subprocess.check_call(
         ["cmake", "--build", str(build_dir), "-j4"],
         env={**os.environ, "CCACHE_DIR": str(WORK / ".ccache")}
@@ -193,41 +196,67 @@ except Exception as e:
     print(f"  granite-4.1-nar: FAILED ({e})", flush=True)
 
 # ─────────────────────────── cell 5 (code) ───────────────────────────
-# ── A/B tests ──
+# ── A/B tests (each wrapped in try/except for partial results) ──
+
+def save_partial():
+    """Write whatever results we have so far."""
+    rp = WORK / "beam_ab_results.json"
+    with open(rp, "w") as f:
+        json.dump(RESULTS, f, indent=2)
 
 # 1. Nemotron: greedy vs beam=4 vs MAES
 if "nemotron" in MODELS:
-    step("Nemotron: greedy vs beam=4")
-    ab_test("nemotron", "auto",
-            "greedy", ["--beam-size", "1"],
-            "beam=4", ["--beam-size", "4"])
+    try:
+        step("Nemotron: greedy vs beam=4")
+        ab_test("nemotron", "auto",
+                "greedy", ["--beam-size", "1"],
+                "beam=4", ["--beam-size", "4"])
+        save_partial()
+    except Exception as e:
+        print(f"FAILED: nemotron beam: {e}", flush=True)
 
-    step("Nemotron: beam=4 vs MAES(4,2,2.3)")
-    ab_test("nemotron", "auto",
-            "beam=4", ["--beam-size", "4"],
-            "MAES", ["--beam-size", "4"],
-            env_b={"CRISPASR_NEMOTRON_MAES": "1"})
+    try:
+        step("Nemotron: beam=4 vs MAES(4,2,2.3)")
+        ab_test("nemotron", "auto",
+                "beam=4", ["--beam-size", "4"],
+                "MAES", ["--beam-size", "4"],
+                env_b={"CRISPASR_NEMOTRON_MAES": "1"})
+        save_partial()
+    except Exception as e:
+        print(f"FAILED: nemotron MAES: {e}", flush=True)
 
 # 2. Sensevoice: greedy vs beam=8
 if "sensevoice" in MODELS:
-    step("Sensevoice: greedy vs beam=8+gamma")
-    ab_test("sensevoice", "auto",
-            "greedy", ["--beam-size", "1"],
-            "beam=8", ["--beam-size", "8"])
+    try:
+        step("Sensevoice: greedy vs beam=8+gamma")
+        ab_test("sensevoice", "auto",
+                "greedy", ["--beam-size", "1"],
+                "beam=8", ["--beam-size", "8"])
+        save_partial()
+    except Exception as e:
+        print(f"FAILED: sensevoice beam: {e}", flush=True)
 
 # 3. Granite-NLE: greedy vs beam=8
 if "granite-4.1-nar" in MODELS:
-    step("Granite-NLE: greedy vs beam=8")
-    ab_test("granite-4.1-nar", "auto",
-            "greedy", ["--beam-size", "1"],
-            "beam=8", ["--beam-size", "8"])
+    try:
+        step("Granite-NLE: greedy vs beam=8")
+        ab_test("granite-4.1-nar", "auto",
+                "greedy", ["--beam-size", "1"],
+                "beam=8", ["--beam-size", "8"])
+        save_partial()
+    except Exception as e:
+        print(f"FAILED: granite-nle beam: {e}", flush=True)
 
 # 4. Moss-Audio: greedy vs beam=4
 if "moss-audio" in MODELS:
-    step("Moss-Audio: greedy vs beam=4")
-    ab_test("moss-audio", "auto",
-            "greedy", ["--beam-size", "1"],
-            "beam=4", ["--beam-size", "4"])
+    try:
+        step("Moss-Audio: greedy vs beam=4")
+        ab_test("moss-audio", "auto",
+                "greedy", ["--beam-size", "1"],
+                "beam=4", ["--beam-size", "4"])
+        save_partial()
+    except Exception as e:
+        print(f"FAILED: moss-audio beam: {e}", flush=True)
 
 # ─────────────────────────── cell 6 (code) ───────────────────────────
 # ── Summary ──
