@@ -1,0 +1,14 @@
+{
+  "id": "chr1str/crispasr-regression-transcript-capture",
+  "title": "CrispASR — regression transcript capture",
+  "code_file": "capture.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "false",
+  "enable_internet": "true",
+  "dataset_sources": ["chr1str/crispasr-hf-token"],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}
