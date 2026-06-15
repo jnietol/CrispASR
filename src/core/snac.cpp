@@ -121,6 +121,7 @@ struct snac_decoder_ctx {
 
     ggml_backend_t backend = nullptr;
     ggml_backend_t backend_cpu = nullptr;
+    ggml_backend_sched_t sched = nullptr;
     ggml_context* ctx_w = nullptr;
     ggml_backend_buffer_t buf_w = nullptr;
     std::map<std::string, ggml_tensor*> tensors;
@@ -148,6 +149,9 @@ struct snac_decoder_ctx {
         }
         if (ctx_perm) {
             ggml_free(ctx_perm);
+        }
+        if (sched) {
+            ggml_backend_sched_free(sched);
         }
         if (ctx_w) {
             ggml_free(ctx_w);
@@ -549,15 +553,15 @@ static float* run_graph_and_extract(snac_decoder_ctx* c, const int32_t* c0, int 
 
     ggml_cgraph* gf = build_decode_graph(c, ctx0, T_super);
 
-    // Allocate + compute on the chosen backend.
-    ggml_backend_t backend = c->backend ? c->backend : c->backend_cpu;
-    ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-    if (!galloc) {
-        ggml_free(ctx0);
-        return nullptr;
+    // Allocate + compute via sched.
+    if (!c->sched) {
+        ggml_backend_t backends[2] = {c->backend ? c->backend : c->backend_cpu, c->backend_cpu};
+        int n_be = (backends[0] != c->backend_cpu) ? 2 : 1;
+        c->sched = ggml_backend_sched_new(backends, nullptr, n_be, 8192, false, false);
     }
-    if (!ggml_gallocr_alloc_graph(galloc, gf)) {
-        ggml_gallocr_free(galloc);
+    ggml_backend_sched_reset(c->sched);
+    if (!ggml_backend_sched_alloc_graph(c->sched, gf)) {
+        fprintf(stderr, "snac: sched alloc graph failed\n");
         ggml_free(ctx0);
         return nullptr;
     }
@@ -566,10 +570,9 @@ static float* run_graph_and_extract(snac_decoder_ctx* c, const int32_t* c0, int 
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "snac_codes_1_in"), c1, 0, (size_t)n1 * sizeof(int32_t));
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "snac_codes_2_in"), c2, 0, (size_t)n2 * sizeof(int32_t));
 
-    ggml_status st = ggml_backend_graph_compute(backend, gf);
+    ggml_status st = ggml_backend_sched_graph_compute(c->sched, gf);
     if (st != GGML_STATUS_SUCCESS) {
         fprintf(stderr, "snac: graph compute failed (status=%d)\n", (int)st);
-        ggml_gallocr_free(galloc);
         ggml_free(ctx0);
         return nullptr;
     }
@@ -577,14 +580,12 @@ static float* run_graph_and_extract(snac_decoder_ctx* c, const int32_t* c0, int 
     ggml_tensor* out = ggml_graph_get_tensor(gf, stage_name);
     if (!out) {
         fprintf(stderr, "snac: stage '%s' not in graph\n", stage_name);
-        ggml_gallocr_free(galloc);
         ggml_free(ctx0);
         return nullptr;
     }
     const size_t n = ggml_nelements(out);
     float* buf = (float*)std::malloc(n * sizeof(float));
     if (!buf) {
-        ggml_gallocr_free(galloc);
         ggml_free(ctx0);
         return nullptr;
     }
@@ -592,7 +593,6 @@ static float* run_graph_and_extract(snac_decoder_ctx* c, const int32_t* c0, int 
     if (out_n) {
         *out_n = (int)n;
     }
-    ggml_gallocr_free(galloc);
     ggml_free(ctx0);
     return buf;
 }
