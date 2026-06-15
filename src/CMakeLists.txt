@@ -137,10 +137,8 @@ add_library(crispasr-lib
             # and by the C-ABI `crispasr_align_words_abi`. Both canary-ctc
             # and qwen3-forced-aligner paths route through one call.
             crispasr_aligner.cpp
-            # Built-in G2P phonemizers (EN/DE/FR/ES). LTS rules + optional
-            # IPA dict auto-download. Used by kokoro TTS for espeak-free
-            # phonemization.
-            phonemizer.cpp
+            # Built-in G2P phonemizers (EN/DE/FR/ES) live in the kokoro
+            # target (phonemizer.cpp) — only kokoro calls them.
             # HF download + filesystem cache (shared with CLI). Consumed
             # by the library's VAD / LID / diarize auto-download paths
             # and by the CLI's `-m auto` resolver.
@@ -1077,10 +1075,8 @@ endif()
 # ---------------------------------------------------------------------------
 # kokoro — hexgrad/Kokoro-82M + yl4579/StyleTTS2-LJSpeech (iSTFTNet TTS)
 # ---------------------------------------------------------------------------
-# phonemizer.cpp is in crispasr-lib (line ~143); don't duplicate it here
-# or the all-in-one link (Linux/Android shared .so, iOS fat archive) gets
-# duplicate symbols. Symbols resolve at final link time.
-add_library(kokoro STATIC kokoro.h kokoro.cpp phonemizer.h)
+# phonemizer.cpp lives here — only kokoro calls phonemize_builtin_*.
+add_library(kokoro STATIC kokoro.h kokoro.cpp phonemizer.cpp phonemizer.h)
 set_target_properties(kokoro PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(kokoro PUBLIC .)
 target_compile_features   (kokoro PUBLIC cxx_std_17)

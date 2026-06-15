@@ -609,13 +609,6 @@ target_link_libraries(test-flash-attn-defaults PRIVATE
     Catch2::Catch2WithMain
     crispasr-lib
 )
-# On MinGW's single-pass linker, kokoro (a transitive dep of crispasr-lib)
-# references phonemizer symbols that live in crispasr-lib itself. By the
-# time the linker reaches kokoro, those symbols have been discarded.
-# Linking crispasr-lib a second time lets the linker resolve the cycle.
-if (MINGW)
-    target_link_libraries(test-flash-attn-defaults PRIVATE crispasr-lib)
-endif()
 catch_discover_tests(test-flash-attn-defaults
     TEST_SPEC "[unit]"
     PROPERTIES LABELS "unit;flash_attn"
