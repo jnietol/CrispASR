@@ -138,7 +138,7 @@ def main():
             "d_model": d_model,
             "n_heads": n_heads,
             "n_layers": n_layers,
-            "feat_in": 80,
+            "feat_in": 128,
             "conv_kernel_size": 9,
             "subsampling_factor": subsampling_factor,
             "subsampling": "dw_striding",
