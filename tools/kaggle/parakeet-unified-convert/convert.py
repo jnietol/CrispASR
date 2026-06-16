@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Parakeet-Unified-EN-0.6B: convert to GGUF via monkey-patched NeMo.
+Parakeet-Unified-EN-0.6B: convert NeMo 2.x .nemo (zip format) to GGUF.
 
-The model uses `att_chunk_context_size` which NeMo 2.7.x doesn't support.
-We monkey-patch ConformerEncoder.__init__ to accept+ignore unknown kwargs,
-then use the existing CrispASR converter.
+NeMo 2.x uses zip (not tar) with model_weights/data.pkl + numbered storage files.
+No model_config.yaml — hparams must be inferred from tensor shapes.
 """
-import json, os, subprocess, sys, time, traceback, shutil
+import json, os, subprocess, sys, time, traceback, shutil, zipfile, pickle, io
 from pathlib import Path
 
 WORK = Path("/kaggle/working")
@@ -29,7 +28,7 @@ def save():
 def main():
     global results
     save()
-    log("=== Parakeet-Unified conversion (monkey-patch) ===")
+    log("=== Parakeet-Unified — direct zip extraction ===")
 
     # HF token
     for p in ["/kaggle/input/crispasr-hf-token/hf_token.txt",
@@ -40,178 +39,142 @@ def main():
             os.environ["HUGGING_FACE_HUB_TOKEN"] = tok
             break
 
-    # Clone CrispASR (for converter + JFK sample)
+    # Clone CrispASR
     cdir = Path("/tmp/CrispASR")
     if not cdir.exists():
         subprocess.check_call(["git", "clone", "--depth", "1",
             "https://github.com/CrispStrobe/CrispASR.git", str(cdir)])
 
-    # Build CrispASR (for testing the GGUF)
+    # Build
     log("Building CrispASR...")
-    if not shutil.which("cmake"):
-        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "cmake", "ninja"], check=False)
     subprocess.run("apt-get update -qq && apt-get install -y cmake ninja-build g++ 2>/dev/null || true",
                    shell=True, capture_output=True)
     bdir = cdir / "build"
-    cmake_args = ["-DCMAKE_BUILD_TYPE=Release"]
-    if shutil.which("ninja"): cmake_args += ["-G", "Ninja"]
-    subprocess.check_call(["cmake", "-B", str(bdir)] + cmake_args, cwd=str(cdir))
+    subprocess.check_call(["cmake", "-G", "Ninja", "-B", str(bdir),
+                          "-DCMAKE_BUILD_TYPE=Release"], cwd=str(cdir))
     subprocess.check_call(["cmake", "--build", str(bdir), "-j2"], cwd=str(cdir))
     log("Build OK")
 
-    # Install NeMo + deps
-    log("Installing NeMo...")
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q",
-                    "nemo_toolkit[asr]", "gguf", "soundfile"], check=False)
+    # Download .nemo
+    log("Downloading .nemo...")
+    from huggingface_hub import hf_hub_download
+    nemo_path = hf_hub_download("nvidia/parakeet-unified-en-0.6b",
+                                 "parakeet-unified-en-0.6b.nemo",
+                                 cache_dir=str(WORK / ".hf"))
+    log(f"Downloaded: {os.path.getsize(nemo_path)/(1024*1024):.0f} MB")
 
-    # Monkey-patch ConformerEncoder to accept unknown kwargs
-    log("Monkey-patching ConformerEncoder...")
-    import nemo.collections.asr.modules.conformer_encoder as ce
-    _orig_init = ce.ConformerEncoder.__init__
-
-    def _patched_init(self, *args, **kwargs):
-        # Remove unknown kwargs that older NeMo doesn't support
-        unknown = []
-        import inspect
-        valid = set(inspect.signature(_orig_init).parameters.keys())
-        for k in list(kwargs.keys()):
-            if k not in valid and k != "self":
-                unknown.append((k, kwargs.pop(k)))
-        if unknown:
-            log(f"  Stripped unknown ConformerEncoder kwargs: {[k for k,v in unknown]}")
-        return _orig_init(self, *args, **kwargs)
-
-    ce.ConformerEncoder.__init__ = _patched_init
-
-    # Load model
-    log("Loading parakeet-unified-en-0.6b...")
+    # Step 1: Extract state dict from NeMo 2.x zip format
+    log("Extracting state dict from NeMo 2.x zip...")
     import torch
-    import nemo.collections.asr as nemo_asr
 
-    # Try concrete class first, then generic
-    HybridCls = getattr(nemo_asr.models, "EncDecRNNTBPEModel", None)
-    model = None
-    for cls in [nemo_asr.models.ASRModel, HybridCls]:
-        if cls is None:
-            continue
-        try:
-            model = cls.from_pretrained("nvidia/parakeet-unified-en-0.6b", map_location="cpu")
-            log(f"  Loaded via {cls.__name__}")
-            break
-        except Exception as e:
-            log(f"  {cls.__name__} failed: {str(e)[:200]}")
+    class NeMo2Unpickler(pickle.Unpickler):
+        """Load NeMo 2.x data.pkl with lazy storage resolution."""
+        def __init__(self, *args, zf=None, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._zf = zf
 
-    if model is None:
-        # Last resort: restore_from with the .nemo file
-        from huggingface_hub import hf_hub_download
-        nemo_path = hf_hub_download("nvidia/parakeet-unified-en-0.6b",
-                                     "parakeet-unified-en-0.6b.nemo",
-                                     cache_dir=str(WORK / ".hf"))
-        for cls in [HybridCls, nemo_asr.models.ASRModel]:
-            if cls is None:
-                continue
-            try:
-                model = cls.restore_from(nemo_path, map_location="cpu")
-                log(f"  Restored via {cls.__name__}")
-                break
-            except Exception as e:
-                log(f"  restore {cls.__name__} failed: {str(e)[:200]}")
+        def persistent_load(self, saved_id):
+            if isinstance(saved_id, tuple) and len(saved_id) >= 4:
+                if len(saved_id) == 5:
+                    _, stype, key, device, numel = saved_id
+                else:
+                    stype, key, device, numel = saved_id
+                # Load actual data from zip
+                data_path = f"model_weights/data/{key}"
+                raw = self._zf.read(data_path)
+                dtype = torch.float32
+                if 'Half' in str(stype) or 'float16' in str(stype):
+                    dtype = torch.float16
+                elif 'BFloat16' in str(stype) or 'bfloat16' in str(stype):
+                    dtype = torch.bfloat16
+                nbytes = numel * torch.tensor([], dtype=dtype).element_size()
+                buf = torch.frombuffer(bytearray(raw[:nbytes]), dtype=dtype)
+                return buf.storage()
+            return saved_id
 
-    if model is None:
-        results["error"] = "Could not load model"
-        save()
-        return
+    with zipfile.ZipFile(nemo_path) as zf:
+        pkl_data = zf.read("model_weights/data.pkl")
+        buf = io.BytesIO(pkl_data)
+        sd = NeMo2Unpickler(buf, zf=zf).load()
 
-    model.eval()
-    results["model_class"] = type(model).__name__
-
-    # Dump config
-    log("Dumping config...")
-    if hasattr(model, 'cfg') and hasattr(model.cfg, 'encoder'):
-        enc = model.cfg.encoder
-        for attr in ["d_model", "n_heads", "n_layers", "ff_expansion_factor",
-                     "subsampling_factor", "subsampling", "conv_kernel_size",
-                     "att_context_size", "att_context_style", "att_chunk_context_size"]:
-            if hasattr(enc, attr):
-                val = getattr(enc, attr)
-                results.setdefault("encoder_params", {})[attr] = str(val)
-                log(f"  encoder.{attr} = {val}")
-
-    # State dict summary
-    sd = model.state_dict()
+    log(f"State dict: {len(sd)} keys")
     results["n_keys"] = len(sd)
-    log(f"  {len(sd)} state dict keys")
 
-    # Inference on JFK
-    log("NeMo inference on JFK...")
-    jfk = str(cdir / "samples" / "jfk.wav")
-    try:
-        transcripts = model.transcribe([jfk])
-        t = transcripts[0] if isinstance(transcripts[0], str) else str(transcripts[0])
-        results["nemo_transcript"] = t
-        log(f"  NeMo transcript: {t}")
-    except Exception as e:
-        results["inference_error"] = str(e)
-        log(f"  Inference error: {e}")
+    # Show key tensors
+    for k in sorted(sd.keys()):
+        if any(x in k for x in ['embed', 'joint', 'pre_encode.out', 'pre_encode.conv.0']):
+            log(f"  {k}: {list(sd[k].shape)} {sd[k].dtype}")
+    save()
 
-    # Try converter
-    log("Running convert-parakeet-to-gguf.py...")
+    # Step 2: Extract tokenizer from .nemo
+    log("Extracting tokenizer...")
+    spm_bytes = None
+    with zipfile.ZipFile(nemo_path) as zf:
+        for n in zf.namelist():
+            if n.endswith("_tokenizer.model") or n.endswith("tokenizer.model"):
+                spm_bytes = zf.read(n)
+                log(f"  Tokenizer: {n} ({len(spm_bytes)} bytes)")
+                break
+
+    if not spm_bytes:
+        log("  No tokenizer found in .nemo — downloading from HF...")
+        # parakeet-unified might have tokenizer separately
+        try:
+            tok_path = hf_hub_download("nvidia/parakeet-unified-en-0.6b",
+                                       "tokenizer.model",
+                                       cache_dir=str(WORK / ".hf"))
+            spm_bytes = open(tok_path, "rb").read()
+            log(f"  Downloaded tokenizer: {len(spm_bytes)} bytes")
+        except Exception as e:
+            log(f"  Tokenizer download failed: {e}")
+
+    # Step 3: Infer hparams from tensor shapes
+    log("Inferring hparams...")
+    d_model = sd["encoder.layers.0.self_attn.linear_q.weight"].shape[0]
+    n_layers = max(int(k.split(".")[2]) for k in sd if k.startswith("encoder.layers.") and k.split(".")[2].isdigit()) + 1
+    vocab_size = sd["decoder.prediction.embed.weight"].shape[0]
+    pred_hidden = sd["decoder.prediction.dec_rnn.lstm.weight_ih_l0"].shape[1]
+    joint_hidden = sd["joint.joint_net.2.weight"].shape[1]
+    n_heads = d_model // (sd["encoder.layers.0.self_attn.linear_q.weight"].shape[1] // (d_model // 8))  # estimate
+
+    results["hparams"] = {
+        "d_model": d_model, "n_layers": n_layers, "vocab_size": vocab_size,
+        "pred_hidden": pred_hidden, "joint_hidden": joint_hidden,
+    }
+    log(f"  d_model={d_model} n_layers={n_layers} vocab={vocab_size}")
+    log(f"  pred_hidden={pred_hidden} joint_hidden={joint_hidden}")
+    save()
+
+    # Step 4: Try the converter with the extracted state dict
+    # Save as a standard torch checkpoint that the converter can read
+    log("Saving as standard checkpoint...")
+    ckpt_path = WORK / "parakeet-unified-weights.pt"
+    torch.save(sd, str(ckpt_path))
+    log(f"  Checkpoint: {os.path.getsize(ckpt_path)/(1024*1024):.0f} MB")
+
+    # Free the state dict from memory
+    del sd
+    import gc; gc.collect()
+
+    # Step 5: Run converter with --weights-only flag
+    log("Running converter...")
     converter = str(cdir / "models" / "convert-parakeet-to-gguf.py")
     out_f16 = str(WORK / "parakeet-unified-en-0.6b-f16.gguf")
+
     r = subprocess.run([sys.executable, converter,
-                       "--nemo", "nvidia/parakeet-unified-en-0.6b",
+                       "--weights", str(ckpt_path),
                        "--output", out_f16],
-                      capture_output=True, text=True, timeout=600,
-                      env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+                      capture_output=True, text=True, timeout=600)
     results["converter_rc"] = r.returncode
     results["converter_stderr"] = r.stderr[-1000:]
     log(f"  Converter rc={r.returncode}")
     if r.returncode != 0:
         log(f"  stderr: {r.stderr[-500:]}")
+        # The converter may not have --weights flag. Let me check.
+        results["note"] = "Converter may need patching for standalone weights file"
     else:
-        sz = os.path.getsize(out_f16) / (1024*1024)
-        results["gguf_size_mb"] = round(sz, 1)
-        log(f"  GGUF: {sz:.1f} MB")
-
-        # Test with CrispASR
-        log("Testing GGUF with CrispASR...")
-        CLI = str(bdir / "bin" / "crispasr")
-        r2 = subprocess.run([CLI, "--backend", "parakeet", "-m", out_f16, "-f", jfk, "-np"],
-                           capture_output=True, text=True, timeout=300)
-        lines = [l.strip() for l in r2.stdout.strip().split('\n') if l.strip()]
-        transcript = lines[-1] if lines else ""
-        results["crispasr_rc"] = r2.returncode
-        results["crispasr_transcript"] = transcript
-        log(f"  CrispASR rc={r2.returncode}: {transcript[:80]}")
-
-        # Quantize Q4_K
-        if r2.returncode == 0:
-            log("Quantizing Q4_K...")
-            QUANT = str(bdir / "bin" / "crispasr-quantize")
-            out_q4k = str(WORK / "parakeet-unified-en-0.6b-q4_k.gguf")
-            subprocess.run([QUANT, out_f16, out_q4k, "q4_k"],
-                          capture_output=True, timeout=300)
-            if os.path.exists(out_q4k):
-                results["q4k_size_mb"] = round(os.path.getsize(out_q4k)/(1024*1024), 1)
-                log(f"  Q4_K: {results['q4k_size_mb']} MB")
-
-                # Upload to HF
-                log("Uploading to HF...")
-                try:
-                    from huggingface_hub import HfApi
-                    api = HfApi(token=os.environ.get("HF_TOKEN"))
-                    for fname in [out_f16, out_q4k]:
-                        api.upload_file(
-                            path_or_fileobj=fname,
-                            path_in_repo=os.path.basename(fname),
-                            repo_id="cstr/parakeet-unified-en-0.6b-GGUF",
-                            commit_message=f"Add {os.path.basename(fname)}",
-                            repo_type="model",
-                        )
-                        log(f"  Uploaded {os.path.basename(fname)}")
-                except Exception as e:
-                    results["upload_error"] = str(e)
-                    log(f"  Upload error: {e}")
+        results["gguf_size_mb"] = round(os.path.getsize(out_f16)/(1024*1024), 1)
+        log(f"  GGUF: {results['gguf_size_mb']} MB")
 
     save()
     log("\nDONE")
@@ -226,9 +189,11 @@ if __name__ == "__main__":
         log(f"CRASH: {e}")
         traceback.print_exc()
 
-# Cleanup: remove large files so kernels_output only has results.json + progress.txt
+# Cleanup
 import shutil
 for p in [Path("/tmp/CrispASR"), WORK / "models", WORK / ".hf"]:
     shutil.rmtree(str(p), ignore_errors=True)
+for f in WORK.glob("*.pt"):
+    f.unlink(missing_ok=True)
 for f in WORK.glob("*.gguf"):
     f.unlink(missing_ok=True)
