@@ -289,11 +289,15 @@ unchanged — `parakeet-tdt_ctc-*.gguf` matches "parakeet" with the
   `EncDecRNNTBPEModel` class, same weight naming. The C++ runtime needs
   `att_chunk_context_size` support in `core/fastconformer.h` (dynamic conv
   kernel selection per chunk, similar to nemotron's streaming conv cache).
-  **2026-06-16 v3 kernel hung** — monkey-patching ConformerEncoder to strip
-  `att_chunk_context_size` caused NeMo to hang during model init (param is
-  required for encoder graph construction, not optional). The .nemo file
-  uses NeMo 2.x format (torch `data.pkl`, no `model_config.yaml`).
-  **Next approach:** custom NeMo 2.x checkpoint extractor or NeMo >=2.8.
+  **2026-06-16 v4 kernel — direct zip extraction WORKS.** Custom
+  `NeMo2Unpickler` reads `data.pkl` + storage files from the NeMo 2.x zip
+  without instantiating the NeMo model (bypasses `att_chunk_context_size`).
+  989 tensors extracted with actual data. Hparams: d_model=1024, n_layers=24,
+  vocab=1025, pred=640, joint=640 — **same architecture as standard parakeet**.
+  **Remaining to convert:** (a) tokenizer not in .nemo — use parakeet-rnnt's
+  tokenizer (same vocab 1025); (b) `gguf` pip package missing in kernel;
+  (c) converter needs `--weights` flag for standalone `.pt` file. The existing
+  converter handles the same tensor names. This is a straightforward finish.
 
 ### Won't do
 
