@@ -76,7 +76,23 @@ invocation), granite-4.1-nar (SIGABRT on CUDA), mimo-asr (tokenizer).
 **Docs updated:** streaming.md (nemotron context presets), quantize.md
 (6 backends added incl. lfm2 Q5_K-minimum), architecture.md (nemotron
 section), testing.md (new env vars + test groups), feature-matrix
-(nemotron row + beam search caps).
+(nemotron row + beam search caps), README (nemotron + full TTS list).
+
+**Nemotron C ABI + bindings (2026-06-16):** 9 edit points in
+`crispasr_c_api.cpp` — Python/Go/Dart/server can now use nemotron via
+the session API. All 21 items per `docs/contributing.md` checklist done.
+
+**#56 Kokoro JA kanji→kana (2026-06-16):** MeCab via dlopen (BSD-3-Clause,
+MIT-clean). Japanese text preprocessed through `mecab -Oyomi` to convert
+kanji to kana before espeak-ng IPA phonemization. No kakasi/pykakasi (GPL).
+Falls back gracefully when libmecab is not installed.
+
+**#92 Regression CI (2026-06-16):** manifest 0 PLACEHOLDERs (32 ASR + 21
+TTS). Nightly matrix expanded to 29 backends. Smoke test name-collision
+fix. granite-4.1-nar confirmed working (SIGABRT was stale build artifact).
+
+**#97 parakeet-unified survey (2026-06-16):** `EncDecRNNTBPEModel` (same
+class as parakeet). Blocked on NeMo >=2.8 for `att_chunk_context_size`.
 
 ---
 
