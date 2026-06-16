@@ -2937,6 +2937,81 @@ bool g_espeak_inited = false;
 bool g_espeak_init_failed = false; // sticky — don't keep retrying
 std::string g_espeak_voice;
 
+// ---------------------------------------------------------------------------
+// MeCab-based kanji → kana preprocessor for Japanese (#56).
+// Uses dlopen to load libmecab at runtime — builds without MeCab still work,
+// the JA phonemizer just falls back to espeak (kana-only, kanji→English).
+// MeCab is BSD-3-Clause; mecab-ipadic is BSD-3-Clause + ICOT. MIT-clean.
+// ---------------------------------------------------------------------------
+#ifndef _WIN32
+#include <dlfcn.h>
+#endif
+
+static std::mutex g_mecab_mu;
+static bool g_mecab_tried = false;
+static bool g_mecab_ok = false;
+
+// MeCab C API (from mecab.h) — only the functions we need.
+typedef struct mecab_t mecab_t;
+typedef struct mecab_node_t {
+    // We only need surface + length + feature.
+    // The actual struct has more fields but we access them via the API.
+} mecab_node_t;
+
+// Function pointers loaded via dlopen
+static mecab_t* (*p_mecab_new2)(const char*) = nullptr;
+static const char* (*p_mecab_sparse_tostr)(mecab_t*, const char*) = nullptr;
+static void (*p_mecab_destroy)(mecab_t*) = nullptr;
+static mecab_t* g_mecab = nullptr;
+
+static bool mecab_init() {
+    if (g_mecab_tried)
+        return g_mecab_ok;
+    g_mecab_tried = true;
+#ifdef _WIN32
+    return false; // no dlopen on Windows
+#else
+    void* lib = dlopen("libmecab.so.2", RTLD_LAZY);
+    if (!lib)
+        lib = dlopen("libmecab.so", RTLD_LAZY);
+    if (!lib) {
+        if (getenv("CRISPASR_NEMOTRON_DEBUG") || getenv("CRISPASR_KOKORO_DEBUG"))
+            fprintf(stderr, "kokoro: libmecab not found — JA kanji→kana disabled\n");
+        return false;
+    }
+    p_mecab_new2 = (mecab_t * (*)(const char*)) dlsym(lib, "mecab_new2");
+    p_mecab_sparse_tostr = (const char* (*)(mecab_t*, const char*))dlsym(lib, "mecab_sparse_tostr");
+    p_mecab_destroy = (void (*)(mecab_t*))dlsym(lib, "mecab_destroy");
+    if (!p_mecab_new2 || !p_mecab_sparse_tostr || !p_mecab_destroy)
+        return false;
+    // Initialize with default dictionary + output reading
+    g_mecab = p_mecab_new2("-Oyomi");
+    if (!g_mecab) {
+        fprintf(stderr, "kokoro: mecab_new2 failed — check mecab dictionary\n");
+        return false;
+    }
+    g_mecab_ok = true;
+    fprintf(stderr, "kokoro: MeCab loaded — JA kanji→kana enabled\n");
+    return true;
+#endif
+}
+
+// Convert Japanese text (with kanji) to kana reading via MeCab.
+// Returns true if conversion was done; false means "leave text as-is".
+static bool kanji_to_kana(const std::string& text, std::string& kana) {
+    std::lock_guard<std::mutex> g(g_mecab_mu);
+    if (!mecab_init())
+        return false;
+    const char* result = p_mecab_sparse_tostr(g_mecab, text.c_str());
+    if (!result || !*result)
+        return false;
+    kana = result;
+    // MeCab -Oyomi output ends with newline — strip it
+    while (!kana.empty() && (kana.back() == '\n' || kana.back() == '\r'))
+        kana.pop_back();
+    return !kana.empty();
+}
+
 // Returns true on success and fills `out`. Returns false to signal "fall
 // back to popen" (init failed, voice switch failed, or no output).
 bool phonemize_espeak_lib(const std::string& lang, const std::string& text, std::string& out) {
@@ -3048,12 +3123,28 @@ static bool is_cmn_lang(const std::string& lang) {
     return lang == "cmn" || lang == "zh" || lang == "zh-cn" || lang == "zh_cn" || lang == "cmn-latn-pinyin";
 }
 
+static bool is_ja_lang(const std::string& lang) {
+    return lang == "ja" || lang == "ja-jp" || lang == "ja_jp";
+}
+
 bool phonemize_cached(kokoro_context* ctx, const std::string& lang, const std::string& text, std::string& out) {
     std::string key = lang;
     key.push_back('\0');
     key += text;
     if (ctx->phon_cache.lookup(key, out))
         return true;
+
+    // §56 JA kanji→kana: convert kanji to kana via MeCab before espeak.
+    // espeak-ng's JA voice handles kana fine but falls back to English
+    // pronunciation for kanji (e.g. 日本語 → "Chinese letter"). MeCab
+    // converts kanji → katakana reading which espeak then IPA-phonemizes.
+    std::string effective_text = text;
+    if (is_ja_lang(lang)) {
+        std::string kana;
+        if (kanji_to_kana(text, kana)) {
+            effective_text = kana;
+        }
+    }
 
     // §156 permissive G2P dicts — try builtin phonemizers first (no GPL dep).
     // These auto-download IPA dicts from HuggingFace on first call.
@@ -3074,15 +3165,16 @@ bool phonemize_cached(kokoro_context* ctx, const std::string& lang, const std::s
     }
 
     // Fallback: espeak-ng (GPL) — linked, dlopen'd, or popen'd.
+    // For JA, effective_text has kanji converted to kana via MeCab.
 #if defined(CRISPASR_HAVE_ESPEAK_NG) || defined(CRISPASR_ESPEAK_DLOPEN)
-    if (phonemize_espeak_lib(lang, text, out)) {
+    if (phonemize_espeak_lib(lang, effective_text, out)) {
         if (is_cmn_lang(lang))
             strip_cmn_tone_numbers(out);
         ctx->phon_cache.insert(key, out);
         return true;
     }
 #endif
-    if (phonemize_popen(lang, text, out)) {
+    if (phonemize_popen(lang, effective_text, out)) {
         if (is_cmn_lang(lang))
             strip_cmn_tone_numbers(out);
         ctx->phon_cache.insert(key, out);
