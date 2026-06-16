@@ -5981,6 +5981,7 @@ Branch: `feat/beam-maes-cache`
 **§167e–h**: Compile-verified; no local models for A/B testing.
 
 **2026-06-16: GGUFs uploaded to `cstr/parakeet-unified-en-0.6b-GGUF`**
-(F16 1181 MB + Q4_K). Runtime fix for 8x subsampling is the remaining
-step to make `--backend parakeet -m parakeet-unified-en-0.6b-q4_k.gguf`
-work end-to-end.
+(F16 1181 MB + Q4_K). v8: n_mels=128 fix → test_rc=0 (no crash) but
+transcript garbage. Tokenizer verified correct (same as parakeet-rnnt).
+Root cause: synthetic config mismatch vs actual training config. Need
+to diff C++ mel output against NeMo Python reference to find divergence.
