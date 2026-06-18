@@ -169,7 +169,13 @@ def main():
                "Sec-WebSocket-Version: 13\r\n\r\n" % (rt_port, key))
         s = socket.create_connection(("127.0.0.1", rt_port), timeout=5)
         s.sendall(req.encode())
-        resp = s.recv(4096).decode("utf-8", "replace")
+        resp_bytes = b""
+        while b"\r\n\r\n" not in resp_bytes:
+            chunk = s.recv(1)
+            if not chunk: break
+            resp_bytes += chunk
+        
+        resp = resp_bytes.decode("utf-8", "replace")
         accept = ""
         for line in resp.split("\r\n"):
             if line.lower().startswith("sec-websocket-accept:"):

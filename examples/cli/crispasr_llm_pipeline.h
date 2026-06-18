@@ -501,3 +501,119 @@ std::vector<crispasr_segment> crispasr_run_voxtral_style_pipeline_streamed(typen
     out.push_back(std::move(seg));
     return out;
 }
+
+void transcribe_streaming(const float* samples, int n_samples, int64_t t_offset_cs,
+                          const whisper_params& params, crispasr_stream_callback on_text) override {
+    (void)t_offset_cs; // Simplified streaming doesn't use t_offset_cs for token events
+    // ---- Prepare prompts ----------------------------------------------------
+    std::string text_prompt = params.prompt;
+    if (text_prompt.empty())
+        text_prompt = "<|en|>";
+
+    int prompt_len = 0;
+    int32_t* prompt_ids = Ops::tokenize(ctx, text_prompt.c_str(), &prompt_len);
+    if (!prompt_ids)
+        return;
+    std::vector<int32_t> ids(prompt_ids, prompt_ids + prompt_len);
+    free(prompt_ids);
+
+    ids.push_back(Ops::audio_pad_id);
+
+    int prompt_tail = 0;
+    int32_t* tail_ids = Ops::tokenize(ctx, "<|transcribe|>", &prompt_tail);
+    if (tail_ids) {
+        ids.insert(ids.end(), tail_ids, tail_ids + prompt_tail);
+        free(tail_ids);
+    }
+
+    // ---- Audio pre-processing (Mel/encoder) ---------------------------------
+    int N_enc_total = 0;
+    float* audio_embeds = Ops::encode_audio(ctx, samples, n_samples, &N_enc_total);
+    if (!audio_embeds)
+        return;
+
+    std::vector<float> audio_embeds_all;
+    const int per_chunk_dim = Ops::audio_embed_dim;
+    audio_embeds_all.assign(audio_embeds, audio_embeds + (size_t)N_enc_total * per_chunk_dim);
+    free(audio_embeds);
+
+    // ---- Embed + splice -----------------------------------------------------
+    const int T_prompt = (int)ids.size();
+    float* text_embeds = Ops::embed_tokens(ctx, ids.data(), T_prompt);
+    if (!text_embeds)
+        return;
+
+    int spliced = 0;
+    for (int i = 0; i < T_prompt && spliced < N_enc_total; i++) {
+        if (ids[i] == Ops::audio_pad_id) {
+            std::memcpy(text_embeds + (size_t)i * per_chunk_dim,
+                        audio_embeds_all.data() + (size_t)spliced * per_chunk_dim,
+                        (size_t)per_chunk_dim * sizeof(float));
+            spliced++;
+        }
+    }
+
+    const int audio_seconds = (n_samples + kSampleRate - 1) / kSampleRate;
+    const int max_new_scaled = std::max(512, audio_seconds * 8);
+    const int max_new = std::max(params.max_new_tokens, max_new_scaled);
+    const int kv_budget = T_prompt + max_new + 64;
+    
+    if (!Ops::kv_init(ctx, kv_budget)) {
+        free(text_embeds);
+        return;
+    }
+    Ops::kv_reset(ctx);
+
+    int n_tokens_out = 0, vocab = 0;
+    float* logits = Ops::run_llm_kv(ctx, text_embeds, T_prompt, 0, &n_tokens_out, &vocab);
+    if (!logits) {
+        free(text_embeds);
+        return;
+    }
+
+    core_greedy_decode::Config dec_cfg;
+    dec_cfg.max_new_tokens = max_new;
+    dec_cfg.eos_id = Ops::eos_id;
+    dec_cfg.vocab_size = vocab;
+    dec_cfg.temperature = params.temperature;
+    dec_cfg.frequency_penalty = params.frequency_penalty;
+    dec_cfg.seed = params.seed;
+
+    int next = 0;
+    float next_p = 1.0f;
+    if (dec_cfg.temperature > 0.0f) {
+        std::mt19937_64 rng(dec_cfg.seed != 0 ? dec_cfg.seed : (uint64_t)std::random_device{}());
+        next = core_greedy_decode::sample_temp(logits, vocab, dec_cfg.temperature, rng);
+    } else {
+        next = core_greedy_decode::argmax(logits, vocab);
+    }
+    next_p = core_greedy_decode::softmax_of(logits, vocab, next, logits[next]);
+    free(logits);
+
+    std::string accumulated_text;
+    auto token_cb = [&](int32_t id, float prob) {
+        (void)prob;
+        if (id == Ops::eos_id) return;
+        int len = 0;
+        const uint8_t* bytes = Ops::token_text(ctx, id, &len);
+        if (bytes && len > 0) {
+            std::string txt((const char*)bytes, (size_t)len);
+            accumulated_text += txt;
+            if (!accumulated_text.empty()) {
+                on_text(accumulated_text, false);
+            }
+        }
+    };
+
+    core_greedy_decode::run_with_probs_cb(ctx, next, next_p, T_prompt, Ops::embed_tokens, Ops::run_llm_kv, token_cb, dec_cfg);
+
+    if (!accumulated_text.empty()) {
+        on_text(accumulated_text, true);
+    } else {
+        on_text("", true);
+    }
+
+    free(text_embeds);
+}
+
+
