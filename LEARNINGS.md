@@ -7813,6 +7813,23 @@ as a model-input token, not concatenated into the user text. Otherwise
 the language tag can leak into speech output as a spoken prefix even
 when the tokenizer contains the tag.
 
+### Resolution — multilingual text prep now shares the upstream punctuation / lowercase path (2026-06-18)
+
+The C++ Chatterbox synthesis path now runs all text through a shared
+normalizer before tokenization:
+
+- collapses repeated whitespace and trims Unicode-space variants that
+  the old path left intact;
+- normalizes the common punctuation shorthands from upstream `punc_norm`
+  (`...`, `:`, `;`, `" - "`, curly quotes, dashes);
+- lowercases ASCII text when a language tag is set, so the multilingual
+  model no longer sees the uppercase-heavy text that the Python MTL
+  tokenizer would have normalized away.
+
+That closes the obvious `-l fr` / `-l ar` drift in the C++ path, but it
+does not yet implement Python's full Unicode NFKD / script-specific
+normalizers for zh/ja/he/ko/ru.
+
 ### Operational note — the regen variants already have merges
 
 The `chatterbox-t3-q8_0-regen.gguf` and `chatterbox-t3-q4_k-regen.gguf`

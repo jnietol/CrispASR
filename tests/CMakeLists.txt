@@ -377,6 +377,22 @@ catch_discover_tests(test-punctuation-policy
     PROPERTIES LABELS "unit"
 )
 
+# ─── test - chatterbox - text - prep — unit tests for the shared text
+# normalizer used by the multilingual Chatterbox path.
+add_executable(test-chatterbox-text-prep
+    test-chatterbox-text-prep.cpp
+)
+target_include_directories(test-chatterbox-text-prep PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(test-chatterbox-text-prep PRIVATE
+    Catch2::Catch2WithMain
+)
+catch_discover_tests(test-chatterbox-text-prep
+    TEST_SPEC "[unit]"
+    PROPERTIES LABELS "unit;chatterbox"
+)
+
 # ─── test - punc - resolve — Catch2 unit tests for the shared --punc-model
 # resolver (CLI/server parity). Pure string mapping, header-only, no model load.
 add_executable(test-punc-resolve
