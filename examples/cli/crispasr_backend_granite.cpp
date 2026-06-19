@@ -572,6 +572,168 @@ public:
         return out;
     }
 
+    void transcribe_streaming(const float* samples, int n_samples, int64_t t_offset_cs, const whisper_params& params,
+                              crispasr_stream_callback on_text) override {
+        if (!ctx_)
+            return;
+
+        // Beam search, SAA, and timestamp post-processing require all tokens before
+        // output can be structured — fall back to the batch transcribe() base path.
+        const bool is_plus = granite_speech_is_plus(ctx_);
+        const bool want_saa = is_plus && params.diarize;
+        const bool want_ts = is_plus && (params.output_wts || params.output_jsn_full);
+        if (params.beam_size > 1 || want_saa || want_ts) {
+            CrispasrBackend::transcribe_streaming(samples, n_samples, t_offset_cs, params, on_text);
+            return;
+        }
+
+        // ---- Mel → encoder → projector ----
+        int n_mels = 0, T_mel = 0;
+        float* mel = granite_speech_compute_mel(ctx_, samples, n_samples, &n_mels, &T_mel);
+        if (!mel)
+            return;
+        int N_enc = 0, enc_dim = 0;
+        float* enc = granite_speech_run_encoder(ctx_, mel, n_mels, T_mel, &N_enc, &enc_dim);
+        free(mel);
+        if (!enc)
+            return;
+        int N_proj = 0, proj_dim = 0;
+        float* proj = granite_speech_run_projector(ctx_, enc, N_enc, enc_dim, &N_proj, &proj_dim);
+        free(enc);
+        if (!proj)
+            return;
+
+        // ---- Prompt (mirrors transcribe() but without SAA/TS branches) ----
+        int audio_tok = granite_speech_audio_token_id(ctx_);
+        int eos_tok = granite_speech_eos_token_id(ctx_);
+        if (audio_tok < 0)
+            audio_tok = kLegacyAudioTok4;
+        if (eos_tok < 0)
+            eos_tok = kLegacyEos4;
+
+        const bool use_v3_template = (audio_tok < 50000);
+        std::vector<int32_t> prefix_ids, suffix_ids;
+        if (use_v3_template) {
+            const std::string prefix_str = "<|start_of_role|>user<|end_of_role|>";
+            std::string suffix_str = "can you transcribe the speech into a written format?"
+                                     "<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>";
+            if (!params.ask.empty())
+                suffix_str = params.ask + "<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>";
+            int n = 0;
+            int32_t* a = granite_speech_tokenize(ctx_, prefix_str.c_str(), &n);
+            if (a && n > 0) {
+                prefix_ids.assign(a, a + n);
+                free(a);
+            } else if (a)
+                free(a);
+            a = granite_speech_tokenize(ctx_, suffix_str.c_str(), &n);
+            if (a && n > 0) {
+                suffix_ids.assign(a, a + n);
+                free(a);
+            } else if (a)
+                free(a);
+        } else {
+            prefix_ids.assign(kPrefix4, kPrefix4 + kNumPrefix4);
+            if (!params.ask.empty()) {
+                const std::string instr = params.ask + "\n ASSISTANT:";
+                int n = 0;
+                int32_t* a = granite_speech_tokenize(ctx_, instr.c_str(), &n);
+                if (a && n > 0) {
+                    suffix_ids.assign(a, a + n);
+                    free(a);
+                } else if (a)
+                    free(a);
+            } else {
+                suffix_ids.assign(kSuffix4, kSuffix4 + kNumSuffix4);
+            }
+        }
+        if (prefix_ids.empty() || suffix_ids.empty()) {
+            free(proj);
+            return;
+        }
+
+        const int n_prefix = (int)prefix_ids.size();
+        const int n_suffix = (int)suffix_ids.size();
+        const int total_prompt = n_prefix + N_proj + n_suffix;
+        std::vector<int32_t> prompt_ids;
+        prompt_ids.reserve(total_prompt);
+        for (int id : prefix_ids)
+            prompt_ids.push_back(id);
+        for (int i = 0; i < N_proj; i++)
+            prompt_ids.push_back(audio_tok);
+        for (int id : suffix_ids)
+            prompt_ids.push_back(id);
+
+        float* all_embeds = granite_speech_embed_tokens(ctx_, prompt_ids.data(), total_prompt);
+        if (!all_embeds) {
+            free(proj);
+            return;
+        }
+        for (int i = 0; i < N_proj; i++)
+            std::memcpy(all_embeds + (size_t)(n_prefix + i) * proj_dim, proj + (size_t)i * proj_dim,
+                        (size_t)proj_dim * sizeof(float));
+        free(proj);
+
+        // ---- Prefill ----
+        if (!granite_speech_kv_init(ctx_, 4096)) {
+            free(all_embeds);
+            return;
+        }
+        int vocab = 0;
+        float* logits = granite_speech_run_llm_kv(ctx_, all_embeds, total_prompt, 0, nullptr, &vocab);
+        free(all_embeds);
+        if (!logits)
+            return;
+
+        core_greedy_decode::Config dec_cfg;
+        dec_cfg.max_new_tokens = params.max_new_tokens > 0 ? params.max_new_tokens : 200;
+        dec_cfg.eos_id = eos_tok;
+        dec_cfg.vocab_size = vocab;
+        dec_cfg.temperature = params.temperature;
+        dec_cfg.frequency_penalty = params.frequency_penalty;
+        dec_cfg.seed = params.seed;
+
+        int first_token = 0;
+        float first_prob = 1.0f;
+        if (params.temperature > 0.0f) {
+            std::mt19937_64 rng((params.seed != 0 ? params.seed : (uint64_t)std::random_device{}()));
+            first_token = core_greedy_decode::sample_temp(logits, vocab, params.temperature, rng);
+        } else {
+            first_token = core_greedy_decode::argmax(logits, vocab);
+        }
+        first_prob = core_greedy_decode::softmax_of(logits, vocab, first_token, logits[first_token]);
+        free(logits);
+
+        // ---- Streaming decode ----
+        std::string accumulated;
+        bool leading_space_trimmed = false;
+
+        auto token_cb = [&](int32_t id, float /*prob*/) {
+            if (id == eos_tok)
+                return;
+            const char* piece = granite_speech_token_text(ctx_, id);
+            if (!piece || !*piece)
+                return;
+            std::string txt(piece);
+            // Trim leading whitespace from the very first emitted text only
+            if (!leading_space_trimmed) {
+                while (!txt.empty() && (txt.front() == ' ' || txt.front() == '\n'))
+                    txt.erase(txt.begin());
+                if (!txt.empty())
+                    leading_space_trimmed = true;
+            }
+            if (txt.empty())
+                return;
+            accumulated += txt;
+            on_text(accumulated, false);
+        };
+
+        core_greedy_decode::run_with_probs_cb(ctx_, first_token, first_prob, total_prompt, granite_speech_embed_tokens,
+                                              granite_speech_run_llm_kv, token_cb, dec_cfg);
+
+        on_text(accumulated, true);
+    }
+
     void shutdown() override {
         if (ctx_) {
             granite_speech_free(ctx_);

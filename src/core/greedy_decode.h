@@ -432,4 +432,68 @@ inline Result run_with_probs_cb(Ctx* ctx, int32_t first_token, float first_prob,
     return r;
 }
 
+// run_with_probs + pre-forward hook + callback. Combines the audio-injection
+// hook needed by voxtral4b with per-token streaming output.
+template <typename Ctx, typename EmbedFn, typename ForwardFn, typename PreHook, typename OnTokenFn>
+inline Result run_with_probs_cb(Ctx* ctx, int32_t first_token, float first_prob, int initial_n_past, EmbedFn embed_fn,
+                                ForwardFn forward_fn, PreHook pre_hook, OnTokenFn on_token, const Config& cfg) {
+    Result r;
+    r.tokens.reserve((size_t)cfg.max_new_tokens);
+    r.probs.reserve((size_t)cfg.max_new_tokens);
+    r.tokens.push_back(first_token);
+    r.probs.push_back(first_prob);
+
+    on_token(first_token, first_prob);
+
+    if (first_token == cfg.eos_id)
+        return r;
+
+    std::mt19937_64 rng(cfg.seed != 0 ? cfg.seed : (uint64_t)std::random_device{}());
+    const bool sampling = cfg.temperature > 0.0f;
+    std::vector<int> token_counts(cfg.frequency_penalty > 0.0f ? (size_t)cfg.vocab_size : 0);
+    std::vector<float> adjusted_logits;
+    count_generated_token(token_counts, first_token);
+
+    int n_past = initial_n_past;
+    while ((int)r.tokens.size() < cfg.max_new_tokens && r.tokens.back() != cfg.eos_id) {
+        const int step = (int)r.tokens.size() - 1;
+        int32_t last = r.tokens.back();
+        float* emb = embed_fn(ctx, &last, 1);
+        if (!emb)
+            break;
+
+        if (!pre_hook(step, emb)) {
+            std::free(emb);
+            break;
+        }
+
+        float* lg = forward_fn(ctx, emb, 1, n_past, nullptr, nullptr);
+        std::free(emb);
+        if (!lg)
+            break;
+        n_past++;
+
+        int nx;
+        float nx_lp;
+        const float* pick_logits =
+            penalized_logits(lg, cfg.vocab_size, cfg.frequency_penalty, token_counts, adjusted_logits);
+        if (sampling) {
+            nx = sample_temp(pick_logits, cfg.vocab_size, cfg.temperature, rng);
+            nx_lp = pick_logits[nx];
+        } else {
+            nx = argmax(pick_logits, cfg.vocab_size);
+            nx_lp = pick_logits[nx];
+        }
+        const float nx_p = softmax_of(pick_logits, cfg.vocab_size, nx, nx_lp);
+        std::free(lg);
+
+        r.tokens.push_back(nx);
+        r.probs.push_back(nx_p);
+        count_generated_token(token_counts, nx);
+
+        on_token(nx, nx_p);
+    }
+    return r;
+}
+
 } // namespace core_greedy_decode
