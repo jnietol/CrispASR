@@ -203,6 +203,14 @@ Nine edit points, each mirroring the `CA_HAVE_CHATTERBOX` blocks:
    dispatch. This lets `set_ask()` override the default transcription
    instruction. Currently wired for: granite, voxtral, qwen3-asr,
    glm-asr, gemma4-e2b, mimo-asr.
+9b. **`params.language` wiring** — if the backend is an audio-LLM, also
+   inject a language hint into the prompt when `params.language` is set
+   and non-auto. Pattern: `else if (!params.language.empty() && params.language
+   != "auto") { sys_instruction = "Transcribe the speech in " + lang_name(params.language) + "."; }`.
+   For **English-only** models (moonshine-streaming, kyutai-stt), emit a
+   `fprintf(stderr, ...)` warning instead of silently ignoring the flag.
+   Currently wired for: granite (v3 + v4 templates), qwen3-asr, glm-asr,
+   moss-audio, mimo-asr; warned for moonshine-streaming, kyutai-stt.
 10. **`crispasr_session_set_speaker_id()`** — if the backend is a
     multi-speaker TTS model with integer-indexed speakers (e.g. melotts,
     piper, fastpitch). Add a dispatch block that bounds-checks against

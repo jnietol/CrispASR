@@ -179,6 +179,14 @@ public:
         if (!ctx_)
             return out;
         mimo_asr_set_beam_size(ctx_, params.beam_size > 0 ? params.beam_size : 1);
+        if (!params.ask.empty()) {
+            mimo_asr_set_ask(ctx_, params.ask.c_str());
+        } else if (!params.language.empty() && params.language != "auto") {
+            const std::string instr = "Please transcribe this audio in " + params.language + ".";
+            mimo_asr_set_ask(ctx_, instr.c_str());
+        } else {
+            mimo_asr_set_ask(ctx_, nullptr);
+        }
         char* text = mimo_asr_transcribe(ctx_, samples, n_samples);
         if (text) {
             crispasr_segment seg;
@@ -196,6 +204,14 @@ public:
         if (!ctx_) {
             CrispasrBackend::transcribe_streaming(samples, n_samples, 0, params, on_text);
             return;
+        }
+        if (!params.ask.empty()) {
+            mimo_asr_set_ask(ctx_, params.ask.c_str());
+        } else if (!params.language.empty() && params.language != "auto") {
+            const std::string instr = "Please transcribe this audio in " + params.language + ".";
+            mimo_asr_set_ask(ctx_, instr.c_str());
+        } else {
+            mimo_asr_set_ask(ctx_, nullptr);
         }
         std::string accumulated;
         bool first_tok = true;

@@ -129,10 +129,14 @@ public:
 
         moss_audio_set_beam_size(ctx_, params.beam_size > 0 ? params.beam_size : 1);
 
-        // Use the prompt from params if set, otherwise default to transcription
+        // Build transcription prompt: explicit prompt > language hint > default.
+        std::string prompt_buf;
         const char* prompt = "Transcribe this audio.";
         if (!params.prompt.empty()) {
             prompt = params.prompt.c_str();
+        } else if (!params.language.empty() && params.language != "auto") {
+            prompt_buf = "Transcribe this audio in " + params.language + ".";
+            prompt = prompt_buf.c_str();
         }
 
         char* result = moss_audio_process(ctx_, samples, n_samples, prompt);
@@ -157,7 +161,16 @@ public:
             CrispasrBackend::transcribe_streaming(samples, n_samples, 0, params, on_text);
             return;
         }
-        const char* prompt = params.prompt.empty() ? "Transcribe this audio." : params.prompt.c_str();
+        std::string prompt_buf_s;
+        const char* prompt;
+        if (!params.prompt.empty()) {
+            prompt = params.prompt.c_str();
+        } else if (!params.language.empty() && params.language != "auto") {
+            prompt_buf_s = "Transcribe this audio in " + params.language + ".";
+            prompt = prompt_buf_s.c_str();
+        } else {
+            prompt = "Transcribe this audio.";
+        }
         std::string accumulated;
         bool first_tok = true;
         auto cb = [&](int tok_id, float /*prob*/, void* /*ud*/) {

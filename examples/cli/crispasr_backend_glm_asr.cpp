@@ -45,6 +45,16 @@ public:
         if (!ctx_)
             return out;
 
+        // Propagate ask / language instruction to the C library.
+        if (!params.ask.empty()) {
+            glm_asr_set_ask(ctx_, params.ask.c_str());
+        } else if (!params.language.empty() && params.language != "auto" && !params.translate) {
+            const std::string instr = "Please transcribe in " + params.language + ".";
+            glm_asr_set_ask(ctx_, instr.c_str());
+        } else {
+            glm_asr_set_ask(ctx_, nullptr);
+        }
+
         // Best-of-N: when temperature > 0 and best_of > 1, run N seeded
         // decodes (process-global libc rand reseeded per run) and keep the
         // highest mean prob.
@@ -189,17 +199,27 @@ public:
             ids.push_back(59260); // <|pad|>
         ids.push_back(59262);     // <|end_of_audio|>
         ids.push_back(59253);     // <|user|>
-        if (!tgt_lang_.empty()) {
-            char buf[256];
-            snprintf(buf, sizeof(buf), "\nPlease translate the speech to %s.\n", tgt_lang_.c_str());
-            int n_instr = 0;
-            int32_t* itoks = glm_asr_tokenize(ctx_, buf, &n_instr);
-            if (itoks && n_instr > 0) {
-                for (int i = 0; i < n_instr; i++)
-                    ids.push_back(itoks[i]);
-                free(itoks);
-            } else if (itoks)
-                free(itoks);
+        {
+            std::string instr;
+            if (!params.ask.empty()) {
+                instr = "\n" + params.ask + "\n";
+            } else if (!tgt_lang_.empty()) {
+                char buf[256];
+                snprintf(buf, sizeof(buf), "\nPlease translate the speech to %s.\n", tgt_lang_.c_str());
+                instr = buf;
+            } else if (!params.language.empty() && params.language != "auto") {
+                instr = "\nPlease transcribe in " + params.language + ".\n";
+            }
+            if (!instr.empty()) {
+                int n_instr = 0;
+                int32_t* itoks = glm_asr_tokenize(ctx_, instr.c_str(), &n_instr);
+                if (itoks && n_instr > 0) {
+                    for (int i = 0; i < n_instr; i++)
+                        ids.push_back(itoks[i]);
+                    free(itoks);
+                } else if (itoks)
+                    free(itoks);
+            }
         }
         ids.push_back(59254); // <|assistant|>
 

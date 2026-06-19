@@ -194,6 +194,12 @@ public:
                              "?"
                              "<|end_of_text|>\n"
                              "<|start_of_role|>assistant<|end_of_role|>";
+            } else if (!params.language.empty() && params.language != "auto") {
+                const std::string lang = iso_to_eng(params.language);
+                suffix_str = "can you transcribe the speech into " + lang +
+                             "?"
+                             "<|end_of_text|>\n"
+                             "<|start_of_role|>assistant<|end_of_role|>";
             }
             int n = 0;
             int32_t* a = granite_speech_tokenize(ctx_, prefix_str.c_str(), &n);
@@ -236,6 +242,8 @@ public:
                 const std::string tgt =
                     params.target_lang.empty() ? std::string("English") : iso_to_eng(params.target_lang);
                 user_content = "can you translate the speech to " + tgt + "?";
+            } else if (!params.language.empty() && params.language != "auto") {
+                user_content = "can you transcribe the speech into " + iso_to_eng(params.language) + "?";
             }
 
             if (!user_content.empty()) {

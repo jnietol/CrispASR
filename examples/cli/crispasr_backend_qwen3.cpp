@@ -227,6 +227,8 @@ public:
             const std::string tgt =
                 params.target_lang.empty() ? std::string("English") : iso_to_english(params.target_lang);
             sys_instruction = "Translate the speech to " + tgt + ".";
+        } else if (!params.language.empty() && params.language != "auto") {
+            sys_instruction = "Transcribe the speech in " + iso_to_english(params.language) + ".";
         }
         // PLAN #98 Phase B: hotword prompt injection
         if (!params.hotwords.empty()) {
@@ -590,12 +592,47 @@ public:
             return;
 
         // ---- Prompt ----
+        auto lang_name = [](const std::string& code) -> std::string {
+            if (code == "en")
+                return "English";
+            if (code == "de")
+                return "German";
+            if (code == "fr")
+                return "French";
+            if (code == "es")
+                return "Spanish";
+            if (code == "it")
+                return "Italian";
+            if (code == "pt")
+                return "Portuguese";
+            if (code == "ru")
+                return "Russian";
+            if (code == "ja")
+                return "Japanese";
+            if (code == "ko")
+                return "Korean";
+            if (code == "zh")
+                return "Chinese";
+            if (code == "nl")
+                return "Dutch";
+            if (code == "pl")
+                return "Polish";
+            if (code == "tr")
+                return "Turkish";
+            if (code == "ar")
+                return "Arabic";
+            if (code == "hi")
+                return "Hindi";
+            return code;
+        };
         std::string sys_instruction;
         if (!params.ask.empty()) {
             sys_instruction = params.ask;
         } else if (params.translate) {
-            std::string tgt = params.target_lang.empty() ? "English" : params.target_lang; // Simplification
+            const std::string tgt = params.target_lang.empty() ? std::string("English") : lang_name(params.target_lang);
             sys_instruction = "Translate the speech to " + tgt + ".";
+        } else if (!params.language.empty() && params.language != "auto") {
+            sys_instruction = "Transcribe the speech in " + lang_name(params.language) + ".";
         }
         if (!params.hotwords.empty()) {
             if (!sys_instruction.empty() && sys_instruction.back() != ' ')

@@ -40,6 +40,9 @@ public:
         if (!ctx_)
             return out;
 
+        if (!params.language.empty() && params.language != "auto" && params.language != "en")
+            fprintf(stderr, "crispasr[moonshine-streaming]: English-only model; language='%s' ignored\n",
+                    params.language.c_str());
         moonshine_streaming_set_beam_size(ctx_, params.beam_size > 0 ? params.beam_size : 1);
         moonshine_streaming_result* r = moonshine_streaming_transcribe_with_probs(ctx_, samples, n_samples);
         if (!r || !r->text || !r->text[0]) {

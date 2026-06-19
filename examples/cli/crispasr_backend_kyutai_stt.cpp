@@ -44,6 +44,10 @@ public:
         if (!ctx_)
             return out;
 
+        if (!params.language.empty() && params.language != "auto" && params.language != "en")
+            fprintf(stderr, "crispasr[kyutai-stt]: English-only model; language='%s' ignored\n",
+                    params.language.c_str());
+
         // PLAN #125 P6b: kyutai's batch path scales superlinearly with
         // n_samples (~14 s/s on the 50 min file vs 1.36 s/s on JFK, per
         // reports 05 + 11). KV grows O(N) per emitted token, attention
