@@ -10,6 +10,35 @@ If a lesson is still "live" (affects current work), it's linked from
 
 ---
 
+## Backend-name guards must match the *registered* name, by prefix when aliased (#171, #174)
+
+A backend's CLI factory alias and the string `name()` returns are not the
+same namespace, and policy code keyed on `name()` keeps getting them wrong:
+
+- `qwen3-asr` (lang-sweep test plan) vs registered `qwen3`.
+- `granite-speech` vs registered `granite`.
+- `crispasr_tts_plan_chunks_for_backend()` skipped chunking for the literal
+  `"vibevoice"`, but the TTS backends register as `vibevoice-tts` /
+  `vibevoice-1.5b` / `vibevoice-tts-base` (bare `vibevoice` is the ASR
+  backend). Result: the server sentence-split every VibeVoice TTS request
+  while the CLI synthesised whole — a silent CLI/server divergence that
+  manifested as garbled multi-voice audio and a baffling "same input, 30 vs
+  100 chars" report (#171).
+
+Rules:
+1. Key policy on the value `backend->name()` actually returns at runtime, not
+   on a factory alias you remember typing. Print it and check.
+2. When a family has variants (`vibevoice`, `vibevoice-tts`,
+   `vibevoice-1.5b`, …) match by **prefix** (`name.rfind("vibevoice", 0) ==
+   0`), not equality — new variants then inherit the policy automatically.
+3. The test must use the **production** name. The #171 unit test asserted on
+   the bare `"vibevoice"` that production never passes, so it stayed green
+   through the whole regression. A test that can't see the bug is worse than
+   no test — it gives false confidence.
+
+Companion to the "session ABI reimplements the CLI" learning: both are "the
+CLI and its other consumers (server/bindings) silently diverge" bugs.
+
 ## Never pass `ggml_graph_get_tensor` directly to `ggml_backend_tensor_set` (#164)
 
 `ggml_graph_get_tensor` returns NULL when a tensor name isn't found in the

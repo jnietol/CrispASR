@@ -138,6 +138,21 @@ TEST_CASE("server TTS policy keeps VibeVoice voice cloning single-shot", "[unit]
     REQUIRE(out[0] == "First sentence. Second sentence. Third sentence.");
 }
 
+// GH #171 regression: the production TTS backends register as
+// "vibevoice-tts" / "vibevoice-1.5b" / "vibevoice-tts-base", NOT the bare
+// "vibevoice" (that's the ASR backend). The guard must match every variant
+// by prefix or the server sentence-splits each request (the CLI never does),
+// degrading voice-clone continuity. These cases FAIL on a bare-string guard.
+TEST_CASE("server TTS policy keeps ALL vibevoice* TTS variants single-shot", "[unit][chunking]") {
+    const char* text = "First sentence. Second sentence. Third sentence.";
+    for (const char* name : {"vibevoice-tts", "vibevoice-1.5b", "vibevoice-tts-1.5b", "vibevoice-tts-base"}) {
+        CAPTURE(name);
+        auto out = crispasr_tts_plan_chunks_for_backend(text, name);
+        REQUIRE(out.size() == 1);
+        REQUIRE(out[0] == text);
+    }
+}
+
 TEST_CASE("server TTS policy chunks non-VibeVoice backends", "[unit][chunking]") {
     auto out = crispasr_tts_plan_chunks_for_backend("First sentence. Second sentence.", "qwen3-tts");
     REQUIRE(out.size() == 2);

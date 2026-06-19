@@ -124,7 +124,14 @@ std::vector<std::string> crispasr_tts_split_sentences(const std::string& text, s
 
 std::vector<std::string> crispasr_tts_plan_chunks_for_backend(const std::string& text, const std::string& backend_name,
                                                               std::size_t max_chars) {
-    if (backend_name == "vibevoice")
+    // VibeVoice voice cloning relies on the continuous prompt + generated-text
+    // context to maintain speaker identity and prosody; sentence-chunking
+    // degrades it (and the CLI --tts path never chunks). Match ALL vibevoice
+    // variants by prefix — the TTS backends register as "vibevoice-tts",
+    // "vibevoice-1.5b", "vibevoice-tts-base", … not the bare "vibevoice"
+    // (which is the ASR backend). A bare-string compare here silently let the
+    // server sentence-split every vibevoice-tts request — GH #171.
+    if (backend_name.rfind("vibevoice", 0) == 0)
         return {text};
 
     std::vector<std::string> result = crispasr_tts_split_sentences(text, max_chars);

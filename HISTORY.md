@@ -6,6 +6,33 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-06-19 §176 VibeVoice server chunking — name-guard mismatch (GH #171)
+
+GH #171 reporter saw the *same* sentence give clean audio from the CLI but
+garbled/multi-voice audio from the server, and noticed the server processed
+the input as ~30 chars where the CLI saw ~100. Root cause: the server's
+long-form planner `crispasr_tts_plan_chunks_for_backend()` skips
+sentence-chunking only for `backend_name == "vibevoice"`, but the TTS
+backends register as `vibevoice-tts` / `vibevoice-1.5b` / `vibevoice-tts-base`
+(the bare `vibevoice` is the *ASR* backend). So every `vibevoice-tts` request
+fell through to `crispasr_tts_split_sentences`, splitting one utterance into
+N synthesis calls — which the code's own comment warns "degrades [voice
+cloning]". The CLI `--tts` path (`crispasr_run.cpp`) never chunks, hence the
+CLI/server divergence. Fixed with a prefix match
+(`backend_name.rfind("vibevoice", 0) == 0`). Same registered-name-mismatch
+class as the `qwen3-asr`→`qwen3` Kaggle sweep bug (§174).
+
+The existing unit test had the same blind spot (it only checked the bare
+`"vibevoice"` name production never uses); added a regression case covering
+all four real `vibevoice*` names — verified it FAILS on the old guard and
+passes on the fix. `tools/format.sh` clean.
+
+Does **not** resolve the two other layers in #171 (logged in PLAN §177):
+(1) the RDNA4 coopmat2 garbage (`GGML_VK_DISABLE_COOPMAT2=1` confirmed fix,
+upstream ggml), (2) the cross-request "garbage after N sentences"
+statefulness, which this only de-amplifies (removes the 2-calls-per-request
+multiplier). See `LEARNINGS.md` for the diagnosis trail.
+
 ## 2026-06-19 §174 Output-language specification for audio-LLM ASR backends
 
 Seven backends ignored `params.language` entirely; `qwen3` injected a language

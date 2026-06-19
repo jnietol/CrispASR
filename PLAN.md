@@ -170,6 +170,40 @@ Not candidates: `crispasr_strip_ascii_punctuation` / `crispasr_lowercase_ascii`
 
 ---
 
+## §177 VibeVoice #171 — remaining layers after the chunking fix (OPEN)
+
+The server/CLI chunking divergence is fixed (§176, `crispasr_tts_chunking.cpp`
+prefix guard). Two layers from GH #171 remain, both needing the reporter's
+RDNA4 box (AMD RX 9070 XT, gfx1201) — we get clean audio on Metal +
+Vulkan/MoltenVK and cannot reproduce locally.
+
+1. **RDNA4 coopmat2 flash-attn garbage.** Confirmed by the reporter:
+   `GGML_VK_DISABLE_COOPMAT2=1` fixes every broken sample. This is the
+   upstream ggml coopmat2 shader on RDNA4 (already filed upstream — see
+   `docs/prompts`/upstream-PR notes #19). **Action:** once upstream lands, or
+   as a stopgap, auto-disable coopmat2 flash-attn for the vibevoice TTS graph
+   on gfx12xx (the `VIBEVOICE_TTS_FLASH_ATTN=0` knob already bisects LM
+   attention; `VIBEVOICE_VAE_BACKEND=cpu` isolates the decoder). Set a safe
+   RDNA4 default rather than relying on the user-set env var.
+
+2. **Cross-request statefulness** ("1st request correct; after N different
+   sentences the same input gives garbage" — server only, CLI is one
+   synthesize per process). The §176 chunking fix only *de-amplifies* this
+   (removes the 2-calls-per-request multiplier); it is not the root cause.
+   Suspect a scratch / cached voice-prompt KV buffer reused across
+   `vibevoice_synthesize()` calls that a numerically-bad request (RDNA4
+   coopmat2) poisons for subsequent ones — the logs show pos resets to 309
+   and "pre-filled KV from voice prompt" every request, so the leak is likely
+   in a *shared buffer behind* that refill, not the position counter.
+   **Action:** audit `vibevoice_synthesize` for state that survives between
+   calls (voice-KV cache tensors, compute scratch); add a session-level
+   "synthesize is idempotent across calls" test (synthesize A, then B×5, then
+   A again → byte-identical to the first A) on a reproducible backend. Ask the
+   reporter to re-test multi-request after §176 + `GGML_VK_DISABLE_COOPMAT2=1`
+   to see whether a residual leak remains once the numerics are clean.
+
+---
+
 ## WASM Browser build — all backends, multithreaded
 
 ### Goal
