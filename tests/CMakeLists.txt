@@ -1553,6 +1553,27 @@ set_tests_properties(test-server-tts PROPERTIES
     LABELS "live;server;tts"
     TIMEOUT 600)
 
+# ─── test-qwen3-tts-codes-determinism — live: CLI whole-clip synthesis gates.
+# (1) two identical --tts runs are bit-identical (guards the shared talker AR
+# loop / streaming dedup); (2) QWEN3_TTS_O15=1 is byte-identical to O15=0
+# (guards #56). Auto-discovers a qwen3-tts GGUF; SKIPs (exit 0) otherwise.
+add_test(NAME test-qwen3-tts-codes-determinism
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test-qwen3-tts-codes-determinism.sh
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+set_tests_properties(test-qwen3-tts-codes-determinism PROPERTIES
+    LABELS "live;tts;qwen3-tts;determinism"
+    TIMEOUT 300)
+
+# ─── test-qwen3-tts-seed-live — live: server-side seed determinism on
+# /v1/audio/speech (same request seed → bit-identical WAV; different seed →
+# different). Needs CRISPASR_TEST_QWEN3_TTS_MODEL/CODEC (CustomVoice); SKIPs.
+add_test(NAME test-qwen3-tts-seed-live
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test-qwen3-tts-seed-live.sh
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+set_tests_properties(test-qwen3-tts-seed-live PROPERTIES
+    LABELS "live;server;tts;qwen3-tts;determinism"
+    TIMEOUT 300)
+
 # ─── test-release-workflow — validate release.yml targets (issue #131).
 # Static test: no binary or model needed, just parses YAML.
 add_test(NAME test-release-workflow

@@ -552,6 +552,31 @@ else
     FAILED_NAMES="$FAILED_NAMES\n    - streaming-synthesis log marker"
 fi
 
+# Stream vs whole-clip equivalence: with a fixed seed the talker generates the
+# same codes either way, so the streaming windowed decode must cover exactly the
+# same frames as the whole-clip decode → identical total sample count. (The
+# per-window seam differs by <2% in amplitude but never in length.) This is the
+# regression guard that streaming stays a windowing of the same synthesis, not a
+# diverging path.
+SEQ_INPUT='{"input":"Stream equals whole clip equivalence check sentence.","response_format":"pcm","seed":4242'
+TMPNS=$(mktemp -t crispasr-ns.XXXXXX.pcm)
+TMPST=$(mktemp -t crispasr-st.XXXXXX.pcm)
+curl -s -X POST -H 'Content-Type: application/json' \
+    -d "$SEQ_INPUT}" -o "$TMPNS" "http://127.0.0.1:$PORT/v1/audio/speech" >/dev/null
+curl -s -N -X POST -H 'Content-Type: application/json' \
+    -d "$SEQ_INPUT, \"stream\":true}" -o "$TMPST" "http://127.0.0.1:$PORT/v1/audio/speech" >/dev/null
+NS_SZ=$(wc -c < "$TMPNS" | tr -d ' ')
+ST_SZ=$(wc -c < "$TMPST" | tr -d ' ')
+rm -f "$TMPNS" "$TMPST"
+if [ "$NS_SZ" -gt 1000 ] && [ "$NS_SZ" = "$ST_SZ" ]; then
+    echo "  ✓ same-seed stream == whole-clip total samples ($NS_SZ bytes)"
+    PASS=$((PASS + 1))
+else
+    echo "  ✗ stream/whole-clip sample count differs: non-stream=$NS_SZ stream=$ST_SZ"
+    FAIL=$((FAIL + 1))
+    FAILED_NAMES="$FAILED_NAMES\n    - stream==whole-clip sample count"
+fi
+
 # ─────────────────────────── 401 path ────────────────────────────────────
 # Re-running the server with --api-key is heavy; skip unless explicitly
 # enabled via TEST_AUTH=1. Even so, leave a hook here for completeness.
