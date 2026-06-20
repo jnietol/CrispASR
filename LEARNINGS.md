@@ -10,6 +10,36 @@ If a lesson is still "live" (affects current work), it's linked from
 
 ---
 
+## A byte-identical standalone reproducer is the only way to (dis)prove a "ggml bug" (§203)
+
+When a batched/fused graph misbehaves and you suspect ggml's allocator or a
+kernel, build a tiny standalone that links the **same** `libggml` dylibs and
+constructs the **same graph**, then diff the two graphs node-by-node. F5's
+batch-CFG (B=2) corrupted batch-1 (batch-0 stayed bit-exact); after a dozen
+in-tree probes pointed vaguely at "gallocr packing", a standalone with the
+**byte-identical 979-node graph** (verified via `CRISPASR_F5_DUMP_GRAPH` vs the
+repro's dump — same op/ne/contiguity/view per node) computed batch-1 **perfectly**
+across every variation (full scale, F16 weights, double `alloc_graph`, weight σ
+0.1–3.0, shared-backend sched). That single result **exonerated ggml entirely** —
+the bug had to be runtime-specific to the backend (values / surrounding state),
+not the graph. Corollaries:
+
+- **"Memory layout changes the result" ≠ "memory overlap".** Two independent
+  checks beat speculation: an in-allocator overlap detector (live-set keyed by
+  alloc-ptr + chunk + offset, **cleared on `dyn_tallocr` reset** or you get
+  cross-graph false positives) and **NaN-poisoning every node buffer before
+  compute**. If poison yields zero output-NaNs and the detector finds no overlap,
+  the buffer is clean and you're chasing the wrong thing — stop blaming the
+  allocator. F5: both came back clean; batch-1 was fully written but wrong.
+- **`ggml_set_output` as a "fix" is a tell, not a fix.** It only perturbs the
+  allocation; if protecting one tensor fixes it but protecting more re-breaks it,
+  you're shuffling a victim around a layout-sensitive read, not fixing a cause.
+- **Bisect toward the working repro, not away from it.** Once the standalone is
+  clean, transform the real backend *toward* it (strip features until the bug
+  vanishes) rather than piling more onto the repro — the gap that remains is the
+  cause. (Not done for F5; ~1.2× payoff didn't justify it. See HISTORY §203,
+  `repro_batch.cpp`.)
+
 ## Backend-name guards must match the *registered* name, by prefix when aliased (#171, #174)
 
 A backend's CLI factory alias and the string `name()` returns are not the

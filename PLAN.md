@@ -5616,14 +5616,24 @@ to_float`. Eliminates ~17 Metal command-buffer round-trips per AR frame
 
 #### §176h F5-TTS: collapse 22 mini-graphs + batch CFG
 
-**Status:** PARTIAL — single fused graph DONE (§183 2026-06-20)
+**Status:** PARTIAL — single fused graph DONE (§183 2026-06-20). **Batch CFG (B=2)
+ATTEMPTED + REVERTED (§203 2026-06-20) — blocked by an unisolated F5-runtime
+corruption; NOT worth pursuing** (the §183 fusion already captured the win, B=2
+adds only ~1.2×).
 **Effort:** Medium
 **File:** `src/f5_tts.cpp`
 **Done:** §183 fused all 22 DiT blocks into a single ggml graph (eliminated 1408
-alloc+compute round-trips per synthesis). **Remaining:** batch CFG as B=2 in the
-same graph pass (currently two serial passes); Vocos ConvNeXt ggml port (currently
-CPU scalar C++, blocks GPU dispatch). Weight pre-cache (§184/§185) already avoids
+alloc+compute round-trips per synthesis). Weight pre-cache (§184/§185) already avoids
 all dequantization in the hot path.
+**Batch CFG verdict (§203):** the B=2 batched graph is provably correct (input
+verified, batch-0 bit-exact vs serial) but batch-1 is corrupted in F5 only. A
+standalone reproducer with the **byte-identical 979-node graph** computes batch-1
+perfectly across every variation — so it is NOT a ggml allocator/graph bug. Root
+cause is F5-runtime-specific (values?), uncracked after ~45 experiments. Do not
+retry without first bisecting F5 toward the working repro. See HISTORY §203,
+LEARNINGS, and `repro_batch.cpp`.
+**Remaining (separate, still open):** Vocos ConvNeXt ggml port (currently CPU
+scalar C++, blocks GPU dispatch).
 
 #### §176i Cross-KV in F16 (not F32)
 

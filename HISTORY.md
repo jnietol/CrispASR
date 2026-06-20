@@ -9413,3 +9413,48 @@ overhead on every call.
 **Session totals across all 4 rounds:** 19 commits, covering §176
 b/d/e/f/j/m/o/p/q/r/s/t across 45+ backends. 15 of 20 sub-items now
 DONE or MOSTLY DONE.
+
+## 2026-06-20 §203 F5-TTS — batch-CFG (B=2) attempted, reverted; ggml exonerated
+
+Tried PLAN §176h's remaining item: batch the two classifier-free-guidance
+passes (conditioned + unconditioned) into a single B=2 eval of the §183 fused
+DiT graph instead of two serial passes. Implementation: InputEmbedding computed
+per-pass on CPU, the two `(dim,T)` hiddens stacked into `(dim,T,B=2)`, the whole
+fused graph generalised to a batch dim (4D attention reshapes, batch-isolated
+rope/flash), velocities split back out. Expected ~1.2× (FLOPs unchanged; win is
+fewer dispatches + better GEMM batching).
+
+**Symptom.** Batched **batch-0 came out bit-identical** to the serial path
+(max|Δ|=0.000), but **batch-1 was corrupted** (max|Δv|≈3–7; final audio cos≈0.1
+vs serial; ASR roundtrip garbage). Reproduced deterministically.
+
+**Diagnosis (ruled out, in order).** Built an in-process per-step verifier
+(`CRISPASR_F5_CFG_VERIFY`) comparing batched-batch-1 against an independent B=1
+run. Eliminated: graph logic (input read-back Δ=0; every op verified batch-correct
+on paper; flash output indexing correct for ne[3]=batch); **flash** (explicit
+softmax attention fails identically); **threading** (`--threads 1` identical);
+**in-place reuse** (`ggml_op_can_inplace`→false identical); **Metal/sched**
+(FORCE_CPU identical). Added an in-allocator **overlap detector**
+(`CRISPASR_ALLOC_CHECK`, keyed by alloc-ptr+chunk+offset, cleared on dyn_tallocr
+reset) and **NaN-poisoning** of all node buffers (`CRISPASR_F5_POISON`): result —
+**no overlapping live tensors, zero uninitialised reads.** Batch-1 is fully
+written, just wrong. The only lever was fragile: `ggml_set_output` on block-0's
+modulated `norm_x` → perfect Δ=0, but protecting all `norm_x` (or `hidden_in`)
+re-breaks it (layout shuffles the victim).
+
+**The decisive test — a standalone reproducer.** `repro_batch.cpp` mirrors one
+DiT block's exact ops through gallocr + CPU backend. Dumped F5's real graph
+(`CRISPASR_F5_DUMP_GRAPH`) and the repro's: **byte-identical** — 979 nodes, same
+op / ne / contiguity / view flags per node, same ggml dylibs, same gallocr
+decisions including the `hidden_in` in-place reuse. The repro computes batch-1
+**perfectly (Δ=0)** across every variation: F5 scale (D=1024, T=188, 22 blocks),
+F16 weights, double `alloc_graph` + set-pos-between, weight σ 0.1–3.0, and a
+shared-backend `ggml_backend_sched` "time_embed" compute before the DiT.
+
+**Conclusion.** A faithful standalone with the identical graph is correct →
+**there is no general ggml allocator/graph bug.** The corruption is specific to
+F5's runtime (most likely the real weight values or a buffer/quantisation detail)
+and was not isolated after ~45 experiments. Reverted all changes (`f5_tts.cpp`,
+`ggml-alloc.c`); working tree clean. The §183 single-graph fusion already captured
+F5's main win; B=2 adds only ~1.2× and is not worth more investment. `repro_batch.cpp`
++ diagnostic logs preserved in the worktree for any future attempt.
