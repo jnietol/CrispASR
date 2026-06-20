@@ -6741,13 +6741,32 @@ unlocks GPU for the entire pipeline + flash attn.
 
 #### §176o embed_tokens micro-graph elimination
 
-**Status:** OPEN
+**Status:** MOSTLY DONE
 **Effort:** Small
-**Backends:** Orpheus, OuteTTS, FunASR
-**Approach:** These build a single-op ggml graph per AR step just for
-`ggml_get_rows`. Should be a direct CPU dequant from the weight buffer
-(single `ggml_backend_tensor_get` of one row) or fused into the main
-decode graph.
+**Done (HISTORY §180, §187, 2026-06-20):** FunASR (`CRISPASR_FUNASR_EMBED_FAST`),
+GLM-ASR (`CRISPASR_GLM_ASR_EMBED_FAST`), MOSS-Audio
+(`CRISPASR_MOSS_AUDIO_EMBED_FAST`), Qwen3-ASR
+(`CRISPASR_QWEN3_ASR_EMBED_FAST`), Gemma4-E2B
+(`CRISPASR_GEMMA4_E2B_EMBED_FAST`, + sqrt(d) scale).
+**Already had fast path:** Orpheus, OuteTTS (n==1 direct row read at port time).
+**Already optimal:** LFM2-Audio (direct row reads, no graph).
+**N/A:** Mini-Omni2 (never calls embed with n=1).
+**Remaining:** Granite-Speech (model too large for VPS bench).
+**A/B:** funasr embed step ~1.6× faster on VPS.
+
+#### §176t read_tensor_f32 weight pre-cache for VITS-family TTS
+
+**Status:** PARTIAL
+**Effort:** Small per backend (mechanical)
+**Done:** Piper-TTS (`CRISPASR_PIPER_WEIGHT_CACHE`, 14% speedup, §adbfb274),
+MeloTTS (`CRISPASR_MELOTTS_WEIGHT_CACHE`, 16% speedup, §237000c4).
+**Remaining:** OpenVoice2 (same VITS architecture, same read_tensor_f32 pattern).
+SpeechT5 has only 1 call (not worth it). FastPitch uses ggml graphs (no need).
+**Approach:** Pre-populate `unordered_map<tensor*, vector<float>>` at model
+load, modify `read_tensor_f32` to check cache first via module-level context
+pointer. Cost: ~2× model RAM (acceptable for <200 MB TTS models).
+**Impact:** 14-16% end-to-end synthesis speedup by eliminating repeated
+`ggml_backend_tensor_get` + F16→F32 dequant per synthesis call.
 
 #### §176p MOSS Audio: wire encoder flash attention
 
