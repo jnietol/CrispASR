@@ -48,6 +48,7 @@ test-all-backends.py passes 18/18 transcribe + 51/54 feature tests (3 stream ski
 
 | Priority | Item | Effort | Status |
 |---|---|---|---|
+| **HIGH** | [§176 Runtime optimization pass](#176-runtime-optimization-pass--2026-06-20-audit) | Phased | Full audit done. 19 sub-items (§176a–§176s). Tier 1: flash-attn wiring (§176a), Lk-bucketed graph cache (§176b), device-resident KV migration (§176c), BLAS for scalar CPU hotpaths (§176d). See PERFORMANCE.md for the full matrix. |
 | **MEDIUM** | [#52 Qwen3-TTS](#52-qwen3-tts) — perf pass | Medium | talker + code_predictor + codec + ECAPA + codec_encoder all done; step-4 perf pass open (~137 ms/frame → real-time). **O15 broken on CUDA and default-OFF** (`61c42bfb`) — main perf lever disabled. **2026-06-13 Kaggle P100:** dedicated-sched fix (`baef21aa`) didn't help — O15=ON still rc=-6 SIGABRT at 6.0s. Crash is on the *first* code_pred call (not cached reuse), so root cause is `ggml_set_rows`-based KV scatter or the fixed-Lk causal mask on CUDA, not sched sharing. Baseline O15=OFF: 27.4 ms/frame, WAV OK. |
 | **HIGH** | [#57 Commercial-friendly TTS expansion](#57-commercial-friendly-tts-backend-expansion) | Phased | Phases 1-3 DONE; Turbo WORKING; F0 wired in; native voice cloning shipped → HISTORY §82; **#83 production fix LANDED 2026-05-24 → HISTORY 2026-05-24 + LEARNINGS Round 9** — S3Gen UNet weight residency split (`s3.fd.*` on CPU, encoder/vocoder GPU): M1 Metal cos_min 0.940→**0.999980** in diff harness, intelligible audio at all T; comparable wall-time to pure CPU on M1. Q8_0×F32 bit-match Metal kernel committed (commit `752baecf`, upstream-PR-quality, drafted as PR 09). 3 upstream PR drafts in `tools/upstream-prs/09-11` covering Metal Q8_0 kernel + ggml-alloc drift bug report + scheduler NaN-at-large-T bug report. Linux CPU smoke validated on VPS. **R9 follow-up #4 2026-05-24**: two bugs found. **Bug A** (ggml sched dangling src pointers across `alloc_graph` calls): **FIXED** with a per-call mutation log in `ggml/src/ggml-backend.cpp` that restores `node->src[j]` originals at end of compute. Repro is the chatterbox CFG cond+uncond pair on the same gf; characterized and upstream-PR drafted at `tools/upstream-prs/10`. **Bug B** (`unet_input` divergence under sched-copy): **STILL OPEN — current code only WORKS AROUND it** by pinning `unet_input` to Metal in `cfm_euler_solve::run_denoiser`. With Bug A patched, the sched CPU→GPU copy delivers correct bytes to the kernel (verified by inline `tensor_get` before im2col dispatch) yet downstream compute still diverges (smoke rms ~16). Pinning `time_emb` is actively harmful (rms ~209), so the workaround is narrow. Without a real fix, any future user of `ggml_backend_sched` with a similar topology will hit this. Handover prompt for the follow-up at `handover-prompts/issue83-r9-followup-5-unet-input-routing.md`. **R9 follow-up #5 2026-05-24**: **Bug B FIXED via `parallel=true` in `ggml_backend_sched_new`**. After eliminating ~10 candidate hypotheses (cache barriers, blit copies, concurrency, fusion, optimize, n_cb variants, private-storage buffers, im2col edge case, rc-as-mul_mat) and proving the divergence is between host's and GPU's view of the same shared-storage Metal buffer on the uncond pass, the root cause is sched's between-submission synchronisation. With `parallel=false` (the chatterbox default until this fix) sched uses `[cmd_buf_last waitUntilCompleted]`, which doesn't invalidate the GPU's L1/L2 cached view of a shared-storage `MTLBuffer` that the CPU just memcpy'd between submissions. With `parallel=true` sched uses `ggml_backend_event_record` / `event_wait` → on Metal that's `MTLSharedEvent` `encodeSignalEvent` / `encodeWaitForEvent`, which carry proper GPU cache invalidation. Switched `chatterbox_s3gen_init_from_file` to `parallel=true`. Removed the unet_input pin workaround and the `CRISPASR_NO_INPUT_PIN` env override. Verification: GPU residency smoke `rms 16.x → 5.143`, CPU residency smoke `rms 5.139` unchanged (no regression), diff harness `s3gen_mel cos_min = 0.999976` (matches prior workaround baseline). LEARNINGS R9 #5 closes with new lessons 7' and 8 ("Check sched's `parallel` flag for Metal cache-coherency-shaped bugs"). End-to-end status: smoke rms `13.938 → 5.143`, diff `s3gen_mel cos_min 0.940 → 0.999976`, 2-mark trigger `NaN → 5.291`. Production CPU-residency path unchanged. Also open: Kartoffelbox_Turbo DE |
 | **MEDIUM** | [#51c MiMo-V2.5-ASR F16 step decode](#51c-f16-step-decode) | Small | F16 step-decode validation blocked behind ≥32 GB box (see PLAN #51c); base runtime + Q4_K shipped → HISTORY §56 |
@@ -6403,3 +6404,236 @@ For quantized models (Q4_K) this avoids repeated dequantization overhead.
 
 **Files:** `src/f5_tts.cpp` (`emb_cache` in `f5_tts_context`; `f5_tts_init`;
 `dit_forward` input-embedding section)
+
+---
+
+## §176 Runtime optimization pass — 2026-06-20 audit
+
+Full code-read survey of every runtime. Detailed findings in
+PERFORMANCE.md "Runtime optimization audit — 2026-06-20". This section
+tracks the TODO items.
+
+### Tier 1 — High impact, broadly applicable
+
+#### §176a Wire `ggml_flash_attn_ext` in remaining AR decoders
+
+**Status:** OPEN
+**Effort:** Small per backend (flag passthrough)
+**Backends:** Orpheus, OuteTTS, Chatterbox (PLAN #86 stub), Parler
+(decoder SA), SpeechT5, Dia, Zonos, TADA, Pocket-TTS, CSM (backbone +
+depth decoder), MOSS encoder (32 layers), Voxtral/4B encoder, CosyVoice3
+**Approach:** `core_attn::kv_self_attn` already supports flash_attn_ext;
+most backends just never pass `flash_attn=true`. The flag exists in most
+context_params structs. Wire the flag through and default it ON.
+**Impact:** 2-5× attention bandwidth reduction at long sequences.
+
+#### §176b Lk-bucketed graph caching for AR decode steps
+
+**Status:** OPEN
+**Effort:** Medium (template from qwen3-tts)
+**Backends:** All 30+ backends that rebuild their decode graph per step.
+Highest-value targets: Chatterbox (1000 tokens), Orpheus/OuteTTS (long
+codec sequences), Parler (9 codebooks), SpeechT5, Dia, Pocket-TTS,
+Zonos, TADA, CosyVoice3, VoxCPM2, VibeVoice (pred head), F5-TTS
+(22 blocks × 32 steps × 2 CFG), LFM2 (VAE), KugelAudio (VAE + pred)
+**Approach:** Qwen3-TTS demonstrates with 5 pre-built graphs at fixed Lk
+sizes. MIMO has a simpler single-bucket `step_t1_gf`. FunASR has the
+infrastructure but disabled due to full-window attend; needs Lk-bucketing
+to be efficient (round up to nearest power of two).
+**Impact:** 6-14 ms/step graph-build overhead eliminated across 100-1000
+steps. Largest single latency win project-wide.
+
+#### §176c Migrate host-side KV to device-resident 4D tensors
+
+**Status:** OPEN
+**Effort:** Medium per backend
+**Backends:** SpeechT5, Dia, Parler, Pocket-TTS, VoxCPM2 (all use
+`std::vector<float>` KV that grows and re-uploads every step)
+**Approach:** Follow IndexTTS/CSM pattern: 4D on-device tensor
+`[head_dim, max_ctx, n_heads, n_layers]` with `ggml_view_4d` +
+`ggml_cpy` writes. Eliminates O(step × layers × hidden) host↔device
+bandwidth per step.
+**Impact:** Eliminates the dominant data-movement bottleneck for these
+backends at long output sequences.
+
+#### §176d BLAS/ggml for scalar CPU matmul hotpaths
+
+**Status:** OPEN
+**Effort:** Medium-Large (per-backend refactor)
+**Targets (ordered by compute dominance):**
+- TitaNet ASP TDNN: 9216×T scalar matmul → ggml graph or cblas_sgemm
+- Silero LID: 8 stages × O(T²) scalar attention → ggml graph
+- FireRed VAD: 8 DFSMN blocks + linear layers → ggml graph
+- MeloTTS/Piper: `cpu_multihead_attention_relpos` O(H×T²×D) × 6 layers
+  → ggml with flash_attn
+- OpenVoice2 WaveNet: 16 layers × T × K=5 × C=192 → ggml_conv_1d
+- Granite Speech `cpu_linear`: naive dequant matmul → ggml or OMP
+- Parakeet LSTM predictor: H=640 per-step matmul → BLAS sgemm
+- Nemotron LSTM/joint: same pattern as Parakeet
+- F5-TTS Vocos + text encoder: ConvNeXt matmuls → ggml
+**Impact:** These are the dominant compute paths in their respective
+runtimes and currently run as unvectorized nested loops.
+
+### Tier 2 — Medium impact, moderate effort
+
+#### §176e Context caching for support runtimes
+
+**Status:** OPEN
+**Effort:** Small per backend (template: Silero VAD static cache)
+**Backends:** WhisperEncDec VAD, MarbleNet VAD, FireRed VAD, Pyannote,
+ECAPA-TDNN LID, RNNoise enhancement, CTC aligner, FireRedPunc (graph
+ctx)
+**Approach:** The Silero VAD `g_silero_cache_mtx` + static context
+pattern prevents 70× init/free regression. Replicate for each backend:
+static or per-pipeline cached context, mutex-guarded.
+**Impact:** Eliminates repeated init/free overhead in diarization and
+post-processing pipelines that call these per-segment.
+
+#### §176f Parallel STFT in mel.cpp + BLAS mel projection
+
+**Status:** OPEN
+**Effort:** Small
+**Files:** `src/core/mel.cpp`, `src/core/kaldi_fbank.cpp`
+**Approach:**
+- STFT loop: add `#pragma omp parallel for` with per-thread
+  `fft_in`/`fft_out` scratch buffers (frame loop is embarrassingly
+  parallel)
+- Mel projection: replace scalar `do_matmul` loop with `cblas_sgemm` for
+  `(T × n_freqs) × (n_freqs × n_mels)` — 31M multiply-adds for NeMo
+  cluster
+**Impact:** Entry point for ~40 backends. Linear scaling with cores for
+STFT; BLAS gives SIMD + threading for free on mel projection.
+
+#### §176g CPU embedding cache for AR TTS backends
+
+**Status:** OPEN
+**Effort:** Small per backend (template: qwen3-tts `CpuEmbdCache`)
+**Backends:** Orpheus, OuteTTS, Chatterbox, Zonos, CosyVoice3, TADA,
+VibeVoice, Pocket-TTS
+**Approach:** Copy raw quantized embedding bytes from GPU buffer to CPU
+at init; `get_row_into` dequantizes via `ggml_get_type_traits(type)->
+to_float`. Eliminates ~17 Metal command-buffer round-trips per AR frame
+(measured in qwen3-tts).
+
+#### §176h F5-TTS: collapse 22 mini-graphs + batch CFG
+
+**Status:** OPEN
+**Effort:** Medium
+**File:** `src/f5_tts.cpp`
+**Approach:**
+1. Build all 22 DiT blocks in a single ggml graph (currently 22 separate
+   alloc+compute+get cycles per ODE step, 1408 total round-trips)
+2. Batch CFG as B=2 in the same graph (currently two serial passes)
+3. Port Vocos ConvNeXt + text encoder from scalar C++ to ggml
+**Impact:** ~2× from CFG batching + ~22× fewer graph round-trips per ODE
+step. Vocos ggml port enables GPU dispatch for the vocoder.
+
+#### §176i Cross-KV in F16 (not F32)
+
+**Status:** OPEN
+**Effort:** Small
+**Backends:** M2M-100, T5, SpeechT5, Dia, Parler
+**Approach:** Cross-attention K/V is projected once from the encoder and
+read-only thereafter. F16 halves memory with no accuracy impact. Change
+the allocation dtype and adjust the view/write paths.
+
+#### §176j Replace recursive FFT (core/fft.h) with iterative
+
+**Status:** OPEN
+**Effort:** Small
+**File:** `src/core/fft.h`
+**Approach:** The recursive `fft_radix2` allocates O(N log N) heap per
+call. `kaldi_fbank.cpp` already has a correct iterative in-place variant.
+Replace `core_fft::fft_radix2` with the iterative version.
+**Also:** CosyVoice3 HiFT source DFT is O(n²) — must use FFT.
+
+### Tier 3 — Targeted wins
+
+#### §176k FireRed ASR: add KV cache for decoder self-attention
+
+**Status:** OPEN
+**Effort:** Medium
+**File:** `src/firered_asr.cpp`
+**Approach:** Currently grows `std::vector<float>` per beam per layer
+and does O(T²) scalar attention. Add pre-allocated 4D KV cache
+(`core_attn` pattern) with flash_attn_ext. Highest-impact single-backend
+optimization remaining.
+
+#### §176l Kyutai STT: vectorized RVQ encode
+
+**Status:** OPEN
+**Effort:** Medium
+**File:** `src/kyutai_stt.cpp`
+**Approach:** Brute-force O(T×32×2048×256) codebook search is the
+dominant cost. Options: SIMD-vectorized exhaustive search, or product
+quantization / FAISS-style IVF for approximate nearest-neighbor.
+
+#### §176m Nemotron: ring buffer for streaming KV cache
+
+**Status:** OPEN
+**Effort:** Small
+**File:** `src/nemotron.cpp`
+**Approach:** `std::vector::erase` from front is O(N) per eviction.
+Replace with a ring buffer (or `std::deque` with fixed-size window) for
+O(1) eviction.
+
+#### §176n VoxCPM2: fix Metal buffer type mismatch
+
+**Status:** OPEN
+**Effort:** Medium (investigation)
+**File:** `src/voxcpm2_tts.cpp`
+**Approach:** Currently CPU-only due to SIGSEGV from `matmul_mv_ggml`
+allocating input tensors in CPU-side mem buffer. Root cause is likely a
+buffer type mismatch in `ggml_backend_sched` allocation strategy. Fixing
+unlocks GPU for the entire pipeline + flash attn.
+
+#### §176o embed_tokens micro-graph elimination
+
+**Status:** OPEN
+**Effort:** Small
+**Backends:** Orpheus, OuteTTS, FunASR
+**Approach:** These build a single-op ggml graph per AR step just for
+`ggml_get_rows`. Should be a direct CPU dequant from the weight buffer
+(single `ggml_backend_tensor_get` of one row) or fused into the main
+decode graph.
+
+#### §176p MOSS Audio: wire encoder flash attention
+
+**Status:** OPEN
+**Effort:** Small
+**File:** `src/moss_audio.cpp`
+**Approach:** 32-layer Whisper encoder uses `ggml_soft_max_ext` + manual
+mask. Replace with `ggml_flash_attn_ext`. Also add layer offload
+(`CRISPASR_N_GPU_LAYERS`) and fused QKV for the 36-layer Qwen3 LLM.
+
+#### §176q greedy_decode.h: eliminate per-token alloc
+
+**Status:** OPEN
+**Effort:** Small
+**File:** `src/core/greedy_decode.h`
+**Approach:** `sample_temp` allocates `std::vector<double> probs(vocab_size)`
+every call. Make it `thread_local static` to eliminate ~one malloc per
+decode step across all AR backends.
+
+#### §176r beam_decode.h: heap-based top-K
+
+**Status:** OPEN
+**Effort:** Small
+**File:** `src/core/beam_decode.h`
+**Approach:** `detail::top_k_log_softmax` allocates `std::vector<int>
+idx(vocab_size)` and calls `std::partial_sort` over the full vocab per
+beam per step. A heap-based linear-scan top-K (O(V log K)) would avoid
+the full allocation. Also: `Beam::tokens` deep-copies on fork — a
+persistent prefix trie would halve copy cost.
+
+#### §176s Encoder graph caching by shape
+
+**Status:** OPEN
+**Effort:** Small-Medium
+**Backends:** SenseVoice (70 layers), Canary, Moonshine, Moonshine
+Streaming, FunASR, OmniASR, Qwen3 ASR, MOSS Audio, Voxtral/4B, GLM ASR,
+Granite Speech, Kyutai STT
+**Approach:** Nemotron demonstrates caching encoder graphs keyed by
+`(layer, T_new, T_cache)`. Most other encoders rebuild from scratch each
+call despite fixed topology for a given T_mel. Cache by T_mel (or use
+bucketed T values).

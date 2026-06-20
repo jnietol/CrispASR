@@ -2269,3 +2269,698 @@ time is bounded, canary's per-chunk AED decode produces slightly more
 content; for general use, parakeet's faster path with coverage-parity
 is the recommended default.
 
+---
+
+## Runtime optimization audit — 2026-06-20
+
+Full code-read survey of every runtime in the project: what optimization
+tricks each already implements, and where room exists for more. Covers
+65+ backends across ASR, TTS, Audio-LLM, VAD, LID, speaker, translation,
+enhancement, alignment, punctuation, and diarization — plus the shared
+core infrastructure.
+
+### Legend
+
+- **Has** = optimization is implemented and active
+- **Partial** = infrastructure exists but disabled by default or incomplete
+- **Gap** = applicable but not yet wired
+
+---
+
+### 1. Cross-cutting optimization matrix
+
+#### 1a. AR decode infrastructure (backends with autoregressive token loops)
+
+| Backend | KV cache | Flash attn | Fused QKV | Graph cache | CPU embd cache | Layer offload | Beam search |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| **whisper** | Has | Has | — | Gap | — | — | Has (batch) |
+| **canary** | Has (quant) | Has | — | Gap | — | Gap | Has (branched) |
+| **cohere** | Has (quant) | Has | — | Gap | — | Gap | Has |
+| **kyutai-stt** | Has (quant) | Has | Has | Gap | — | Gap | Has |
+| **firered-asr** | Gap (vec) | Gap | — | Gap | — | Gap | Has (lazy) |
+| **moonshine** | Has | Has | — | Gap | — | — | Has (branched) |
+| **moonshine-stream** | Has | Has | — | Gap | — | — | Has |
+| **funasr** | Has (quant) | Has (enc) | Has | Partial | — | Has (split) | Has (replay) |
+| **voxtral** | Has (quant) | Partial | Has | Gap | — | Has | Has |
+| **voxtral4b** | Has (quant) | Partial (enc gap) | Has | Gap | — | Has | Has |
+| **glm-asr** | Has (quant) | Has | — | Gap | — | Has (LLM) | Has (replay) |
+| **granite-speech** | Has (quant) | Has (LLM) | — | Gap | — | Has | Has |
+| **qwen3-asr** | Has (quant) | — | Has | Gap | — | Has | — |
+| **omniasr** | Has (quant) | Has | — | Gap | — | Has | Has (replay) |
+| **mimo-asr** | Has (quant) | Has (audio) | Has | Has (T=1) | — | Has | Has |
+| **moss-audio** | Has | Gap (enc) | Gap | Gap | — | Gap | Has |
+| **gemma4-e2b** | Has (dual) | Gap (enc) | — | Gap | — | Has | Has |
+| **m2m100** | Has (cross) | Has | — | Gap | — | Gap | Has (replay) |
+| **t5-translate** | Has (cross) | Gap (rpe) | — | Gap | — | Gap | — |
+| **orpheus** | Has (quant) | Gap | — | Gap | Gap | Has | — |
+| **outetts** | Has (quant) | Gap | — | Gap | Gap | Gap | — |
+| **kokoro** | — (NAR) | Gap | — | Gap | — | — | — |
+| **bark** | Has | Has | Has | Gap | — | — | — |
+| **melotts** | — | Gap | — | Gap | — | — | — |
+| **parler** | Has (host) | Gap | — | Gap | — | — | — |
+| **speecht5** | Has (host) | Gap | — | Gap | — | — | — |
+| **dia** | Has (host) | Gap | — | Gap | — | — | — |
+| **csm** | Has (device) | Has (Mimi) | Has | — | — | — | — |
+| **indextts** | Has (device) | Has | — | — | — | — | Has (device) |
+| **f5-tts** | — (diff) | Has (DiT) | — | Gap | — | — | — |
+| **fastpitch** | — (NAR) | Has | Has | — | — | — | — |
+| **zonos** | Has (quant) | Gap | Has | Gap | Gap | Gap | — |
+| **vibevoice** | Has (F16) | Has | — | Partial | Gap | Has | — |
+| **qwen3-tts** | Has (quant) | Has | Has | Has (5-bucket) | Has | Partial | — |
+| **cosyvoice3** | Has | Gap | — | Gap | Gap | Gap | — |
+| **tada** | Has (quant) | Gap | — | Gap | Gap | Gap | — |
+| **voxcpm2** | Has (host) | Gap | — | Gap | — | Gap (CPU only) | — |
+| **chatterbox** | Has (quant) | Gap (stub) | — | Gap | Gap | Gap | — |
+| **pocket-tts** | Has (host) | Gap | — | Gap | — | — | — |
+| **lfm2-audio** | Has (F16) | Has | Has | Gap | — | Has | Gap (stub) |
+| **mini-omni2** | Has (quant) | Has | — | Gap | — | — | — |
+| **kugelaudio** | Has | Has | — | Gap | — | — | — |
+| **pcs** | — (enc) | Has | — | — | — | — | — |
+
+#### 1b. Encoder-only / non-AR backends
+
+| Backend | Flash attn | BN fold | Fused QKV | Graph cache | GPU path |
+|---|:-:|:-:|:-:|:-:|:-:|
+| **paraformer** | Has | — | Has (cross) | Gap | Gap |
+| **parakeet** | Has (opt-in) | Has | — | Gap | Has |
+| **sensevoice** | Has | — | Has | Gap | Has |
+| **wav2vec2** | Has | — | — | Gap | Has |
+| **fireredpunc** | Has | — | — | Gap | Has |
+
+#### 1c. Support runtimes (VAD, LID, speaker, etc.)
+
+| Backend | Context cache | GPU inference | Flash attn | BN fold |
+|---|:-:|:-:|:-:|:-:|
+| **silero-vad** | Has | — | — | — |
+| **encdec-vad** | Gap | Gap (CPU only) | Has | — |
+| **marblenet-vad** | Gap | Gap (CPU only) | — | — |
+| **firered-vad** | Gap | Gap (loads GPU, runs CPU) | — | — |
+| **pyannote-seg** | Gap | — (correct: tiny model) | — | — |
+| **ecapa-lid** | Gap | Has (partial) | — | Gap |
+| **silero-lid** | — | Gap (loads GPU, runs CPU) | Gap | — |
+| **firered-lid** | — | Has (via firered-asr) | Has | — |
+| **cld3** | — (correct) | — (correct) | — | — |
+| **fasttext-lid** | — | — | — | — |
+| **titanet** | Gap | Gap (loads GPU, runs CPU) | — | Has |
+| **audioseal** | Has (sched) | Has | — | — |
+| **rnnoise** | Gap | — | — | — |
+
+---
+
+### 2. Per-runtime detail
+
+#### ASR — Encoder-only / NAR
+
+**Paraformer** (`paraformer.cpp`):
+- Has: flash attn, fused cross-KV, pre-alloc compute meta, sched reuse,
+  NAR decode (single pass), LFR 6× frame reduction, CIF on CPU
+- Gap: no persistent graph (rebuilt per call), no GPU backend, CIF conv
+  is scalar C++ (D=512, K=3 — no SIMD), 256 MB static compute buffer
+  never freed, no chunking for long audio
+
+**Parakeet** (`parakeet.cpp`):
+- Has: flash attn (opt-in), BN folding at load, lazy weight cache for
+  predictor+joint, per-frame encoder projection reuse, 3 transcription
+  modes (single/chunked/streamed), TDT duration head, CTC-WS hotword
+  trie, MAES beam search, auto thread count
+- Gap: LSTM predictor+joint head are scalar C++ (H=640, 2 layers — no
+  BLAS), no persistent encoder graph, chunked encoding is serial (could
+  parallel-encode), mel window/filterbank re-read from GGUF per call,
+  sinusoidal PE recomputed per call, temperature sampling with full
+  CDF scan (Gumbel-max would be faster)
+
+**SenseVoice** (`sensevoice.cpp`):
+- Has: encoder-only single forward, flash attn (70 SANM blocks), fused
+  QKV, sinusoidal PE precomputed at load, single ggml graph for full
+  model, GPU backend, CTC prefix beam search with gamma pruning
+- Gap: graph rebuilt per call (70 layers each time), no chunking for
+  long audio (O(T²) attention per block), log-softmax for beam search
+  in C++ loop (could be ggml op), `maybe_snap` emits 70 unconditional
+  dup nodes in production
+
+**Wav2Vec2** (`wav2vec2-ggml.cpp`):
+- Has: full transformer in ggml, tensor cache for D2H copies, grouped
+  conv via im2col+matmul, OMP in CPU pos_conv, quantized weight support,
+  MAES gamma-pruned beam decode
+- Gap: CNN feature extractor is manual scalar C++ (7-layer, <5% of
+  total but no SIMD), fresh gallocr per call, global static tensor
+  cache (thread-unsafe), 15× ggml_concat for grouped conv assembly
+
+#### ASR — Encoder-decoder
+
+**Canary** (`canary.cpp`):
+- Has: BN folding, KV cache with quant (Q8_0/Q4_0), cross-KV precomputed
+  once, flash attn (SA+CA), KV on-CPU spill, on-device beam KV snapshot
+  pool, prefill batching, chunked streaming with LCS dedup, degenerate
+  loop guard
+- Gap: no layer offload, cross-KV freed+rebuilt per call, decode graph
+  rebuilt per step, bespoke C++ FFT
+
+**Kyutai STT** (`kyutai_stt.cpp`):
+- Has: single ggml graph for Mimi encoder, combined QKV weight, flash
+  attn (Mimi+LM), layer scale, ggml_arange in-graph, KV cache (quant),
+  frame-aligned timestamps, streaming API, per-token callback, beam
+  search, SwiGLU, RoPE
+- Gap: RVQ encode is brute-force O(T×32×2048×256 — no FAISS/PQ), linear
+  interp resampler (aliasing), no layer offload, LM graph rebuilt per
+  frame, Mimi graph rebuilt per call, streaming re-encodes all audio
+
+**FireRed ASR** (`firered_asr.cpp`):
+- Has: CPU Q4_K SIMD dispatch, vecmat for quantized matmul, cpu_dot with
+  4 accumulators, OMP cpu_matmul_bt, cross-KV precomputed, persistent
+  GPU decoder projection graph, hybrid ggml/CPU encoder, beam search
+  with lazy full-weight cache, CTC fallback
+- Gap: **no KV cache for decoder SA** (growing vector, O(T²) with no
+  SIMD — highest-impact gap), 128+ tiny ggml graphs per decode step
+  (one per matmul), rel-pos attention scalar C++, Conv2d subsample
+  scalar C++, ggml encoder drops position attention term
+
+**Moonshine** (`moonshine.cpp`):
+- Has: cross-KV precomputed, self-KV cache with view writes, flash attn
+  everywhere, partial RoPE, weight tying detection, xorshift64 RNG,
+  on-device beam KV snapshot pool, encoder output freed after cross-KV
+- Gap: no persistent graph (rebuild per step), KV re-allocated per call,
+  no early exit / length estimation
+
+**Moonshine Streaming** (`moonshine_streaming.cpp`):
+- Has: cross-KV precomputed, flash attn with per-layer sliding window
+  masks, separate self/cross KV, SiLU-gated FFN, learnable pos embed
+  for cross-attn, beam search, rolling-window streaming API, per-token
+  callback
+- Gap: audio frontend is scalar C++ (2 CausalConv1d, not ggml), decoder
+  step graph rebuilt per token, KV allocated fresh per call, sliding
+  window mask rebuilt per call per layer (O(T²) × n_layers)
+
+#### ASR — LLM-decoder
+
+**FunASR** (`funasr.cpp`):
+- Has: KV cache with zero-init, fused QKV at load (§136), flash attn
+  (encoder+adaptor), GQA 16/8, SwiGLU, YaRN RoPE, sinusoidal PE at
+  load, last-token-only logit projection, optional step-graph cache
+  (disabled), kv_indices/set_rows for graph-cache compat, encoder GPU
+  split, per-stage bench, NaN checker, degenerate guard
+- Gap: step graph cache disabled (full-window attend), beam search is
+  replay O(beam×suffix×full_forward), encoder graph rebuilt per call,
+  maybe_snap unconditional in encoder, embed_tokens builds tiny graph
+  per step, adaptor QKV not fused
+
+**Voxtral 3B** (`voxtral.cpp`):
+- Has: KV cache, fused QKV (7-8% decode speedup), layer offload, 4-frame
+  stack projector, Tekken tokenizer with lazy reverse-map, flash attn
+  flag
+- Gap: flash attn not applied to encoder, encoder graph rebuilt per
+  call, no streaming, Tekken vocab stored as F32 tensor
+
+**Voxtral 4B** (`voxtral4b.cpp`):
+- Has: fused QKV, adaptive RMSNorm scales precomputed at init, SWA
+  (encoder 750, LLM 8192), causal conv1d, native streaming API with
+  live decode, tied embeddings, layer offload, thread-local FFT scratch,
+  KV cache
+- Gap: ada_scale precompute is scalar CPU, SWA mask rebuilt per call,
+  FFT memcpy per frame, flash attn not wired for encoder
+
+**GLM ASR** (`glm_asr.cpp`):
+- Has: KV cache (quant), KV on-CPU, layer offload (LLM), flash attn,
+  last-token-only head, prefill batching, 4-frame stacking, partial
+  RoPE, SwiGLU, multi-EOS, zero-fill KV reset
+- Gap: mel padded to 3000 frames regardless of audio length, encoder
+  graph rebuilt per call, FFT allocates per-window, beam search is
+  replay (no KV snapshots)
+
+**Granite Speech** (`granite_speech.cpp`):
+- Has: BN folding, Shaw RPE precomputed per layer, KV cache (quant),
+  KV on-CPU, layer offload, flash attn (LLM), dual encoder paths
+  (CPU/ggml graph), block-local attention (ctx=200), frame stacking 2×,
+  Q-Former projector (3 tokens), mid-CTC, GQA 16/4, per-stage bench
+- Gap: cpu_linear is naive F32 dequant matmul (no SIMD, no OMP),
+  depthwise_conv_1d_cpu is scalar loops, Q-Former 3-token bottleneck
+  lossy for long audio, encoder graph rebuilt per call
+
+**Qwen3 ASR** (`qwen3_asr.cpp`):
+- Has: KV cache, lazy crisp_audio init, optional fused QKV, layer offload,
+  sinusoidal PE at load, batched conv for audio chunking, thread-local
+  FFT scratch, forced-aligner variant auto-detect, chunked windowed
+  attention mask
+- Gap: FFT memcpy per frame, encoder graph not cached by shape, dual
+  GGUF load for audio tower (could share), no fused QKV for encoder
+
+**OmniASR** (`omniasr.cpp`):
+- Has: flash attn, KV cache (quant), KV on-CPU, layer offload, GPU-side
+  argmax, token embedding via get_rows, separate enc/dec graphs,
+  logit/argmax mode, per-call perf timing, beam search, streaming auto-
+  detect, grouped pos_conv
+- Gap: encoder graph rebuilt per call, 15× ggml_concat for grouped conv,
+  no fused QKV in encoder
+
+**MIMO ASR** (`mimo_asr.cpp`):
+- Has: KV cache (quant), cached T=1 step graph (skip_plan), fused QKV,
+  GPU embed split, flash attn (audio transformer), layer offload, beam
+  search, token streaming callback
+- Gap: step graph reset per transcribe call even if params unchanged,
+  audio transformer has no KV cache (bidirectional), mimo_tokenizer
+  is separate GGUF context, no flash attn in LLM decoder
+
+**MOSS Audio** (`moss_audio.cpp`):
+- Has: KV cache, sinusoidal PE at load, DeepStack tap capture, SwiGLU,
+  attention windowing mask, beam search, token streaming, seed-controlled
+  sampling, conv weight layout fix
+- Gap: **encoder flash attn not wired** (32 layers, highest-impact gap),
+  encoder graph rebuilt per call, no layer offload, no fused QKV for LLM
+
+**Nemotron** (`nemotron.cpp`):
+- Has: per-layer streaming K/V+conv cache, ggml graph cache keyed by
+  (layer, T_new, T_cache), flash attn, banded window mask, scalar CPU
+  LSTM (weights copied once), lazy sched init, pre-alloc compute meta,
+  ggml_siglu_swapped, streaming context presets
+- Gap: LSTM/joint head no BLAS/SIMD (H=640), cache eviction O(N) vector
+  erase (should be ring buffer), custom FFT no SIMD, sinusoidal PE
+  recomputed per chunk, flash attn default off
+
+**Gemma4 E2B** (`gemma4_e2b.cpp`):
+- Has: dual KV cache (sliding-window + full-context), KV sharing via
+  donor layers, QAT clipping baked per Linear, per_dim_scale baked at
+  load, PLE as one large matmul + strided views, logit softcapping,
+  layer offload, beam search, token streaming, thread-local FFT scratch,
+  partial rotary
+- Gap: **conformer uses manual per-block matmul for rel-pos attention**
+  (cannot use flash_attn_ext due to additive bias — fundamental
+  constraint, but no SIMD either), mel generated at runtime (not cached
+  in GGUF), block concat via O(num_chunks) ggml_concat, no audio
+  caching between calls
+
+#### TTS
+
+**Kokoro** (`kokoro.cpp`):
+- Has: LRU phoneme cache (1024 entries), pre-permuted ConvT weights,
+  Metal ConvT CPU pinning workaround, dual backends+schedulers, snake-α
+  in graph, iSTFT with Hermitian symmetry, AdaIN/AdaLN
+- Gap: BERT encoder graph rebuilt per call, LSTM no SIMD, BERT output
+  not cached (only phoneme strings), iSTFT twiddle factors recomputed
+  per call, flash attn unused
+
+**Bark** (`bark_tts.cpp`):
+- Has: KV cache with growth-amortized realloc, flash attn (causal),
+  weight norm folding (EnCodec), fused QKV, min_eos_p early exit,
+  CPU context merge
+- Gap: EnCodec decoder entirely scalar CPU (SEANet conv+LSTM — should
+  use convt1d_decomp), weight norm re-folded per call (should be at
+  init), KV freed per call, fine-stage re-embeds overlapping windows
+
+**MeloTTS** (`melotts.cpp`):
+- Has: pre-permuted ConvT weights, HiFi-GAN in single ggml graph,
+  speaker gin injection
+- Gap: **cpu_multihead_attention_relpos** is O(H×T²×D) scalar loops
+  (6 layers — highest-impact gap), mini_graph pattern with constant
+  malloc/free, scalar dds_conv, read_tensor_f32 re-reads weights per call
+
+**OuteTTS** (`outetts.cpp`):
+- Has: KV cache (quant, lazy alloc, persistent), KV backend spill, BPE
+  tokenizer, xorshift64* + partial_sort sampling, repetition penalty,
+  non-audio token early exit
+- Gap: flash_attn declared but not wired, use_gpu=false default, no
+  layer offload, embed_tokens builds mini-graph per step
+
+**Orpheus** (`orpheus.cpp`):
+- Has: KV cache (quant), layer offload, GQA 3:1, RoPE (theta=500000),
+  SNAC lazy-loaded, xorshift64* sampling, n_dropped early exit
+- Gap: flash_attn not wired (PLAN #86 — highest priority), embed_tokens
+  builds mini-graph per step
+
+**Parler TTS** (`parler_tts.cpp`):
+- Has: T5 encoder cached after set_description, cross-KV pre-projected
+  once (24 layers), pre-permuted DAC ConvT weights, prefill in single
+  step, delay pattern, top-k+temperature, all_eos early exit
+- Gap: decoder graph rebuilt per step (past KV re-uploaded growing),
+  cross-KV re-uploaded per step (same data), ggml_concat materializes
+  full KV copy (quadratic memory), read_embed_row per codebook per step,
+  flash_attn unused
+
+**SpeechT5** (`speecht5_tts.cpp`):
+- Has: host-side KV cache for decoder, cross-attn encoder output reuse,
+  BN fusion in postnet, pre-permuted HiFi-GAN ConvT weights, separate
+  mini_graphs per stage, early exit via stop probability, sinusoidal PE
+  precomputed
+- Gap: **KV re-uploaded every step** (growing O(step×hidden)), new K/V
+  readback per step (sync), **cross-attn K/V recomputed every step**
+  (6 layers, fixed data), no flash attn, graph rebuild every step
+
+**F5-TTS** (`f5_tts.cpp`):
+- Has: flash attn (22 DiT blocks), RoPE, on-the-fly mel+iSTFT, GPU
+  backend, sway sampling
+- Gap: **CFG as two serial passes** (should batch B=2), **22 separate
+  mini-graphs per ODE step** (1408 round-trips total), **Vocos + text
+  encoder entirely scalar C++** (triple-nested loops), mel filterbank
+  rebuilt per call
+
+**Dia** (`dia_tts.cpp`):
+- Has: pre-allocated KV cache, cross-KV precomputed once (18 layers),
+  encoder runs once, CFG batch B=2 in encoder, GQA with repeat_4d,
+  pre-permuted DAC ConvT weights, RoPE
+- Gap: past KV re-uploaded every step (18 layers × B=2), cross-KV
+  re-uploaded every step, new K/V readback per step, graph rebuilt
+  per step, no flash attn
+
+**CSM** (`csm_tts.cpp`):
+- Has: **device-resident KV cache** (backbone F32, depth F16), KV dtype
+  from env, pre-permuted SEANet ConvT weights, fused QKV in Mimi,
+  flash attn in Mimi, RoPE, BPE tokenizer, compute meta pre-alloc
+- Gap: no flash attn in backbone or depth decoder (16+4 layer Llama),
+  RVQ dequant is scalar C++, speaker reference encoding stub (ignored)
+
+**IndexTTS** (`indextts.cpp`):
+- Has: **device-resident KV with view writes** (zero host round-trip),
+  dynamic KV realloc, flash attn (GPT+Conformer+Perceiver), beam search
+  with on-device KV snapshots, prompt prefill in one pass, pre-permuted
+  BigVGAN ConvT weights, mel via core/mel.h, repetition penalty,
+  return-latent second GPT pass
+- Gap: beam search KV copy overhead (host mode = full tensor get/set),
+  second GPT forward re-runs full 24L (hidden states not cached from
+  AR decode), no quantized KV cache
+
+**FastPitch** (`fastpitch_tts.cpp`):
+- Has: NAR single forward, flash attn (enc+dec), fused QKV, pre-permuted
+  HiFi-GAN ConvT weights, speaker embedding via get_rows, three-phase
+  graph, pitch shift additive, pace control
+- Gap: decoder+vocoder graph forces CPU (bypasses scheduler), pitch
+  embedding in separate tiny graph, mel transpose done on CPU loop
+
+**OpenVoice2** (`openvoice2.cpp`):
+- Has: pre-permuted HiFi-GAN ConvT weights, ref encoder embedding
+  reusable, WaveNet speaker cond precomputed, GPU backend for HiFi-GAN
+- Gap: **WaveNet entirely scalar CPU** (16 layers × T × K=5 × C=192 —
+  highest-impact gap), **ref encoder Conv2d + GRU scalar CPU**, STFT
+  recomputed fresh per call, no threading in WaveNet
+
+**Zonos** (`zonos_tts.cpp`):
+- Has: dual KV caches (quant), fused gate+up, DAC lazy-loaded,
+  build_prefix_cpu avoids GPU round-trip for conditioning
+- Gap: no graph caching, espeak via popen (should use C API), no flash
+  attn, GPU off by default, no layer offload, no CPU embd cache
+
+**VibeVoice** (`vibevoice.cpp`):
+- Has: layer offload, pre-permuted ConvT weights, flash attn (decoder),
+  dual CFG KV caches, pre-filled voice prompt KV, PyTorch-exact MT19937
+  Gaussian noise
+- Gap: acoustic+semantic encoders run serial (could fuse/parallel),
+  pred head graph rebuilt per DPM step, no CPU embd cache, DPM schedule
+  coefficients recomputed per call
+
+**Qwen3 TTS** (`qwen3_tts.cpp`):
+- Has: **Lk-bucketing** (5 pre-built graphs), **O15 code-predictor
+  reuse** (14-19 ms/frame saving), **CPU embedding cache**, per-op
+  profiler, fused QKV, codec CPU pinning workaround, dedicated talker
+  scheduler, flash attn throughout
+- Gap: O15 default OFF (CUDA sm_87 crash), Lk bucket boundaries
+  hardcoded, no speculative decoding
+
+**CosyVoice3** (`cosyvoice3_tts.cpp`):
+- Has: RAS sampler, multi-GGUF pipeline, voice packs with precomputed
+  conditioning, persistent KV, Euler ODE with cosine schedule, CFG
+- Gap: **HiFT source DFT is O(n²)** (should be FFT), no graph caching
+  for LLM steps, no CPU embd cache, flash attn unclear, fixed 10 Euler
+  steps (DPM-Solver++ would halve), no layer offload
+
+**TADA** (`tada_tts.cpp`):
+- Has: dual KV caches (quant), KV zero-init, pre-loaded voice prompt,
+  separate graphs for embedding+FM steps
+- Gap: no graph caching for AR steps, no FM graph reuse (fixed topology),
+  no flash attn, no CPU embd cache, no layer offload
+
+**VoxCPM2** (`voxcpm2_tts.cpp`):
+- Has: streaming API (unique), LongRoPE, FSQ bottleneck (no codebook
+  lookup)
+- Gap: **CPU-only** (Metal SIGSEGV — buffer type mismatch), manual KV
+  cache (vector per layer, host upload/download per step), no graph
+  caching, no flash attn
+
+**Chatterbox** (`chatterbox.cpp`):
+- Has: two T3 variants (Llama/GPT-2), precomputed conditioning in GGUF,
+  PyTorch-exact MT19937, multilingual language tokens
+- Gap: **flash attn is a stub** (PLAN #86 — 520M Llama AR with up to
+  1000 tokens), no Lk-bucketing, no CPU embd cache, no S3Gen CFM graph
+  reuse, no layer offload
+
+**Pocket TTS** (`pocket_tts.cpp`):
+- Has: pre-permuted Mimi ConvT weights, flow net precomputed sinusoidal
+  embed, eos_threshold early exit, F16 dequant cache
+- Gap: **per-step graph rebuild is critical bottleneck** (O(pos×NH×HD)
+  KV reorder per step), F16 cache is thread-unsafe + unbounded, flow
+  net is scalar CPU, no flash attn, Mimi decoder rebuilt per call
+
+#### Audio-LLM / S2S
+
+**LFM2 Audio** (`lfm2_audio.cpp`):
+- Has: KV cache (F16 4D), conv state cache per layer, dual compute-meta
+  buffers, flash attn (FastConformer+backbone), GQA 32/8, fused QKV,
+  NeMo mel with z-norm, lazy detokenizer, streaming TTS API, layer
+  offload
+- Gap: beam search stub, depthformer KV is manual CPU F32, acoustic
+  connector graph rebuilt per call, VAE decoder graph rebuilt per token
+
+**Mini-Omni2** (`mini_omni2.cpp`):
+- Has: KV cache (quant), flash attn (Whisper+Qwen2), causal mask only
+  for prefill, last_token_only view, 8-stream dual output, SNAC decode
+- Gap: 8 separate embed_tokens graph invocations per step (should batch),
+  O(N²) DFT (n_fft=400 not power-of-2), rand() unseeded, no beam
+  search, adapter graph rebuilt per call, no streaming audio output
+
+**KugelAudio** (`kugelaudio.cpp`):
+- Has: KV cache (F16), flash attn GQA 28/4, RoPE NEOX, pre-permuted
+  ConvT weights, MT19937 RNG, DPM-Solver++ 2nd-order, cosine beta
+  precomputed, constrained argmax (4 tokens)
+- Gap: **CFG not implemented** (allocated but unused), acoustic connector
+  rebuilt per frame, VAE decoder rebuilt per token, pred head rebuilt per
+  diffusion step, no streaming audio output
+
+**PCS** (`pcs.cpp`):
+- Has: ggml_backend_sched, flash attn (12 encoder layers), enc+punc heads
+  on GPU, chunking at 512 tokens, SentencePiece tokenizer
+- Gap: SBD+truecase heads are scalar CPU loops, post_punc weight re-read
+  from GPU per call, hidden state readback serializes GPU/CPU, no
+  batching
+
+#### VAD
+
+**Silero VAD** (`crispasr_vad.cpp`):
+- Has: static cached context (avoids 70× init/free regression),
+  energy-minima splitting, binary search timestamp remap
+- Gap: caching is Silero-specific (other VAD engines not cached)
+
+**WhisperEncDec VAD** (`crispasr_vad_encdec.cpp`):
+- Has: flash attn, fused QKV, thread-local FFT scratch, F16 K/V cast,
+  30s windowed processing, auto-threshold lowering
+- Gap: no context caching, CPU-only hardcoded, KV rebuilt per call
+
+**MarbleNet VAD** (`marblenet_vad.cpp`):
+- Has: depthwise conv via ggml_conv_1d_dw, F16 weight cast, BN pre-fused
+- Gap: no context caching, thread count hardcoded to 4, no GPU path
+
+**FireRed VAD** (`firered_vad.cpp`):
+- Has: CMVN, hysteresis segmentation
+- Gap: **all 8 DFSMN blocks + linear layers are scalar CPU loops** (no
+  ggml, no BLAS, no SIMD despite loading via ggml_backend_init_best()),
+  mel filterbank recomputed per call
+
+**Pyannote** (`pyannote_seg.cpp`):
+- Has: direct tensor pointer access (correct for tiny model), CPU-forced
+- Gap: forward/backward LSTM serial (could parallel), SincNet conv scalar,
+  no context caching
+
+#### LID
+
+**ECAPA-TDNN LID** (`ecapa_lid.cpp`):
+- Has: GPU for Conv1d trunk, mel filterbank in GGUF, 15s audio cap
+- Gap: ASP + FC layers scalar CPU (9216×T dominant), BN not pre-folded
+
+**Silero LID** (`silero_lid.cpp`):
+- Has: GPU weight loading, learned STFT front-end
+- Gap: **entire forward pass is scalar CPU** despite GPU init — 8 stages
+  × O(T²) attention loops
+
+**FireRed LID** (`firered_lid.cpp`):
+- Has: reuses full firered_asr runtime
+- Gap: runs full ASR pass for single language token (extreme overkill)
+
+#### Speaker
+
+**TitaNet** (`titanet.cpp`):
+- Has: BN pre-folding at init, pre-emphasis, L2 normalization
+- Gap: **all inference is scalar CPU loops** (depthwise conv, pointwise
+  conv, SE, ASP TDNN 9216×T — no ggml graph, no GPU despite init_best)
+
+#### Translation
+
+**M2M-100** (`m2m100.cpp`):
+- Has: cross-KV cache, decoder self-KV (F16 4D), flash attn (enc SA,
+  dec CA), beam search, prefill batching
+- Gap: CPU-only, encoder graph rebuilt per call, cross-KV F32 (should
+  be F16), KV reallocated per call
+
+**T5 Translation** (`t5_translate.cpp`):
+- Has: cross-KV cache, decoder self-KV, Viterbi DP tokenizer, rel-pos
+  bias in-graph, RMSNorm, gated-GELU FFN, F32 precision on KQ matmul
+- Gap: CPU-only, manual encoder attention (can't use flash_attn_ext with
+  additive rel-pos bias), position bucket indices recomputed per step,
+  cross-KV F32, encoder rebuilt per call
+
+#### Other
+
+**AudioSeal** (`audioseal.cpp`):
+- Has: pre-permuted ConvT weights, lazy sched, GPU, LSTM ih_all
+  precomputed, additive watermark (no full reconstruction)
+- Gap: graph rebuilt per call, LSTM concat chain O(T) nodes, no
+  streaming/chunking
+
+**RNNoise Enhancement** (`crispasr_enhance.cpp`):
+- Has: miniaudio resample, zero-fill guarantee
+- Gap: resampler init/destroy per call, DenoiseState created per call,
+  linear resampler quality
+
+**FireRedPunc** (`fireredpunc.cpp`):
+- Has: flash attn (12 BERT layers), GPU, sched persistent, chunking at
+  510, dual tokenizer, CJK/Latin heuristic
+- Gap: ggml_context rebuilt per call, WordPiece re-tokenization for
+  alignment, sharp chunk boundaries
+
+**CTC Forced Alignment** (`align.cpp`):
+- Has: Viterbi DP with rolling vectors (O(S) memory), int8 backpointers,
+  UTF-8 codepoint-aware, lowercase fallback
+- Gap: log-softmax over entire [T×V], backpointer T separate heap allocs
+
+**Diarization** (`crispasr_diarize.cpp`):
+- Has: 4-method dispatch, overlap-class speaker accumulation, silence
+  gating, per-slice offset mapping
+- Gap: Xcorr is O(seg×2×MAX_LAG) — FFT-based would be O(N log N),
+  Pyannote re-initialized per call
+
+---
+
+### 3. Shared core infrastructure
+
+**attention.h**: flash attn, fused QKV, GQA (repeat_4d + native), KV
+quant (asymmetric K/V), KV on-CPU, on-device snapshot pool, dynamic
+index KV write, forced F32 dequant read. Gap: GQA repeat_4d materializes
+copy for non-granite models; Metal HOST snapshot still memcpys.
+
+**ffn.h**: fused gate+up (saves ~30 ms/call per code comment), swiglu/
+geglu/silu/gelu variants, no-op bias skip. Gap: no fused SiLU*mul kernel.
+
+**conv.h**: convt1d_decomp (matmul+col2im), batch weight permutation,
+depthwise stride-2 k3. Gap: extra ggml_cont calls, single-threaded
+permute, F16 cast per call in depthwise.
+
+**mel.cpp**: unified 9-family extractor, optional double precision, frame
+stacking zero-copy. Gap: **single-threaded STFT loop** (dominant cost for
+long audio), **scalar mel projection** (no BLAS — 31M multiply-adds for
+NeMo cluster), per-call power/mel buffer alloc.
+
+**kaldi_fbank.cpp**: thread-local fb/window cache, iterative FFT, in-
+place pre-emphasis. Gap: per-call fft scratch alloc, scalar mel projection
+inner loop (no SIMD).
+
+**fft.h**: thread-local scratch. Gap: **recursive FFT with O(N log N)
+heap allocs** — should use iterative version from kaldi_fbank.
+
+**greedy_decode.h**: reserve, early exit, NoHook eliminated, inverse-CDF
+sampling, streaming callback, frequency penalty. Gap: sample_temp allocs
+vocab-sized double vector every token.
+
+**beam_decode.h**: branched variant O(B×T) with VRAM snapshot pool,
+partial_sort, multi-EOS, RAII snapshot management. Gap: full-vocab idx
+alloc per beam per step, Beam deep-copies tokens/probs vectors.
+
+**ctc.h**: gamma pruning, partial_sort. Gap: linear-scan prefix
+find_or_insert O(B×V), scalar posterior_pool.
+
+**cpu_ops.h**: OMP layernorm, reused compute_meta. Gap: two-pass
+layernorm, matmul rebuilds graph every call.
+
+**gguf_loader.cpp**: zero-copy mmap (CPU+Metal), WILLNEED→RANDOM madvise,
+mlock, preload, layer-split loader. Gap: two-pass tensor bind, sequential
+split partitions.
+
+---
+
+### 4. Top optimization opportunities by impact
+
+Ordered by estimated breadth × depth of impact across the project:
+
+#### Tier 1 — High impact, broadly applicable
+
+1. **Wire flash_attn_ext in all AR decoders** — Orpheus, OuteTTS,
+   Chatterbox, Parler, SpeechT5, Dia, Zonos, TADA, Pocket-TTS, MOSS
+   encoder, Voxtral/4B encoder, CSM backbone. The `core_attn::kv_self_attn`
+   path already supports it; most backends just never pass the flag.
+   Estimated: 2-5× attention bandwidth reduction at long sequences.
+
+2. **Lk-bucketed graph caching for AR decode** — applies to every backend
+   that rebuilds its decode graph per step (30+ backends). Qwen3-TTS
+   demonstrates the pattern with 5 buckets. The MIMO `step_t1_gf` is a
+   simpler single-bucket variant. Graph rebuild overhead is 6-14 ms/step
+   (measured in funasr); eliminating it across 100-1000 steps per
+   synthesis/transcription is the largest single latency win.
+
+3. **Migrate host-side KV re-upload to device-resident KV** — SpeechT5,
+   Dia, Parler, Pocket-TTS, VoxCPM2 all use `std::vector<float>` KV
+   caches that grow and re-upload every step. IndexTTS and CSM demonstrate
+   the correct pattern: 4D on-device tensor with `ggml_view_4d` + `ggml_cpy`
+   writes. Eliminates O(step × layers × hidden) host↔device bandwidth.
+
+4. **BLAS/ggml for scalar CPU matmul hotpaths** — TitaNet ASP TDNN
+   (9216×T), Silero LID attention (8 stages × O(T²)), FireRed VAD DFSMN
+   (8 blocks), MeloTTS/Piper relpos attention (6 layers × O(T²)),
+   OpenVoice2 WaveNet (16 layers), Granite cpu_linear, Parakeet LSTM
+   predictor. These are the dominant compute in their respective
+   runtimes and run as unvectorized nested loops.
+
+#### Tier 2 — Medium impact, moderate effort
+
+5. **Context caching for support runtimes** — WhisperEncDec VAD, MarbleNet
+   VAD, FireRed VAD, Pyannote, ECAPA-TDNN LID, RNNoise enhancement, CTC
+   aligner, FireRedPunc graph context. The Silero VAD static-cache pattern
+   is the template. Eliminates repeated init/free overhead in pipelines
+   that call these per-segment.
+
+6. **Parallel STFT in mel.cpp** — the mel spectrogram is the entry point
+   for ~40 backends. The STFT loop is single-threaded. Adding `#pragma omp
+   parallel for` with per-thread scratch buffers would scale linearly with
+   cores. Similarly, the mel projection matmul should use BLAS (`cblas_sgemm`).
+
+7. **CPU embedding cache** — Qwen3-TTS demonstrates caching quantized
+   embedding bytes on CPU to avoid Metal command-buffer round-trips per AR
+   step. Applies to Orpheus, OuteTTS, Chatterbox, Zonos, CosyVoice3, TADA,
+   VibeVoice, Pocket-TTS.
+
+8. **F5-TTS: collapse 22 per-block mini-graphs into one** — currently 1408
+   alloc+compute+get round-trips per synthesis. Batch CFG as B=2 in a
+   single graph would halve DiT inference time. Port Vocos + text encoder
+   from scalar C++ to ggml.
+
+9. **Cross-KV in F16 (not F32)** — M2M-100, T5, SpeechT5, Dia, Parler all
+   store cross-attention K/V as F32 on host. Cross-KV is read-only after
+   projection; F16 halves memory with no accuracy impact.
+
+10. **Replace recursive FFT (core/fft.h) with iterative** — recursive
+    variant allocates O(N log N) heap per call. kaldi_fbank.cpp already has
+    the correct iterative in-place version. Also: CosyVoice3 HiFT DFT is
+    O(n²) — must use FFT.
+
+#### Tier 3 — Targeted wins
+
+11. **FireRed ASR: add KV cache for decoder self-attention** — currently
+    grows a vector and does O(T²) scalar attention. Highest-impact single-
+    backend optimization remaining.
+
+12. **Kyutai STT RVQ encode: vectorized search or PQ** — brute-force
+    O(T×32×2048×256) codebook search is the dominant cost.
+
+13. **Nemotron: ring buffer for streaming KV cache** — vector erase from
+    front is O(N); a ring buffer is O(1).
+
+14. **VoxCPM2: fix Metal buffer type mismatch** — currently CPU-only due
+    to SIGSEGV from buffer placement. Unlocks GPU for the entire pipeline.
+
+15. **embed_tokens micro-graph elimination** — Orpheus, OuteTTS, FunASR
+    build a single-op ggml graph per AR step for `ggml_get_rows`. Should
+    be a direct CPU dequant or fused into the main graph.
+

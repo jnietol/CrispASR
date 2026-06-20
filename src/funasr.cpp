@@ -1647,7 +1647,7 @@ static std::vector<float> funasr_run_llm_step(funasr_context* ctx, const float* 
 // Get the inputs_embeds for an arbitrary token sequence via the model's
 // token_embd table (shared with output.weight thanks to Qwen3 tied embeddings).
 // For n==1 (the AR decode hot path), skip the graph and dequant one row
-// directly — eliminates graph-build + sched overhead per decode step.
+// directly — eliminates graph-build + sched overhead per decode step (§176o).
 // Gated by CRISPASR_FUNASR_EMBED_FAST (default ON, set =0 to disable).
 static std::vector<float> funasr_embed_tokens(funasr_context* ctx, const std::vector<int32_t>& ids) {
     const int n = (int)ids.size();

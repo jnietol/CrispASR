@@ -119,7 +119,12 @@ static inline int sample_temp(const float* logits, int vocab, float temperature,
         if (s > mx)
             mx = s;
     }
-    std::vector<double> probs((size_t)vocab);
+    // Thread-local scratch avoids a heap alloc per decode step (~one
+    // malloc per token across all AR backends). The vector persists
+    // across calls; we only resize when vocab grows.
+    static thread_local std::vector<double> probs;
+    if ((int)probs.size() < vocab)
+        probs.resize((size_t)vocab);
     double sum = 0.0;
     for (int k = 0; k < vocab; k++) {
         const double e = std::exp((double)(logits[k] * inv_t - mx));
