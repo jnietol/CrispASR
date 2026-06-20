@@ -9339,3 +9339,20 @@ Also eliminated per-step `make_sinusoidal_pe()` allocation (now pre-computed
 once to `max_steps+1` before the decode loop, sliced by pointer per step).
 
 All 5 speecht5-params unit tests pass.
+
+## 2026-06-20 §176 round 3 — encoder graph caching + BLAS (Claude Opus session cont.)
+
+Continued the §176 optimization pass with encoder graph caching and
+one more BLAS migration:
+
+**§176s encoder graph caching** (arena_ctx pattern):
+- Canary (`3f635503`), Moonshine (`2131015b`), GLM ASR + Voxtral +
+  Voxtral4B (`bef7b16d`), Qwen3 ASR + MOSS Audio (`6f859e0f`),
+  Granite Speech (`3fb22da5`), Kyutai STT (`85a55451`)
+
+16 of 17 ASR encoder backends now cache their graph across calls with
+the same input shape. Only OmniASR remains (fused encoder+decoder).
+
+**§176d Granite Speech cpu_linear** (`eaa6dff2`):
+- Replace scalar triple-nested matmul with cblas_sgemm (Accelerate on
+  Apple). Also adds proper per-row dequantization for quantized weights.
