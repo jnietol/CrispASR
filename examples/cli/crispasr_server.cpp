@@ -1649,14 +1649,42 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
                 std::deque<std::string> q;
                 bool done = false;
                 bool failed = false;
+                // Set by the provider when the client socket write fails (the
+                // client disconnected). The worker stops enqueuing so a detached
+                // synth does not keep growing the queue / holding model_mutex for
+                // audio nobody is reading.
+                bool cancelled = false;
             };
             auto sq = std::make_shared<StreamQueue>();
+
+            // Backpressure cap: the worker blocks once this many chunks are
+            // queued, so a slow/stalled consumer can't make memory grow unbounded
+            // (the previous "bounded queue" comment was aspirational — the deque
+            // had no cap). At ~30 KB/streaming-chunk this caps the queue at ~2 MB.
+            constexpr size_t kMaxQueueDepth = 64;
+
+            // Enqueue one encoded chunk with backpressure: block while the queue
+            // is at capacity, but bail immediately if the client has gone. Returns
+            // false when cancelled (caller should stop producing).
+            auto enqueue = [sq, kMaxQueueDepth](std::string&& data) -> bool {
+                std::unique_lock<std::mutex> lk(sq->m);
+                sq->cv.wait(lk, [&] { return sq->q.size() < kMaxQueueDepth || sq->cancelled; });
+                if (sq->cancelled)
+                    return false;
+                sq->q.push_back(std::move(data));
+                lk.unlock();
+                sq->cv.notify_one(); // wake the consumer
+                return true;
+            };
 
             const bool true_streaming = (backend->capabilities() & CAP_STREAMING) != 0;
 
             // Post-process one float PCM buffer (speed resample + watermark) and
             // enqueue it as int16 LE. Runs on the worker thread.
-            auto push_pcm = [&, sq, sr_out, speed](const float* pcm, int n_samples) {
+            // Captures by value only (it is copied into the detached worker
+            // thread, which outlives this handler scope — a `[&]` default would
+            // dangle).
+            auto push_pcm = [sq, sr_out, speed, enqueue](const float* pcm, int n_samples) {
                 if (!pcm || n_samples <= 0)
                     return;
                 std::vector<float> chunk(pcm, pcm + n_samples);
@@ -1674,34 +1702,31 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
                     chunk = std::move(rs);
                 }
                 crispasr_wm_dispatch::embed(chunk.data(), (int)chunk.size(), sr_out);
-                std::string enc = crispasr_make_pcm_int16_le(chunk.data(), (int)chunk.size());
-                {
-                    std::lock_guard<std::mutex> lk(sq->m);
-                    sq->q.push_back(std::move(enc));
-                }
-                sq->cv.notify_one();
+                enqueue(crispasr_make_pcm_int16_le(chunk.data(), (int)chunk.size()));
             };
 
             // Worker thread: synthesize all sentences, enqueueing chunks as
             // they are produced. Captures by value the bits it needs so it
             // outlives the handler scope (the provider keeps `sq` alive).
             std::thread worker([&backend, &model_mutex, sentences, rp, is_voice_clone, silence_s16, true_streaming,
-                                push_pcm, sq, t0]() {
+                                push_pcm, enqueue, sq, t0]() {
+                auto is_cancelled = [&] {
+                    std::lock_guard<std::mutex> lk(sq->m);
+                    return sq->cancelled;
+                };
                 {
                     std::lock_guard<std::mutex> lock(model_mutex);
                     if (is_voice_clone) {
                         const auto& disc = crispasr_tts_get_disclaimer(backend.get(), rp);
                         if (!disc.empty()) {
                             push_pcm(disc.data(), (int)disc.size());
-                            std::string sil((const char*)silence_s16.data(), silence_s16.size() * sizeof(short));
-                            {
-                                std::lock_guard<std::mutex> lk(sq->m);
-                                sq->q.push_back(std::move(sil));
-                            }
-                            sq->cv.notify_one();
+                            enqueue(std::string((const char*)silence_s16.data(), silence_s16.size() * sizeof(short)));
                         }
                     }
                     for (size_t i = 0; i < sentences.size(); i++) {
+                        // Client gone — stop before the next (possibly long) synth.
+                        if (is_cancelled())
+                            break;
                         if (true_streaming) {
                             backend->synthesize_streaming(
                                 sentences[i], rp,
@@ -1712,12 +1737,7 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
                                 push_pcm(chunk.data(), (int)chunk.size());
                         }
                         if (i + 1 < sentences.size()) {
-                            std::string sil((const char*)silence_s16.data(), silence_s16.size() * sizeof(short));
-                            {
-                                std::lock_guard<std::mutex> lk(sq->m);
-                                sq->q.push_back(std::move(sil));
-                            }
-                            sq->cv.notify_one();
+                            enqueue(std::string((const char*)silence_s16.data(), silence_s16.size() * sizeof(short)));
                         }
                     }
                 }
@@ -1731,20 +1751,27 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
             });
             worker.detach();
 
-            res.set_chunked_content_provider(
-                "audio/pcm", [sq](size_t /*offset*/, httplib::DataSink& sink) -> bool {
-                    std::unique_lock<std::mutex> lk(sq->m);
-                    sq->cv.wait(lk, [&] { return !sq->q.empty() || sq->done; });
-                    if (sq->q.empty() && sq->done) {
-                        lk.unlock();
-                        sink.done();
-                        return true;
-                    }
-                    std::string c = std::move(sq->q.front());
-                    sq->q.pop_front();
+            res.set_chunked_content_provider("audio/pcm", [sq](size_t /*offset*/, httplib::DataSink& sink) -> bool {
+                std::unique_lock<std::mutex> lk(sq->m);
+                sq->cv.wait(lk, [&] { return !sq->q.empty() || sq->done || sq->cancelled; });
+                if (sq->q.empty() && (sq->done || sq->cancelled)) {
                     lk.unlock();
-                    return sink.write(c.data(), c.size());
-                });
+                    sink.done();
+                    return true;
+                }
+                std::string c = std::move(sq->q.front());
+                sq->q.pop_front();
+                lk.unlock();
+                sq->cv.notify_one(); // release the worker's backpressure wait
+                if (!sink.write(c.data(), c.size())) {
+                    // Client disconnected — tell the worker to stop producing.
+                    std::lock_guard<std::mutex> lk2(sq->m);
+                    sq->cancelled = true;
+                    sq->cv.notify_all();
+                    return false;
+                }
+                return true;
+            });
             return;
         }
 

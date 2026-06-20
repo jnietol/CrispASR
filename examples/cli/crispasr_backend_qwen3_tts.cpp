@@ -377,6 +377,15 @@ public:
         // the AR loop so end-to-end overhead stays modest. Override via the
         // (chunk_frames, overlap_frames) args for a different latency/quality
         // balance.
+        //
+        // Platform note (measured M1 Metal, qwen3-tts-0.6b, 2026-06-20): the
+        // codec decode is NOT cheap relative to the AR loop on Metal, so the
+        // per-window re-decode roughly DOUBLES total wall time (~1.9x) even as
+        // time-to-first-audio drops ~5-6x (9.3s -> 1.7s). Output stays
+        // ASR-identical to the whole-clip path (max |diff| ~1.6%). The win is
+        // interactive latency, not throughput — callers that want minimal total
+        // time on Metal should keep stream=false. On CUDA the re-decode overhead
+        // is the documented ~15%.
         float* full = qwen3_tts_synthesize_streaming(ctx_, text.c_str(), 8, 96, trampoline, &cb, &n);
         // The full buffer was already delivered via the callback chunks; free it.
         qwen3_tts_pcm_free(full);
