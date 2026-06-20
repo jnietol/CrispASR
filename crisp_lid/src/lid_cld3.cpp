@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -130,7 +131,8 @@ struct lid_cld3_context {
     // names) is held by the ggml_context.
     ggml_context* gctx = nullptr;
     ggml_backend_buffer_t buf = nullptr;
-    std::unordered_map<std::string, ggml_tensor*> tensors;
+    // std::map to match core_gguf::WeightLoader::tensors (moved-from below).
+    std::map<std::string, ggml_tensor*> tensors;
 };
 
 // ===========================================================================
@@ -698,7 +700,7 @@ static bool tensor_to_f32(const ggml_tensor* t, std::vector<float>& out, size_t 
     return true;
 }
 
-static ggml_tensor* lid_get(const std::unordered_map<std::string, ggml_tensor*>& m, const std::string& name) {
+static ggml_tensor* lid_get(const std::map<std::string, ggml_tensor*>& m, const std::string& name) {
     auto it = m.find(name);
     return it != m.end() ? it->second : nullptr;
 }
