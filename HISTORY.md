@@ -8904,3 +8904,30 @@ A/B (M1, Q4_K, zero-shot, `VOXCPM2_USE_GRAPH=0`):
 
 Note: default synthesis uses `vae_decode_graph` (ggml backend); this speeds
 the CPU-only fallback that a pure-CPU VPS or any graph-fallback hits.
+
+## 2026-06-20 §181 VoxCPM2 VAE encoder — full ggml GPU graph
+
+Follow-on to §179/§180. The VAE *encoder* was the last CPU-only stage —
+`vae_encode_uncached` ran on CPU always (fast on Apple via §179 Accelerate,
+but 672 s scalar on any non-Apple box). Implemented `vae_encode_graph`, a ggml
+cgraph mirroring `vae_decode_graph`, so the encoder runs on `ctx->backend`.
+Gated `VOXCPM2_USE_GRAPH` (default ON); CPU fallback intact.
+
+New: `vae_wn_init_ggml_enc` (encoder WN-weight/α/bias bridge → own backend
+buffer) and `vae_strided_conv1d_ggml`. The strided downsample needs Python's
+left-pad `2·ceil(s/2) − s%2` (smaller than causal `(K−1)·d`); ggml-metal
+rejects asymmetric PAD, so we do `ggml_conv_1d(p=left_pad)` (symmetric) +
+left-crop to `T_out` — identical algebra to `causal_conv1d_ggml`'s causal crop.
+Everything else reuses `causal_conv1d_ggml` / `snake1d_ggml`. `VOXCPM2_VAE_ENC_DIFF`
+runs both paths and prints cosine + max|Δ|.
+
+A/B (M1 Metal, Q4_K, jfk.wav 11 s ref):
+  GPU graph (USE_GRAPH=1):  VAE encode 2718 ms
+  CPU Accelerate (=0):      VAE encode 3640 ms   → 1.34× on Apple
+  Tier-0 graph vs CPU: cosine 0.99999986, max|Δ| 0.018 (F16 Metal noise).
+  Tier-2 ASR roundtrip (GPU clone): "The quick brown fox jumps over the lazy
+  dog." verbatim.
+
+The decisive win is Linux/CUDA, where the only prior path was the 672 s scalar
+loop; CUDA A/B not run here (no GPU box reachable from this M1). The full
+VoxCPM2 voice-clone pipeline is now GPU-resident, CPU paths as fallbacks.

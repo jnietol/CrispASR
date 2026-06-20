@@ -6272,3 +6272,45 @@ speech test."):
   GEMM (default):           VAE decode  9.5 s   → 7.0× speedup
   audio equivalence: cosine 0.99999987, max |Δ| 21/32768 (0.06 %, float
   accumulation-order noise from BLAS blocked summation).
+
+## §181 VoxCPM2 VAE encoder — full ggml GPU graph — DONE 2026-06-20
+
+Follow-on to §179/§180. After §179 the VAE *encoder* was the last CPU-only
+stage: `vae_encode_uncached` ran on CPU always, fast on Apple via the §179
+Accelerate GEMM but falling through to the scalar OpenMP loop (672 s for an
+11 s ref) on any non-Apple box (Linux/CUDA/Vulkan — no Accelerate). On a GPU
+voice-clone deployment the whole LLM+DiT+decode ran on GPU in seconds, then
+stalled for minutes on the CPU encoder.
+
+Fix: `vae_encode_graph` — a ggml cgraph mirroring `vae_decode_graph`, so the
+encoder runs on `ctx->backend` (Metal/CUDA/Vulkan) like every other stage.
+Gated `VOXCPM2_USE_GRAPH` (default ON), CPU fallback (`vae_encode_uncached`)
+on any failure. Pieces:
+  - `vae_wn_init_ggml_enc` — sibling of `vae_wn_init_ggml` bridging the encoder
+    WN weights (conv0, blk.{0..3}.res/sub, fc_mu), snake α + 1/(α+1e-9), and
+    biases into a dedicated backend buffer (`vae_wn_enc_ggml_ctx/buf`; 183 MB).
+  - `vae_strided_conv1d_ggml` — the one op the existing helpers couldn't express
+    (Python left-pad `2·ceil(s/2) − s%2`, smaller than causal `(K−1)·d`).
+    ggml-metal rejects asymmetric (left) PAD, so instead of a pad op we use
+    `ggml_conv_1d(p=left_pad)` (symmetric) + left-crop to `T_out` — the first
+    `T_out` columns of a symmetric-pad conv equal the left-pad-only conv
+    exactly (same trick `causal_conv1d_ggml` uses for causality).
+  - residual units / snake / conv0 / fc_mu reuse `causal_conv1d_ggml` +
+    `snake1d_ggml`; final `[T_lat,64]→[T_patches,P,64]` reshape on host.
+  - `VOXCPM2_VAE_ENC_DIFF=1` runs both paths and prints cosine + max|Δ| (Tier 0).
+
+Validation:
+  Tier 0 (graph vs CPU ground truth, jfk.wav 11 s): cos 0.99999986,
+    max|Δ| 0.018 (F16 Metal accumulation; cosine confirms no structural bug).
+  Tier 2 (ASR roundtrip, GPU encoder clone of "The quick brown fox…"):
+    faster-whisper → "…The quick brown fox jumps over the lazy dog." verbatim.
+  Tier 3 A/B (M1 Metal, Q4_K, 11 s ref):
+    GPU graph (USE_GRAPH=1):  prefill VAE encode 2718 ms
+    CPU Accelerate (=0):      prefill VAE encode 3640 ms   → 1.34× on Apple
+  Honest caveat: on Apple the §179 Accelerate path is already fast, so Metal is
+  only a modest win; the decisive gain is Linux/CUDA, where today's only path
+  is the 672 s scalar loop → seconds. CUDA A/B not run here (no GPU box
+  reachable from this M1; Kaggle T4/P100 left as follow-up).
+
+End state: the full VoxCPM2 voice-clone pipeline is GPU-resident; CPU paths
+remain as fallbacks only.
