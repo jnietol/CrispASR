@@ -1912,6 +1912,29 @@ extern "C" float* qwen3_asr_embed_tokens(qwen3_asr_context* ctx, const int32_t* 
         return nullptr;
     const int d = (int)ctx->model.hparams.llm_d_model;
 
+    // Fast path: single-token lookup avoids graph build + sched overhead.
+    // Gated by CRISPASR_QWEN3_ASR_EMBED_FAST (default ON).
+    static int use_fast = -1;
+    if (use_fast < 0) {
+        const char* e = std::getenv("CRISPASR_QWEN3_ASR_EMBED_FAST");
+        use_fast = (!e || *e != '0') ? 1 : 0;
+    }
+    if (n_tokens == 1 && use_fast && ctx->model.llm.token_embd_w) {
+        const ggml_tensor* w = ctx->model.llm.token_embd_w;
+        const size_t row_bytes = ggml_row_size(w->type, d);
+        float* result = (float*)malloc((size_t)d * sizeof(float));
+        if (!result)
+            return nullptr;
+        std::vector<uint8_t> raw(row_bytes);
+        ggml_backend_tensor_get(w, raw.data(), (size_t)input_ids[0] * row_bytes, row_bytes);
+        if (w->type == GGML_TYPE_F32) {
+            std::memcpy(result, raw.data(), (size_t)d * sizeof(float));
+        } else {
+            ggml_get_type_traits(w->type)->to_float(raw.data(), result, d);
+        }
+        return result;
+    }
+
     ggml_cgraph* gf = qwen3_asr_build_graph_embed(ctx, n_tokens);
     ggml_backend_sched_reset(ctx->sched);
     if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {

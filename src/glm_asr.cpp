@@ -958,6 +958,29 @@ extern "C" float* glm_asr_embed_tokens(struct glm_asr_context* ctx, const int32_
     const auto& m = ctx->model;
     const int d = m.hp.llm_hidden;
 
+    // Fast path: single-token lookup avoids graph build + sched overhead.
+    // Gated by CRISPASR_GLM_ASR_EMBED_FAST (default ON).
+    static int use_fast = -1;
+    if (use_fast < 0) {
+        const char* e = std::getenv("CRISPASR_GLM_ASR_EMBED_FAST");
+        use_fast = (!e || *e != '0') ? 1 : 0;
+    }
+    if (n_ids == 1 && use_fast && m.llm.token_embd_w) {
+        const ggml_tensor* w = m.llm.token_embd_w;
+        const size_t row_bytes = ggml_row_size(w->type, d);
+        float* result = (float*)malloc((size_t)d * sizeof(float));
+        if (!result)
+            return nullptr;
+        std::vector<uint8_t> raw(row_bytes);
+        ggml_backend_tensor_get(w, raw.data(), (size_t)ids[0] * row_bytes, row_bytes);
+        if (w->type == GGML_TYPE_F32) {
+            std::memcpy(result, raw.data(), (size_t)d * sizeof(float));
+        } else {
+            ggml_get_type_traits(w->type)->to_float(raw.data(), result, d);
+        }
+        return result;
+    }
+
     // Build tiny graph: token_embd lookup
     ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
     ggml_context* ctx0 = ggml_init(ip);

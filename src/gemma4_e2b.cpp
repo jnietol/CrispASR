@@ -1373,6 +1373,34 @@ static float* g4e_embed_tokens(gemma4_e2b_context* ctx, const int32_t* ids, int 
     // placeholders, before the prefill forward).
     ctx->ple_token_ids.assign(ids, ids + n);
 
+    // Fast path: single-token lookup avoids graph build + sched overhead.
+    // Must apply Gemma embedding scale (sqrt(hidden_size)) manually.
+    // Gated by CRISPASR_GEMMA4_E2B_EMBED_FAST (default ON).
+    static int use_fast = -1;
+    if (use_fast < 0) {
+        const char* e = std::getenv("CRISPASR_GEMMA4_E2B_EMBED_FAST");
+        use_fast = (!e || *e != '0') ? 1 : 0;
+    }
+    if (n == 1 && use_fast && ctx->model.llm_embed_w) {
+        const ggml_tensor* w = ctx->model.llm_embed_w;
+        const size_t row_bytes = ggml_row_size(w->type, d);
+        float* result = (float*)malloc((size_t)d * sizeof(float));
+        if (!result)
+            return nullptr;
+        std::vector<uint8_t> raw(row_bytes);
+        ggml_backend_tensor_get(w, raw.data(), (size_t)ids[0] * row_bytes, row_bytes);
+        if (w->type == GGML_TYPE_F32) {
+            std::memcpy(result, raw.data(), (size_t)d * sizeof(float));
+        } else {
+            ggml_get_type_traits(w->type)->to_float(raw.data(), result, d);
+        }
+        // Gemma embedding scale: multiply by sqrt(hidden_size)
+        const float scale = std::sqrt((float)d);
+        for (int i = 0; i < d; i++)
+            result[i] *= scale;
+        return result;
+    }
+
     ggml_cgraph* gf = g4e_build_graph_embed(ctx, n);
     ggml_backend_sched_reset(ctx->sched);
     if (!ggml_backend_sched_alloc_graph(ctx->sched, gf))
