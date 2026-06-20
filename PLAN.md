@@ -6864,3 +6864,14 @@ Validation (M1, silero-lid-95.gguf): GEMM == scalar — identical predictions
 and p-scores en (-0.795)/de (-2.369)/zh (-1.029), all correct. Forward
 (detect_total) 891 ms → 200 ms on an 11 s clip (4.5×). 551 unit tests pass.
 Accelerate-GEMM family of §188/§190 (ecapa) / §191 (titanet).
+
+## §195 openvoice2 — Accelerate GEMM WaveNet voice-conversion — DONE 2026-06-20
+
+OpenVoice2 tone-color converter runs 32 WaveNet layers (16 enc_q + 16 flow) as
+hand-rolled CPU scalar convs. GEMM'd the two per-layer matmuls via cblas_sgemm:
+dilated conv (hidden→2·hidden, k-tap, im2col) + res_skip 1×1. Scalar fallback;
+OV2_FORCE_SCALAR=1 bypass. Numeric: dilated conv + res_skip cos 1.0 vs scalar at
+runtime dims (T=218, hidden=192, k=5). Voice-clone via melotts --voice runs;
+GEMM/scalar garble identically (melotts-en-q8 + tone-conversion quality is
+pre-existing, unchanged). ~28 s conversion delta. 699 unit tests pass. §176d
+family (titanet §191 / silero §192 / firered §193 / parakeet §194).

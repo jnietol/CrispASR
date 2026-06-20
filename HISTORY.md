@@ -9183,3 +9183,11 @@ Added a silero_mm cblas_sgemm helper (scalar fallback; SILERO_FORCE_SCALAR=1)
 and routed the six matmul hotspots through it. GEMM == scalar (identical
 predictions + p-scores en/de/zh, all correct). detect_total 891 ms → 200 ms on
 an 11 s clip (4.5×). 551 unit tests pass. Family of §188/§190/§191.
+
+## 2026-06-20 §195 openvoice2 — Accelerate GEMM WaveNet voice conversion
+
+OpenVoice2's 32-layer WaveNet (the bulk of tone-color conversion) was scalar.
+GEMM'd the dilated conv (im2col) + res_skip 1×1 via cblas_sgemm (scalar
+fallback; OV2_FORCE_SCALAR=1). Numeric cos 1.0 vs scalar; voice-clone runs,
+GEMM/scalar garble identically (pre-existing melotts quality, no regression);
+~28 s conversion delta. 699 unit tests pass. §176d family.

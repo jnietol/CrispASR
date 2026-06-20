@@ -23,6 +23,10 @@
 #include "core/conv.h"
 #include "core/gguf_loader.h"
 
+#if defined(HAVE_ACCELERATE)
+#include <Accelerate/Accelerate.h>
+#endif
+
 #include <algorithm>
 #include <cassert>
 #include <chrono>
@@ -545,6 +549,18 @@ static void stft_magnitude(const float* pcm, int n_samples, int fft_size, int ho
 // ── WaveNet forward ──────────────────────────────────────────────────
 // Gated dilated convolution with speaker conditioning.
 
+// OpenVoice2's WaveNet (16 layers, the bulk of voice conversion) runs as
+// hand-rolled CPU scalar convs. PLAN §176d: Accelerate cblas_sgemm. Set
+// OV2_FORCE_SCALAR=1 to validate scalar == GEMM or run on non-Apple.
+static bool ov2_use_scalar() {
+#if defined(HAVE_ACCELERATE)
+    static const bool fs = std::getenv("OV2_FORCE_SCALAR") != nullptr;
+    return fs;
+#else
+    return true;
+#endif
+}
+
 static void wavenet_forward(const ov2_wn_block& wn, int n_layers, int hidden, int T,
                             const std::vector<float>& x_in,   // (hidden, T)
                             const std::vector<float>& g_cond, // (2*hidden*n_layers, 1) or empty
@@ -565,21 +581,47 @@ static void wavenet_forward(const ov2_wn_block& wn, int n_layers, int hidden, in
         int k_size = (int)layer.in_w->ne[0];
         int dilation = 1; // OpenVoice2 uses dilation=1 for all WN layers
 
-        // Dilated conv1d: (hidden, T) -> (2*hidden, T)
+        // Dilated conv1d: (hidden, T) -> (2*hidden, T). conv_out is [T, out_ch].
         int pad = (k_size - 1) * dilation / 2;
         std::vector<float> conv_out(out_ch * T, 0.0f);
-        for (int t = 0; t < T; t++) {
-            for (int oc = 0; oc < out_ch; oc++) {
-                float sum = b_in[oc];
+#if defined(HAVE_ACCELERATE)
+        if (!ov2_use_scalar()) {
+            // im2col into colT[T, K] (K = hidden*k_size, k-index = ic*k_size+ki),
+            // then conv_out[T,out_ch] = colT[T,K] @ w_in[out_ch,K]^T + b_in.
+            const int K = hidden * k_size;
+            std::vector<float> colT((size_t)T * K, 0.0f);
+            for (int t = 0; t < T; t++) {
                 for (int ki = 0; ki < k_size; ki++) {
                     int ti = t + (ki - pad) * dilation;
-                    if (ti >= 0 && ti < T) {
-                        for (int ic = 0; ic < hidden; ic++) {
-                            sum += h[ti * hidden + ic] * w_in[ki + ic * k_size + oc * k_size * hidden];
+                    if (ti < 0 || ti >= T)
+                        continue;
+                    const float* hrow = h.data() + (size_t)ti * hidden;
+                    float* crow = colT.data() + (size_t)t * K;
+                    for (int ic = 0; ic < hidden; ic++)
+                        crow[ic * k_size + ki] = hrow[ic];
+                }
+            }
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, T, out_ch, K, 1.0f, colT.data(), K, w_in.data(), K,
+                        0.0f, conv_out.data(), out_ch);
+            for (int t = 0; t < T; t++)
+                for (int oc = 0; oc < out_ch; oc++)
+                    conv_out[t * out_ch + oc] += b_in[oc];
+        } else
+#endif
+        {
+            for (int t = 0; t < T; t++) {
+                for (int oc = 0; oc < out_ch; oc++) {
+                    float sum = b_in[oc];
+                    for (int ki = 0; ki < k_size; ki++) {
+                        int ti = t + (ki - pad) * dilation;
+                        if (ti >= 0 && ti < T) {
+                            for (int ic = 0; ic < hidden; ic++) {
+                                sum += h[ti * hidden + ic] * w_in[ki + ic * k_size + oc * k_size * hidden];
+                            }
                         }
                     }
+                    conv_out[t * out_ch + oc] = sum;
                 }
-                conv_out[t * out_ch + oc] = sum;
             }
         }
 
@@ -612,12 +654,24 @@ static void wavenet_forward(const ov2_wn_block& wn, int n_layers, int hidden, in
         int rs_out = (int)layer.res_skip_b->ne[0];
 
         std::vector<float> rs(rs_out * T, 0.0f);
-        for (int t = 0; t < T; t++) {
-            for (int oc = 0; oc < rs_out; oc++) {
-                float sum = b_rs[oc];
-                for (int ic = 0; ic < hidden; ic++)
-                    sum += gated[t * hidden + ic] * w_rs[ic + oc * hidden]; // k=1 conv
-                rs[t * rs_out + oc] = sum;
+#if defined(HAVE_ACCELERATE)
+        if (!ov2_use_scalar()) {
+            // rs[T,rs_out] = gated[T,hidden] @ w_rs[rs_out,hidden]^T + b_rs (k=1 conv)
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, T, rs_out, hidden, 1.0f, gated.data(), hidden,
+                        w_rs.data(), hidden, 0.0f, rs.data(), rs_out);
+            for (int t = 0; t < T; t++)
+                for (int oc = 0; oc < rs_out; oc++)
+                    rs[t * rs_out + oc] += b_rs[oc];
+        } else
+#endif
+        {
+            for (int t = 0; t < T; t++) {
+                for (int oc = 0; oc < rs_out; oc++) {
+                    float sum = b_rs[oc];
+                    for (int ic = 0; ic < hidden; ic++)
+                        sum += gated[t * hidden + ic] * w_rs[ic + oc * hidden]; // k=1 conv
+                    rs[t * rs_out + oc] = sum;
+                }
             }
         }
 
