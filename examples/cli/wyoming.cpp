@@ -271,8 +271,11 @@ static void wyoming_handle_connection(socket_t fd) {
         if (type == "describe") {
             const bool has_tts = (g_backend->capabilities() & CAP_TTS) != 0;
             // Advertise the configured language instead of a hardcoded "en", so
-            // HA routes non-English audio to this service. (C4)
-            const std::string adv_lang = g_params.language.empty() ? std::string("en") : g_params.language;
+            // HA routes non-English audio to this service. (C4) The whisper
+            // default is "auto" (auto-detect), which is not an ISO code HA can
+            // route on — advertise "en" in that case so discovery still works.
+            const std::string& cfg_lang = g_params.language;
+            const std::string adv_lang = (cfg_lang.empty() || cfg_lang == "auto") ? std::string("en") : cfg_lang;
             const json langs = json::array({adv_lang});
 
             json asr_model;
@@ -357,8 +360,10 @@ static void wyoming_handle_connection(socket_t fd) {
                     for (int c = 0; c < ch; c++)
                         acc += src[i * ch + c];
                     acc /= (float)ch;
-                    if (acc > 1.0f) acc = 1.0f;
-                    if (acc < -1.0f) acc = -1.0f;
+                    if (acc > 1.0f)
+                        acc = 1.0f;
+                    if (acc < -1.0f)
+                        acc = -1.0f;
                     audio_buf.push_back((int16_t)(acc * 32767.0f));
                 }
             } else if (payload_length > 0) {

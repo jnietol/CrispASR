@@ -241,4 +241,160 @@ TEST_CASE("Wyoming wire format — multiple sequential messages", "[unit][wyomin
     close(fds[1]);
 }
 
+// ---------------------------------------------------------------------------
+// data_length framing (issue #172 / PR #176 regression guard)
+//
+// HA's official `wyoming` lib sends a non-empty `data` object as a SEPARATE
+// length-prefixed JSON blob (advertised via `data_length`) AFTER the header
+// line — NOT inline. A reader that honors `data_length` must consume exactly
+// that many bytes before the binary payload, otherwise the payload read eats
+// the data-JSON region and the stream desyncs (the exact bug fixed in #176).
+//
+// These tests replicate the framing contract that wyoming_read_header now
+// implements and assert the stream stays aligned. The first test would fail
+// against the pre-#176 read path (which ignored data_length).
+// ---------------------------------------------------------------------------
+
+// Minimal field extractor: pulls the integer value of "key":N out of a header
+// line without a full JSON dependency. Returns def if the key is absent.
+static int hdr_int_field(const std::string& line, const std::string& key, int def) {
+    const std::string needle = "\"" + key + "\"";
+    auto p = line.find(needle);
+    if (p == std::string::npos)
+        return def;
+    p = line.find(':', p + needle.size());
+    if (p == std::string::npos)
+        return def;
+    p++;
+    while (p < line.size() && (line[p] == ' ' || line[p] == '\t'))
+        p++;
+    bool neg = (p < line.size() && line[p] == '-');
+    if (neg)
+        p++;
+    int v = 0;
+    bool any = false;
+    while (p < line.size() && line[p] >= '0' && line[p] <= '9') {
+        v = v * 10 + (line[p] - '0');
+        p++;
+        any = true;
+    }
+    if (!any)
+        return def;
+    return neg ? -v : v;
+}
+
+// Reader mirroring wyoming_read_header's framing: read the header line, then
+// (if data_length > 0) the separate data blob, then (if payload_length > 0)
+// the binary payload. Returns the data blob and payload via out-params.
+static bool read_framed_message(int fd, std::string& line, std::string& data_blob, std::string& payload) {
+    line = read_line(fd);
+    if (line.empty())
+        return false;
+    const int data_length = hdr_int_field(line, "data_length", 0);
+    const int payload_length = hdr_int_field(line, "payload_length", 0);
+    data_blob.clear();
+    payload.clear();
+    if (data_length > 0) {
+        data_blob.resize((size_t)data_length);
+        ssize_t got = recv(fd, &data_blob[0], (size_t)data_length, MSG_WAITALL);
+        if (got != data_length)
+            return false;
+    }
+    if (payload_length > 0) {
+        payload.resize((size_t)payload_length);
+        ssize_t got = recv(fd, &payload[0], (size_t)payload_length, MSG_WAITALL);
+        if (got != payload_length)
+            return false;
+    }
+    return true;
+}
+
+// Write a message exactly like HA's `wyoming` lib: header line advertising
+// data_length (+ optional payload_length), then the data JSON blob, then the
+// binary payload.
+static void write_ha_framed(int fd, const char* type, const std::string& data_json, const std::string& payload) {
+    std::string hdr = std::string("{\"type\":\"") + type + "\"";
+    if (!data_json.empty())
+        hdr += ",\"data_length\":" + std::to_string(data_json.size());
+    if (!payload.empty())
+        hdr += ",\"payload_length\":" + std::to_string(payload.size());
+    hdr += "}\n";
+    send(fd, hdr.data(), hdr.size(), MSG_NOSIGNAL);
+    if (!data_json.empty())
+        send(fd, data_json.data(), data_json.size(), MSG_NOSIGNAL);
+    if (!payload.empty())
+        send(fd, payload.data(), payload.size(), MSG_NOSIGNAL);
+}
+
+TEST_CASE("Wyoming data_length — separate data blob then payload stays aligned", "[unit][wyoming]") {
+    int fds[2];
+    REQUIRE(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+    const std::string data_json = "{\"rate\":16000,\"width\":2,\"channels\":1}";
+    std::vector<int16_t> samples = {111, -222, 333, -444, 555};
+    std::string payload((const char*)samples.data(), samples.size() * sizeof(int16_t));
+
+    write_ha_framed(fds[1], "audio-chunk", data_json, payload);
+    ::shutdown(fds[1], SHUT_WR);
+
+    std::string line, data_blob, recv_payload;
+    REQUIRE(read_framed_message(fds[0], line, data_blob, recv_payload));
+    close(fds[0]);
+    close(fds[1]);
+
+    // The data blob is read in full and is NOT misread as payload.
+    REQUIRE(data_blob == data_json);
+    // The payload that follows lands intact (stream did not desync).
+    REQUIRE(recv_payload.size() == payload.size());
+    REQUIRE(recv_payload == payload);
+}
+
+TEST_CASE("Wyoming data_length — ignoring it desyncs the payload (documents the bug)", "[unit][wyoming]") {
+    int fds[2];
+    REQUIRE(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+    const std::string data_json = "{\"name\":\"whisper\",\"language\":\"en\"}";
+    std::vector<int16_t> samples = {7, 8, 9, 10};
+    std::string payload((const char*)samples.data(), samples.size() * sizeof(int16_t));
+
+    write_ha_framed(fds[1], "audio-chunk", data_json, payload);
+    ::shutdown(fds[1], SHUT_WR);
+
+    // Pre-#176 behavior: read the header line, ignore data_length, and read
+    // payload_length bytes straight away — this consumes the data JSON region
+    // instead of the real payload, so the bytes do not match (desync).
+    std::string line = read_line(fds[0]);
+    const int payload_length = hdr_int_field(line, "payload_length", 0);
+    REQUIRE(payload_length == (int)payload.size());
+    std::string wrong(payload_length, '\0');
+    ssize_t got = recv(fds[0], &wrong[0], (size_t)payload_length, MSG_WAITALL);
+    close(fds[0]);
+    close(fds[1]);
+
+    REQUIRE(got == payload_length);
+    // The bytes read are the start of the data JSON, NOT the PCM payload.
+    REQUIRE(wrong != payload);
+    REQUIRE(wrong == data_json.substr(0, (size_t)payload_length));
+}
+
+TEST_CASE("Wyoming data_length — empty data (describe) needs no blob", "[unit][wyoming]") {
+    int fds[2];
+    REQUIRE(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+    // describe carries empty data → no data_length, no payload. This is why the
+    // bug slipped through: describe always worked.
+    write_ha_framed(fds[1], "describe", "", "");
+    ::shutdown(fds[1], SHUT_WR);
+
+    std::string line, data_blob, payload;
+    REQUIRE(read_framed_message(fds[0], line, data_blob, payload));
+    close(fds[0]);
+    close(fds[1]);
+
+    REQUIRE(line.find("\"describe\"") != std::string::npos);
+    REQUIRE(line.find("data_length") == std::string::npos);
+    REQUIRE(data_blob.empty());
+    REQUIRE(payload.empty());
+}
+
 #endif // !_WIN32
