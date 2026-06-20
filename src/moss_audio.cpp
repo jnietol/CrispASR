@@ -214,6 +214,12 @@ struct moss_audio_context {
 
     int n_threads = 4;
 
+    // §176s: cached encoder graph — reused when chunk_frames matches.
+    ggml_cgraph* cached_enc_gf = nullptr;
+    ggml_context* cached_enc_ctx = nullptr;
+    std::vector<uint8_t> cached_enc_meta;
+    int cached_enc_T_mel = 0;
+
     // Sampling
     uint32_t seed = 0;
     std::mt19937 rng;
@@ -580,9 +586,8 @@ static int conv_out_len(int L) {
     return (L - 1) / 2 + 1;
 }
 
-static ggml_cgraph* moss_audio_build_encoder_graph(moss_audio_context* ctx, int T_mel,
-                                                   // Output: encoder hidden states + deepstack taps
-                                                   bool capture_deepstack) {
+static ggml_cgraph* moss_audio_build_encoder_graph(moss_audio_context* ctx, int T_mel, bool capture_deepstack,
+                                                   ggml_context* arena_ctx = nullptr) {
     const auto& hp = ctx->model.hparams;
     const auto& enc = ctx->model.enc;
     const int n_mels = (int)hp.n_mels;
@@ -596,10 +601,13 @@ static ggml_cgraph* moss_audio_build_encoder_graph(moss_audio_context* ctx, int 
     int T2 = conv_out_len(T1);
     int T_down = conv_out_len(T2);
 
-    // Estimate graph size
-    // 512 MB compute buffer estimate
-    struct ggml_init_params gparams = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
-    ggml_context* ctx0 = ggml_init(gparams);
+    ggml_context* ctx0;
+    if (arena_ctx) {
+        ctx0 = arena_ctx;
+    } else {
+        struct ggml_init_params gparams = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
+        ctx0 = ggml_init(gparams);
+    }
     ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 16384, false);
 
     // Input: mel spectrogram. Data is (n_mels, T_mel) row-major F32.
@@ -926,8 +934,23 @@ extern "C" float* moss_audio_run_encoder(struct moss_audio_context* ctx, const f
             }
         }
 
-        // Build and run encoder graph for this chunk
-        ggml_cgraph* gf = moss_audio_build_encoder_graph(ctx, chunk_frames, want_ds);
+        // §176s: reuse cached encoder graph when chunk_frames matches.
+        ggml_cgraph* gf;
+        if (ctx->cached_enc_gf && ctx->cached_enc_T_mel == chunk_frames) {
+            gf = ctx->cached_enc_gf;
+        } else {
+            if (ctx->cached_enc_ctx) {
+                ggml_free(ctx->cached_enc_ctx);
+                ctx->cached_enc_ctx = nullptr;
+                ctx->cached_enc_gf = nullptr;
+            }
+            ctx->cached_enc_meta.assign(ctx->compute_meta.size(), 0);
+            ggml_init_params aip = {ctx->cached_enc_meta.size(), ctx->cached_enc_meta.data(), true};
+            ctx->cached_enc_ctx = ggml_init(aip);
+            gf = moss_audio_build_encoder_graph(ctx, chunk_frames, want_ds, ctx->cached_enc_ctx);
+            ctx->cached_enc_gf = gf;
+            ctx->cached_enc_T_mel = chunk_frames;
+        }
         ggml_backend_sched_reset(ctx->sched);
         if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
             fprintf(stderr, "moss_audio: encoder graph alloc failed (chunk %d)\n", c);
@@ -2091,6 +2114,8 @@ extern "C" struct moss_audio_context* moss_audio_init_from_file(const char* path
 extern "C" void moss_audio_free(struct moss_audio_context* ctx) {
     if (!ctx)
         return;
+    if (ctx->cached_enc_ctx)
+        ggml_free(ctx->cached_enc_ctx);
     if (ctx->kv_buf)
         ggml_backend_buffer_free(ctx->kv_buf);
     if (ctx->kv_ctx)
