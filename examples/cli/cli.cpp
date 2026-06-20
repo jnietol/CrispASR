@@ -524,6 +524,9 @@ static bool whisper_params_parse_arg_streaming_tts(int argc, char** argv, int& i
             params.tts_steps = 1;
         if (params.tts_steps > 100)
             params.tts_steps = 100;
+        // Also drive the native-knob path (f5 ode_steps, chatterbox cfm_steps),
+        // which reads tts_num_steps; previously only vibevoice honoured this.
+        params.tts_num_steps = params.tts_steps;
     } else if (arg == "--codec-model") {
         params.tts_codec_model = ARGV_NEXT;
         std::string auto_base;
