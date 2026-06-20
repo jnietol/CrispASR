@@ -36,6 +36,7 @@
 #include <map>
 #include <random>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // ===========================================================================
@@ -911,6 +912,9 @@ struct melotts_context {
     int n_threads;
     uint32_t seed;
     std::string dump_dir;
+
+    std::unordered_map<ggml_tensor*, std::vector<float>> weight_cache;
+    bool weight_cache_enabled = true;
 };
 
 // ── Diff harness ──────────────────────────────────────────────────
@@ -961,7 +965,17 @@ struct mini_graph {
 
 // ── Tensor read helper ────────────────────────────────────────────
 
+static melotts_context* g_melotts_ctx = nullptr;
+
 static void read_tensor_f32(ggml_tensor* t, std::vector<float>& out) {
+    if (g_melotts_ctx && g_melotts_ctx->weight_cache_enabled) {
+        auto it = g_melotts_ctx->weight_cache.find(t);
+        if (it != g_melotts_ctx->weight_cache.end()) {
+            out = it->second;
+            return;
+        }
+    }
+
     const int64_t n = ggml_nelements(t);
     out.resize(n);
     if (t->type == GGML_TYPE_F32) {
@@ -2663,6 +2677,36 @@ struct melotts_context* melotts_init_from_file(const char* path_model, struct me
                 ctx->hp.n_layers_trans_flow, ctx->hp.n_upsample_stages, ctx->hp.sample_rate, ctx->hp.n_speakers);
     }
 
+    // Pre-cache all weights as F32 (CRISPASR_MELOTTS_WEIGHT_CACHE, default ON).
+    {
+        const char* env = std::getenv("CRISPASR_MELOTTS_WEIGHT_CACHE");
+        ctx->weight_cache_enabled = (!env || *env != '0');
+    }
+    if (ctx->weight_cache_enabled && ctx->w_ctx) {
+        int n_cached = 0;
+        size_t bytes_cached = 0;
+        for (ggml_tensor* t = ggml_get_first_tensor(ctx->w_ctx); t; t = ggml_get_next_tensor(ctx->w_ctx, t)) {
+            const int64_t n = ggml_nelements(t);
+            std::vector<float> f32(n);
+            const size_t nbytes = ggml_nbytes(t);
+            if (t->type == GGML_TYPE_F32) {
+                ggml_backend_tensor_get(t, f32.data(), 0, nbytes);
+            } else {
+                std::vector<uint8_t> raw(nbytes);
+                ggml_backend_tensor_get(t, raw.data(), 0, nbytes);
+                const auto to_float = ggml_get_type_traits(t->type)->to_float;
+                if (to_float)
+                    to_float(raw.data(), f32.data(), n);
+            }
+            bytes_cached += n * sizeof(float);
+            ctx->weight_cache[t] = std::move(f32);
+            n_cached++;
+        }
+        if (ctx->verbosity >= 1)
+            fprintf(stderr, "melotts: cached %d tensors (%.1f MB F32) for fast CPU path\n", n_cached,
+                    (double)bytes_cached / (1024.0 * 1024.0));
+    }
+
     return ctx;
 }
 
@@ -2709,6 +2753,7 @@ int melotts_synthesize(struct melotts_context* ctx, const char* text, float** pc
     if (!ctx || !text || !pcm_out)
         return 0;
 
+    g_melotts_ctx = ctx;
     melotts_bench_stage _bs_synth("synthesize");
 
     // 1. Text processing (G2P)
@@ -2814,6 +2859,7 @@ int melotts_synthesize(struct melotts_context* ctx, const char* text, float** pc
     int C = (int)ctx->hp.inter_channels;
     if (enc_mean.empty()) {
         fprintf(stderr, "melotts: text encoder produced empty output\n");
+        g_melotts_ctx = nullptr;
         return 0;
     }
 
@@ -2872,8 +2918,10 @@ int melotts_synthesize(struct melotts_context* ctx, const char* text, float** pc
     std::vector<float> pcm;
     {
         melotts_bench_stage _bs("hifigan_decode");
-        if (!hifigan_decode(ctx, z, g_vec, T_latent, pcm))
+        if (!hifigan_decode(ctx, z, g_vec, T_latent, pcm)) {
+            g_melotts_ctx = nullptr;
             return 0;
+        }
     }
     dump_stage(ctx, "audio", pcm.data(), pcm.size());
 
@@ -2889,6 +2937,7 @@ int melotts_synthesize(struct melotts_context* ctx, const char* text, float** pc
         fprintf(stderr, "melotts: synthesized %.2f s (%d samples @ %u Hz)\n", dur_sec, n_samples, ctx->hp.sample_rate);
     }
 
+    g_melotts_ctx = nullptr;
     return n_samples;
 }
 
