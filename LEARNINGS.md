@@ -330,6 +330,29 @@ sometimes pass," which makes them nasty — they each cost a debugging round.
    *second* synthesize. Invalidate (free + rebuild) at the start of each
    call; within a call the per-step reuse is preserved.
 
+**§215 addendum — orpheus refines hazard #2: a *fresh* dedicated step-sched
+fails to back input copies on GPU; use the warm prefill sched.** Orpheus
+shipped the same bucket on its own dedicated `ar_step_sched` and SIGSEGV'd on
+the *first* generated token (`AGXMetal setBuffer_impl`). Two diagnostic traps:
+(a) `GGML_SCHED_DEBUG=2` showing the graph-input copies (`MTL0#inputs_embeds#0`,
+`positions`, `causal_mask`) as `[ NULL ]` is a **red herring** — that print is
+*pre-allocation* state and the working multi-token prefill graph shows the exact
+same NULLs. (b) `lldb` put the real fault in `ggml_metal_op_norm` on **node #0**
+(the first RMS_NORM reading `inputs_embeds`) — i.e. *before* any set_rows/rope,
+so it's the input copy itself that's unbacked, not the KV path. The decisive
+A/B: routing the *identical* bucket graph through the already-warm prefill sched
+(`c->sched`, reserved by the multi-token prefill) backs the copies and produces
+a correct WAV, while the *cold* dedicated sched's first `alloc_graph` (which
+takes ggml-alloc's `reserve_n` path) does not. Fix: run the cached bucket graph
+on `c->sched` with reset+alloc each step (the per-step re-plan is cheap because
+the bucket topology is invariant → galloc fast-path; the §176s "don't re-plan
+the big sched" worry doesn't bite when the bucket *is* the graph). So hazard #2's
+"use a dedicated small sched" is not universal: parler's dedicated sched happens
+to work, orpheus's didn't — when a step-sched faults on its first GPU
+alloc+compute, reuse the warm prefill sched before chasing the NULL-copy print.
+On M1 the orpheus bucket is correct but ~30% *slower* than non-bucket (fixed-Lk
+over-read, same as parler), so it stays opt-in (`CRISPASR_ORPHEUS_BUCKET=1`).
+
 Also: fixed-Lk bucketing shifts FP rounding (the padded reduction), so it is
 not *guaranteed* bit-exact vs a dynamic-length path — but in practice the
 shift is tiny. Validated with `crispasr-diff` against the F32 PyTorch ground
