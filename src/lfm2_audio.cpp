@@ -574,20 +574,13 @@ lfm2_audio_context* lfm2_audio_init_from_file(const char* path_model, lfm2_audio
     auto* ctx = new lfm2_audio_context();
     ctx->n_threads = params.n_threads;
     ctx->verbosity = params.verbosity;
-    // The GPU compute path is currently broken: the hybrid (ShortConv + GQA)
-    // backbone diverges on Metal/CUDA (logits become garbage while the CPU path
-    // is bit-correct), and the embedding lookups crash on CUDA (device-pointer
-    // deref). CPU output is verified correct, so default this backend to CPU
-    // regardless of the global --gpu request. Set CRISPASR_LFM2_AUDIO_GPU=1 to
-    // opt into the experimental GPU path for debugging. See PLAN §201 / HISTORY §206.
+    // GPU is correct as of §206 (the backbone now computes directly on the active
+    // backend via gallocr — see backbone_step / run_lfm). `CRISPASR_LFM2_AUDIO_CPU=1`
+    // forces CPU (the AR decode loop is dispatch-bound and can be faster on CPU).
     if (params.use_gpu) {
-        const char* e = std::getenv("CRISPASR_LFM2_AUDIO_GPU");
-        if (!(e && *e && *e != '0')) {
-            if (params.verbosity >= 1)
-                fprintf(stderr, "lfm2-audio: GPU path is broken for this backend — running on CPU "
-                                "(set CRISPASR_LFM2_AUDIO_GPU=1 to override)\n");
+        const char* e = std::getenv("CRISPASR_LFM2_AUDIO_CPU");
+        if (e && *e && *e != '0')
             params.use_gpu = false;
-        }
     }
     ctx->use_gpu = params.use_gpu;
     // Initialize backend: GPU if available and requested, else CPU
@@ -1162,15 +1155,17 @@ static Lfm2StepResult lfm2_backbone_step(lfm2_audio_context* ctx, const float* e
     ggml_build_forward_expand(gf, out);
     ggml_build_forward_expand(gf, hid_snap);
 
-    // Allocate graph via sched
-    if (!ctx->sched) {
-        ggml_backend_t backends[2] = {ctx->backend, ctx->backend_cpu};
-        int n_be = (ctx->backend != ctx->backend_cpu) ? 2 : 1;
-        ctx->sched = ggml_backend_sched_new(backends, nullptr, n_be, 16384, false, false);
-    }
-    ggml_backend_sched_reset(ctx->sched);
-    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
-        fprintf(stderr, "lfm2_audio: sched alloc backbone graph failed\n");
+    // Allocate + compute directly on ctx->backend via gallocr (NOT the
+    // scheduler). The backbone's leading op (RMSNorm) is weight-less, so the
+    // scheduler would place it and the leaf input on the CPU backend and then
+    // feed the next op a miscomputed cross-backend copy of the activation —
+    // corrupting the whole backbone on GPU. Single-backend direct compute keeps
+    // inputs + activations on the GPU. See HISTORY §206.
+    ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(ctx->backend));
+    if (!galloc || !ggml_gallocr_alloc_graph(galloc, gf)) {
+        fprintf(stderr, "lfm2_audio: backbone gallocr alloc failed\n");
+        if (galloc)
+            ggml_gallocr_free(galloc);
         ggml_free(ctx0);
         return {};
     }
@@ -1208,8 +1203,9 @@ static Lfm2StepResult lfm2_backbone_step(lfm2_audio_context* ctx, const float* e
         }
     }
 
-    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
+    if (ggml_backend_graph_compute(ctx->backend, gf) != GGML_STATUS_SUCCESS) {
         fprintf(stderr, "lfm2_audio: backbone graph compute failed\n");
+        ggml_gallocr_free(galloc);
         ggml_free(ctx0);
         return {};
     }
@@ -1254,6 +1250,7 @@ static Lfm2StepResult lfm2_backbone_step(lfm2_audio_context* ctx, const float* e
     }
 
     ctx->kv_n_past += T_in;
+    ggml_gallocr_free(galloc);
     ggml_free(ctx0);
     return result;
 }
@@ -1776,15 +1773,19 @@ float* lfm2_audio_run_lfm(lfm2_audio_context* ctx, const float* samples, int n_s
             ggml_build_forward_expand(gf, snap);
     ggml_build_forward_expand(gf, out);
 
-    // Allocate + compute via the scheduler (runs on ctx->backend).
-    if (!ctx->sched) {
-        ggml_backend_t backends[2] = {ctx->backend, ctx->backend_cpu};
-        int n_be = (ctx->backend != ctx->backend_cpu) ? 2 : 1;
-        ctx->sched = ggml_backend_sched_new(backends, nullptr, n_be, 16384, false, false);
-    }
-    ggml_backend_sched_reset(ctx->sched);
-    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
-        fprintf(stderr, "lfm2-audio: run_lfm sched alloc failed\n");
+    // Allocate + compute directly on ctx->backend via gallocr — NOT the
+    // scheduler. The whole LFM backbone is supported on the active backend, and
+    // its leading op (RMSNorm) is weight-less: ggml_backend_sched would assign
+    // that op and the leaf input to the CPU backend, then feed the next
+    // (weight-using) op a *miscomputed* cross-backend copy of the activation,
+    // corrupting the entire backbone on GPU (CPU stays correct). Computing the
+    // single-backend graph directly keeps inputs + activations on the GPU and
+    // sidesteps that copy entirely. See HISTORY §206.
+    ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(ctx->backend));
+    if (!galloc || !ggml_gallocr_alloc_graph(galloc, gf)) {
+        fprintf(stderr, "lfm2-audio: run_lfm gallocr alloc failed\n");
+        if (galloc)
+            ggml_gallocr_free(galloc);
         free(adapted);
         ggml_free(ctx0);
         return nullptr;
@@ -1810,8 +1811,9 @@ float* lfm2_audio_run_lfm(lfm2_audio_context* ctx, const float* samples, int n_s
         ggml_backend_tensor_set(mask, m.data(), 0, m.size() * sizeof(ggml_fp16_t));
     }
 
-    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
+    if (ggml_backend_graph_compute(ctx->backend, gf) != GGML_STATUS_SUCCESS) {
         fprintf(stderr, "lfm2-audio: run_lfm compute failed\n");
+        ggml_gallocr_free(galloc);
         ggml_free(ctx0);
         return nullptr;
     }
@@ -1820,7 +1822,8 @@ float* lfm2_audio_run_lfm(lfm2_audio_context* ctx, const float* samples, int n_s
     if (result)
         ggml_backend_tensor_get(out, result, 0, sizeof(float) * T * hidden);
 
-    // Invoke staged callback for per-layer snapshots
+    // Invoke staged callback for per-layer snapshots (read BEFORE freeing galloc,
+    // whose buffer backs the snapshot tensors).
     if (do_snaps && ctx->lfm_stage_cb) {
         std::vector<float> snap_buf((size_t)T * hidden);
         for (uint32_t i = 0; i < hp.lfm_n_layers; i++) {
@@ -1833,6 +1836,7 @@ float* lfm2_audio_run_lfm(lfm2_audio_context* ctx, const float* samples, int n_s
         }
     }
 
+    ggml_gallocr_free(galloc);
     if (out_T)
         *out_T = T;
     if (out_hidden_size)

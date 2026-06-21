@@ -5406,17 +5406,10 @@ int main(int argc, char** argv) {
         lp.n_threads = 4;
         lp.verbosity = 0;
         // CRISPASR_DIFF_USE_GPU=1 runs the lfm2 C++ stages on the GPU backend so
-        // the per-stage diff can isolate CPU-vs-GPU divergence. (The backend's own
-        // CRISPASR_LFM2_AUDIO_GPU gate is also honoured by init_from_file, so set
-        // both when forcing GPU.)
+        // the per-stage diff can isolate CPU-vs-GPU divergence.
         if (const char* eg = std::getenv("CRISPASR_DIFF_USE_GPU")) {
             if (eg[0] == '1' || eg[0] == 't' || eg[0] == 'T' || eg[0] == 'y' || eg[0] == 'Y') {
                 lp.use_gpu = true;
-#if defined(_WIN32)
-                _putenv_s("CRISPASR_LFM2_AUDIO_GPU", "1");
-#else
-                setenv("CRISPASR_LFM2_AUDIO_GPU", "1", 1);
-#endif
                 fprintf(stderr, "[crispasr-diff] CRISPASR_DIFF_USE_GPU=1 -> lfm2-audio use_gpu=true\n");
             }
         }
