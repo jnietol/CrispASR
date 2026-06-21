@@ -811,6 +811,12 @@ struct chatterbox_context {
     std::vector<cb_t3_layer> t3_blocks_f16;
     ggml_tensor* t3_speech_head_f16 = nullptr;
 
+    // §214: CHATTERBOX_BENCH_B2 per-step build+alloc vs compute counters (decide
+    // whether a cached/bucketed B2 graph is worth it — see PLAN §214).
+    int64_t t3_b2_build_alloc_us = 0;
+    int64_t t3_b2_compute_us = 0;
+    int t3_b2_steps = 0;
+
     // §188: CPU-side F32 copies of embedding tables.
     // Populated once at init; eliminates tensor_get_f32 on every decode step.
     std::vector<float> speech_emb_cache;     // (speech_vocab_size × hidden)
@@ -1767,6 +1773,17 @@ static bool run_t3_kv_b2(chatterbox_context* c, const float* embeds, int n_past,
             return false;
     }
 
+    // §214: optional per-step build+alloc instrumentation (CHATTERBOX_BENCH_B2=1)
+    // to decide whether a cached/bucketed B2 graph is worth it — graph rebuild is
+    // negligible on compute-bound decode (§208), but the per-step Metal sched
+    // re-alloc is unmeasured. Accumulates into static counters, printed by the
+    // caller via chatterbox_b2_alloc_report().
+    static const bool s_bench_b2 = []() {
+        const char* s = std::getenv("CHATTERBOX_BENCH_B2");
+        return s && *s && std::strcmp(s, "0") != 0;
+    }();
+    int64_t t_ba0 = s_bench_b2 ? ggml_time_us() : 0;
+
     ggml_cgraph* gf = build_graph_t3_kv_b2(c, n_past);
     if (!gf)
         return false;
@@ -1775,6 +1792,10 @@ static bool run_t3_kv_b2(chatterbox_context* c, const float* embeds, int n_past,
     if (!ggml_backend_sched_alloc_graph(c->t3_sched_b2, gf)) {
         fprintf(stderr, "chatterbox: failed to alloc T3 b2 graph\n");
         return false;
+    }
+    if (s_bench_b2) {
+        c->t3_b2_build_alloc_us += ggml_time_us() - t_ba0;
+        c->t3_b2_steps++;
     }
 
     // Same embedding for both passes (batch 0 = cond, batch 1 = uncond).
@@ -1787,10 +1808,13 @@ static bool run_t3_kv_b2(chatterbox_context* c, const float* embeds, int n_past,
         ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "rope_freq_factors"), c->rope_freq_factors.data(), 0,
                                 c->rope_freq_factors.size() * sizeof(float));
 
+    int64_t t_c0 = s_bench_b2 ? ggml_time_us() : 0;
     if (ggml_backend_sched_graph_compute(c->t3_sched_b2, gf) != GGML_STATUS_SUCCESS) {
         fprintf(stderr, "chatterbox: T3 b2 compute failed\n");
         return false;
     }
+    if (s_bench_b2)
+        c->t3_b2_compute_us += ggml_time_us() - t_c0;
 
     ggml_tensor* out = ggml_graph_get_tensor(gf, "logits"); // (vocab, 1, 2)
     ggml_backend_tensor_get(out, out_cond, 0, (size_t)vocab * sizeof(float));
@@ -3431,6 +3455,17 @@ extern "C" int32_t* chatterbox_synthesize_tokens(struct chatterbox_context* ctx,
 
     if (ctx->params.verbosity >= 1) {
         fprintf(stderr, "chatterbox: AR emitted %zu speech tokens\n", speech_tokens.size());
+    }
+    // §214: report the per-step B2 build+alloc vs compute split (CHATTERBOX_BENCH_B2)
+    // — decides whether a cached/bucketed B2 graph is worth it (PLAN §214).
+    if (ctx->t3_b2_steps > 0) {
+        const double ba = ctx->t3_b2_build_alloc_us / 1e3, cp = ctx->t3_b2_compute_us / 1e3;
+        const double tot = ba + cp;
+        fprintf(stderr,
+                "chatterbox: [B2 bench] %d steps — build+alloc %.1f ms (%.2f ms/step, %.1f%%), "
+                "compute %.1f ms (%.2f ms/step). Cached graph helps only if build+alloc is a real fraction.\n",
+                ctx->t3_b2_steps, ba, ba / ctx->t3_b2_steps, tot > 0 ? 100.0 * ba / tot : 0.0, cp,
+                cp / ctx->t3_b2_steps);
     }
 
     // Filter to valid range

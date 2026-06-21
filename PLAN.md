@@ -132,12 +132,62 @@ PERFORMANCE §214.
    Measure GPU+F16 and GPU+q4k (post-dequant) B2 vs the non-bucket GPU-legacy
    baseline on a quiet box; report whether GPU B2 finally beats the CPU default.
 
-4. **Generalize B=2 to the other CFG backends (LOW, opportunistic).** dia (decode),
-   zonos, tada, f5, voxcpm2 all run two sequential B=1 CFG passes; cosyvoice3
-   explicitly declined (22-block estimator, per-call overhead small). Worth B=2
-   only where the per-step forward is dispatch/bandwidth-bound *and* the step
-   count is high (AR token loops, not few-step diffusion). Reuse the s3gen/T3
-   dequant-to-F16 pattern for any GPU+quant case.
+4. **Generalize B=2 to the other CFG backends — see §215.**
+
+---
+
+## §215 — batched-CFG (B=2) for the remaining TTS backends (OPEN)
+
+Full-tree audit (§214, see PERFORMANCE.md): only **s3gen CFM** and **chatterbox
+T3** batch cond+uncond into one B=2 forward; every other CFG backend runs **two
+sequential B=1 passes** and blends post-hoc — correct, but it reads the full
+weight set twice and doubles the dispatch count per step. Where the per-step
+forward is dispatch/bandwidth-bound *and* the step count is high, B=2 reads each
+weight once (gianni measured −42 % on T3). Apply the **same pattern** to each:
+batch over `ne[2]=2` for the heavy GEMMs, split any per-batch attention/KV-cache,
+tag `GGML_PREC_F32`, gate behind an env (default OFF), validate with a greedy
+token/output-parity gate vs the legacy sequential path, and on **GPU + quantized
+weights dequant the batched-against weights q*→F16 GPU-resident** (the s3gen
+`dequant_cfm_f16` / T3 `ensure_t3_b2_f16_weights` trick — Metal's batched `ne[2]=2`
+quant mat-vec misses the PREC_F32 `mul_mv_q*_K` exact-dot kernel and degenerates).
+
+Prioritized by expected payoff (high step count × dispatch-bound first):
+
+1. **§215a dia (HIGH).** `src/dia_tts.cpp run_dia_synth` already builds a B=2
+   *encoder*; the **decoder** AR loop still runs cond/uncond as two passes with
+   two KV caches (`run_dia_decode_step`). Mirror chatterbox T3: B=2 decode-step
+   graph, split per-batch KV write/read, F16-dequant on GPU+quant. Largest payoff
+   — long AR token loop with CFG every step.
+2. **§215b tada (HIGH).** `src/tada_tts.cpp` runs the talker twice per step
+   (`run_talker_kv` for pos + `kv_neg_*` for neg, ~lines 1286–1313). Lockstep
+   `n_past` like T3 → reuse both caches, batch the GEMMs, split attention. Same
+   shape as chatterbox; should port almost directly.
+3. **§215c zonos (MED).** `src/zonos_tts.cpp` keeps two separate KV caches
+   (`kv_k`/`kv_k_uncond`) and decodes sequentially (~lines 1740–1842). Batch the
+   AR backbone B=2, split the dual-KV attention. Dual-KV CFG + (optional) random
+   speaker embed must stay independent per batch.
+4. **§215d voxcpm2 (MED).** `src/voxcpm2_tts.cpp` LocDiT runs `locdit_call` twice
+   per ODE step (cond `mu` + zero-`mu`, ~lines 2752–2778). Diffusion (fewer steps
+   than an AR loop) so lower payoff, but each LocDiT forward is heavy; B=2 over the
+   DiT blocks could still help. Keep the cfg-zero-star blend per batch.
+5. **§215e f5 (MED).** `src/f5_tts.cpp` runs `dit_forward` twice per CFG step
+   (v_cond + v_uncond, ~lines 1563–1566). Same B=2-DiT shape as voxcpm2. Note
+   §176h found a standalone B=2 DiT graph for F5 *correct* but a runtime B=2
+   corrupted batch-1 (F5-runtime-specific, see [[project_ggml_batched_fused_graph_alloc_bug]])
+   — so F5 needs the parity gate run especially carefully; may not be worth it.
+6. **§215f cosyvoice3 (LOW — likely WON'T).** `src/cosyvoice3_tts.cpp` explicitly
+   declined batching (~lines 3027–3030): the estimator is a 22-block diffusion run
+   twice per step, per-call overhead small vs the forward. Only revisit if a
+   profile shows the dispatch overhead actually matters; otherwise document as a
+   deliberate non-goal.
+7. **§215g kugelaudio (BLOCKED).** `src/kugelaudio.cpp` CFG is a TODO (cfg_scale
+   read but unused, negative path not implemented). Implement sequential CFG first
+   (correctness), then consider B=2.
+
+Shared infra: factor the F16-dequant-of-matmul-weights helper (currently
+duplicated in `ensure_t3_b2_f16_weights` + s3gen `dequant_cfm_f16`) into a
+`core_*` helper if a third backend needs it — but only on the third consumer, per
+the "don't extract single-consumer helpers" rule.
 
 ---
 
