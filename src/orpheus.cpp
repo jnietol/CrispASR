@@ -721,7 +721,21 @@ static float* run_talker_kv_bucket(orpheus_context* c, const float* embeds, int 
 // Returns logits at the last position (vocab,), malloc'd. Caller frees.
 static float* run_talker_kv(orpheus_context* c, const float* embeds, int n_tokens, int n_past) {
     // §176b: Lk-bucketed fast path for single-step decode.
-    if (n_tokens == 1) {
+    //
+    // OPT-IN via CRISPASR_ORPHEUS_BUCKET=1 (default OFF), mirroring parler's
+    // CRISPASR_PARLER_BUCKET. The bucketed path's dedicated step-sched leaves
+    // its graph-input copies unallocated on the Metal backend (positions /
+    // causal_mask show `[ NULL ]` buffers in GGML_SCHED_DEBUG=2), so the first
+    // decode step binds a garbage Metal buffer and SIGSEGVs — this was the
+    // §201 sweep's orpheus "0-byte on CUDA/GPU". The non-bucket path below uses
+    // the same graph structure as prefill (which computes fine on GPU), so the
+    // default is correct on every backend; the bucket stays available for perf
+    // experiments on CPU where it's already validated.
+    static const bool bucket_enabled = []() {
+        const char* e = std::getenv("CRISPASR_ORPHEUS_BUCKET");
+        return e && e[0] == '1';
+    }();
+    if (bucket_enabled && n_tokens == 1) {
         if (float* r = run_talker_kv_bucket(c, embeds, n_past))
             return r;
     }
