@@ -6,6 +6,51 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-06-21 §210 Chatterbox multilingual #170 — NFKD text-prep parity + diff-harness stage + CPU thread wiring
+
+Issue #170 follow-up: after the 2026-06-18 tokenizer-mismatch fix, an external
+reporter still got **prepended letter hallucinations** on partial-diacritic
+Arabic (`أعْلَنَ`→"za3lana") with `-l ar`. Root cause, proven through the real
+`grapheme_mtl` tokenizer: the C++ multilingual text-prep skipped the **NFKD
+normalization** that upstream `MTLTokenizer.preprocess_text` applies
+(`unicodedata.normalize("NFKD", text.lower())`). Precomposed `أ` (U+0623 ALEF
+WITH HAMZA) tokenized to a single rare grapheme id (2353) instead of the
+NFKD-split base-alef + combining-hamza (1456, 1458) the model was trained on, so
+the T3 AR decoder emitted a spurious onset phoneme — which is why *partial
+diacritics specifically* triggered it (أ إ آ ؤ ئ are the NFKD-decomposable ones).
+
+- **Fix (`2a8aadbc`).** `tools/gen_nfkd_table.py` generates exact decomposition +
+  canonical-combining-class tables from `unicodedata`; `src/chatterbox_nfkd.h`
+  does UTF-8 decode → decompose (Hangul arithmetic, rest tabled) → canonical
+  reorder → encode (bit-exact vs `unicodedata` across Arabic / accented Latin /
+  Hangul / compatibility chars). `chatterbox_text_prep::normalize` runs NFKD
+  before ASCII-lowercase on the multilingual path only. **Text-prep code fix —
+  no GGUF reconversion needed.** Script-specific normalizers (zh cangjie, ja
+  kakasi, he dicta, ko jamo, ru stress) remain unimplemented (need external libs).
+- **Diff-harness stage (`cc540448`).** Added a deterministic `t3_text_tokens`
+  crispasr-diff stage (`chatterbox_dump_text_tokens` C API + `CHATTERBOX_LANG`
+  env) + `tools/gen_chatterbox_text_token_ref.py` (tokenizer-only upstream ref).
+  `[PASS] t3_text_tokens c++=139 ids ref=139 ids mismatches=0`. Ref archive at
+  `cstr/chatterbox-GGUF/diff-refs/`. Live: synth + whisper roundtrip of the
+  reporter's Arabic = recognizable, no spurious onsets.
+- **Cross-repo build fix (`66dc549b`).** `core/gguf_loader.h` is shared with
+  CrispEmbed; the two repos disagree on the tensor-map type. Replaced the
+  hard-coded `std::map`/`unordered_map` (a 5-commit flip-flop) with a single
+  `core_gguf::tensor_map` alias each repo defines; consumers track it. Builds in
+  both repos.
+- **CPU thread wiring §176u (`3d02c082`).** chatterbox never called
+  `ggml_backend_cpu_set_n_threads`, so the compute-bound T3 decode ran at
+  `GGML_DEFAULT_N_THREADS=4` and `-t` was ignored. Wired it (default
+  `min(8,hw)`, env `CRISPASR_CHATTERBOX_THREADS`); output bit-identical 4-vs-8
+  threads. Speedup magnitude handed to §176 (box too contended to measure;
+  see §176u).
+- **Rejected perf levers** (methodical A/B): smaller decode buckets (no benefit
+  — short-utterance decode is FFN-bound); T3-on-GPU (breaks parity — wrong tokens
+  on Metal, confirms the deliberate T3→CPU default). The published lahgtna/base
+  multilingual GGUFs are still internally broken (2352 tokenizer vs 2454 T3 — the
+  loader rightly rejects them); patch locally with
+  `models/patch-chatterbox-gguf-add-merges.py` + `grapheme_mtl_merged_expanded_v1.json`.
+
 ## 2026-06-21 §208 Chatterbox S3Gen CFM — single-GPU raw-gallocr cached path (correct, but a perf DUD)
 
 Built the §207 follow-up lever: an alternative, env-gated CFM compute path

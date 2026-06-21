@@ -8135,9 +8135,10 @@ normalizer before tokenization:
   model no longer sees the uppercase-heavy text that the Python MTL
   tokenizer would have normalized away.
 
-That closes the obvious `-l fr` / `-l ar` drift in the C++ path, but it
-does not yet implement Python's full Unicode NFKD / script-specific
-normalizers for zh/ja/he/ko/ru.
+That closes the obvious `-l fr` / `-l ar` drift in the C++ path. Full Unicode
+**NFKD** was added later (2026-06-21, see "NFKD resolution" below); the
+script-specific normalizers for zh/ja/he/ko/ru (cangjie / kakasi / dicta / jamo
+/ stress) are still unimplemented (they need external libs).
 
 ### Root cause — the published q4_k multilingual GGUF used the wrong tokenizer (2026-06-18)
 
@@ -8186,6 +8187,39 @@ fix. It does **not** prove French quality is solved; listening tests still
 reported heavy accent / imperfect pronunciation on some Q4_K French
 samples, so remaining work is model-semantics / upstream-text-prep parity,
 not "is `-l` wired at all?".
+
+### NFKD resolution — the upstream-text-prep parity gap was NFKD (2026-06-21, #170)
+
+The "upstream-text-prep parity" remaining work above was concrete: an external
+reporter (#170) found that with a correctly-paired multilingual GGUF, `-l ar` on
+**partial-diacritic** Arabic still prepended spurious onset letters
+(`أعْلَنَ`→"za3lana") that the Python reference did not. Root cause, proven
+through the real `grapheme_mtl` tokenizer (not guessed): the C++ normalizer did
+punc/lowercase but **skipped NFKD**, while upstream
+`MTLTokenizer.preprocess_text` runs `unicodedata.normalize("NFKD",
+text.lower())` before tokenizing.
+
+- For the working simple string `مرحبا بالعالم`, NFKD is a **no-op** → token ids
+  identical with/without NFKD → no bug (matches the issue: simple case worked).
+- For the hallucination string, NFKD **changes it** (131→137 codepoints): the
+  precomposed `أ` (U+0623) decomposes to base alef (U+0627) + combining hamza
+  (U+0654). Without NFKD the C++ tokenized `أ` as one rare grapheme id **2353**;
+  with NFKD upstream splits it into **1456, 1458**. Token 2353 is the
+  under-trained grapheme the T3 renders as the spurious consonant. That is why
+  *partial diacritics specifically* trigger it — أ إ آ ؤ ئ are the
+  NFKD-decomposable letters.
+
+Fix: `tools/gen_nfkd_table.py` emits exact NFKD decomposition + combining-class
+tables from `unicodedata`; `src/chatterbox_nfkd.h` applies them (Hangul
+decomposed arithmetically, the rest tabled; bit-exact vs `unicodedata` across
+Arabic / accented Latin / Hangul / ligatures). After the fix the C++ multilingual
+token ids are **byte-identical to upstream** for both the simple and the
+hallucination string (139/139, 2353 gone), validated through the formal
+crispasr-diff `t3_text_tokens` stage. **Text-prep code fix — no GGUF
+reconversion.** Lesson: a C++ TTS text path must replicate the upstream
+tokenizer's *entire* `preprocess_text` (NFKD + casefold + language hooks), not
+just punctuation — precomposed graphemes are the trap, and they only surface on
+inputs that actually contain them.
 
 ### Operational note — the regen variants already have merges
 

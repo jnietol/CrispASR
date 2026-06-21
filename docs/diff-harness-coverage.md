@@ -25,6 +25,15 @@ lives under `diff-harness-ref/` in that model's GGUF repo (e.g.
 `cstr/snac-24khz-GGUF`). Fetch one to run the harness without
 regenerating (which needs the model download + a per-backend env).
 
+The `chatterbox` backend also has a **deterministic `t3_text_tokens` stage**
+(#170) that checks the multilingual text tokenization (normalize + NFKD + BPE +
+`[lang]`) against the upstream `MTLTokenizer` with an exact integer-match. It
+needs only the tokenizer, not the full model: generate the ref with
+`tools/gen_chatterbox_text_token_ref.py --tokenizer grapheme_mtl.json --lang ar
+--text "..."` and run with `CHATTERBOX_LANG=ar CHATTERBOX_SYN_TEXT="..."
+crispasr-diff chatterbox <t3.gguf> <ref.gguf> <any.wav>`. The Arabic ref is
+archived at `cstr/chatterbox-GGUF/diff-harness-ref/`.
+
 | backend | ref module | archive | mtime | harness | deps |
 |---|---|---|---|---|---|
 | `canary` | `tools/reference_backends/canary.py` | — | — | yes | nemo, torch |

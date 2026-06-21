@@ -418,6 +418,27 @@ tokenizer/model mismatch and make `-l` active, but some French Q4_K samples
 remain heavily accented. Treat language-token checks as a wiring smoke test,
 not a guarantee of native pronunciation.
 
+On the multilingual path the text is **NFKD-normalized** (then ASCII-lowercased)
+before tokenization, matching upstream `MTLTokenizer.preprocess_text`. This
+matters for scripts with precomposed diacritics: e.g. Arabic `أ`
+(ALEF-WITH-HAMZA) decomposes to base alef + combining hamza, the form the model
+was trained on. Without it, partial-diacritic Arabic produced spurious onset
+letters (#170). Script-specific normalizers (zh cangjie / ja kakasi / he dicta /
+ko jamo / ru stress) are not yet implemented.
+
+> **Note on published GGUFs.** Some published multilingual T3 artifacts pair a
+> 2352-token tokenizer with a 2454-vocab T3; the loader rejects that mismatch.
+> Repair locally with `models/patch-chatterbox-gguf-add-merges.py` and the
+> matching `grapheme_mtl_merged_expanded_v1.json` (2454 tokens).
+
+### Performance
+
+The compute-bound T3 AR decode is the slow stage. It runs on CPU by default on
+Metal (GPU has higher per-step kernel-launch overhead for the many T=1 steps).
+The CPU thread count defaults to `min(8, hardware_concurrency)`; override with
+`CRISPASR_CHATTERBOX_THREADS=<n>` (e.g. dial down on a heavily shared host).
+Output is bit-identical regardless of thread count.
+
 ### Voice cloning
 
 Two paths are supported. **The recommended path is the python baker
