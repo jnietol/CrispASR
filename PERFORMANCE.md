@@ -160,8 +160,11 @@ benchmark mis-detected several as ~55 MB — so it is omitted below.)
 | Mega-ASR 1.7B | 3.9x | 0.0% | mini-omni2 | 0.8x | 0.0% |
 | Granite Speech 4.1 2B | 3.1x | 0.0% | moonshine-streaming | 2.8x | 0.0% |
 
-**ASR failures (2):** `lfm2-audio` — **CRASH** mid-run (~9.8 s); `vibevoice-1.5b`
-— ran (~17 s) but produced **EMPTY** transcript. Both are newly-covered backends.
+**ASR failures (2):** `lfm2-audio` — **CRASH** mid-run (~9.8 s) — **FIXED §206**
+(embed device-ptr deref + a `ggml_backend_sched` weight-less-first-op cross-backend
+copy bug in the backbone; now computes directly on `ctx->backend` via gallocr, GPU
+transcribes verbatim); `vibevoice-1.5b` — ran (~17 s) but produced **EMPTY**
+transcript. Both are newly-covered backends.
 
 ### TTS — 14/22 first pass → 16/22 after the voicefix re-test
 
@@ -186,9 +189,10 @@ m2m100 (3.7 s), madlad (12.5 s) — en→de translation produced output.
   HF dataset as each backend finished; a re-push skips already-streamed backends.
   Root cause of the earlier streaming failures (token unresolved on the chr1s4
   nested mount path) fixed in `81826457`.
-- **Genuine CUDA failures: ~7** (was reported as 10) — `lfm2-audio` (ASR CRASH),
-  `speecht5`, `fastpitch`, `orpheus`, `chatterbox`, `cosyvoice3` (dies 0.1 s),
-  `kugelaudio` (empty after 322 s) — tracked in PLAN.md §201. Several pass on M1
+- **Genuine CUDA failures: ~7** (was reported as 10), of which `fastpitch` +
+  `speecht5` (§204), `chatterbox` (§205), and `lfm2-audio` (§206) are now FIXED;
+  `orpheus`, `cosyvoice3` (dies 0.1 s), `kugelaudio` (empty after 322 s) remain —
+  tracked in PLAN.md §201. Several pass on M1
   Metal, so they are CUDA-path-specific. The 2 vibevoice entries were benchmark
   bugs (now fixed + passing); `f5-tts` needs one more timeout-bumped run.
 

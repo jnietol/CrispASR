@@ -407,6 +407,23 @@ not just M1.
   not `IC` — so it must use the `_tf` variant. The wrong one aborts on
   `ggml_can_mul_mat` on *all* backends. When a `mul_mat`/conv asserts inside a
   shared vocoder, suspect the input's contiguous axis, not the weights (§204).
+- **`ggml_backend_sched` + a weight-less first op corrupts the GPU graph.** If a
+  subgraph's leading op is weight-less (e.g. RMSNorm/LayerNorm before any matmul),
+  the scheduler (op_offload=false) places that op *and the leaf input* on the CPU
+  backend, then inserts a CPU→GPU copy of the activation to feed the next op — and
+  on the current ggml revision that cross-backend copy is **miscomputed**, so the
+  whole subgraph is garbage on GPU while CPU stays bit-correct. (Graphs whose
+  first op uses a weight keep the input on the GPU and are fine — that's why
+  encoders/adapters worked but the LFM2 backbone didn't, §206.) **Diagnose** with
+  `GGML_SCHED_DEBUG=2` — look for a leaf input on `[CPU]` and `#<backend>#...#0`
+  copy nodes. Gotcha: a standalone op test "on Metal" via the sched may silently
+  run on CPU for *both* the CPU and Metal runs, trivially matching and masking the
+  bug — confirm each op's real backend. **Fix:** when a whole subgraph is supported
+  on the active backend, compute it *directly* with `ggml_gallocr` +
+  `ggml_backend_graph_compute(ctx->backend, gf)` instead of the scheduler — a
+  single-backend graph never inserts the broken copy. (Pinning the input with
+  `set_tensor_backend` or `op_offload=true` did **not** help; only avoiding the
+  split did.)
 
 ## Watermarking tests
 

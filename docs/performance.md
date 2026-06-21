@@ -39,7 +39,7 @@ allocated via `ggml_backend_alloc_ctx_tensors`. The cache is a 4D tensor
 | kugelaudio | `core_attn::kv_self_attn` | — | `ggml_backend_sched` | 7B Qwen2.5 + DiT diffusion |
 | voxcpm2_tts | `core_attn::kv_self_attn` | — | `ggml_backend_sched` | Flow-matching diffusion |
 | vibevoice | `core_attn::kv_self_attn` | Conv cache | `ggml_backend_sched` | σ-VAE streaming |
-| **lfm2_audio** | `core_attn::kv_self_attn` | **Conv state cache** | `ggml_backend_sched` | **Hybrid conv+attn backbone** |
+| **lfm2_audio** | `core_attn::kv_self_attn` | **Conv state cache** | `ggml_gallocr` (direct, §206) | **Hybrid conv+attn backbone; backbone computes directly on ctx->backend — not the sched — to avoid the weight-less-first-op cross-backend-copy bug** |
 | **nemotron** | cache_last_channel + cache_last_time | **Conv + attn cache** | `ggml_backend_sched` | **Cache-aware streaming FastConformer** |
 | bark_tts | None (3× non-cached forward) | — | `ggml_backend_sched` | Could benefit from KV cache |
 | chatterbox | `core_attn::kv_self_attn` | — | `ggml_backend_sched` | T3 AR + S3Gen flow |
@@ -106,4 +106,4 @@ The LFM2 backbone uses two distinct cache types:
 | Q4_K KV+conv | ~31s | ~45s | 15× |
 | F16 gallocr | ~2m20s | — | Reduced sys overhead |
 | Q4_K gallocr+256MB | ~1m8s | — | Best CPU perf |
-| GPU (projected) | ~5-10s | ~10s | Needs CUDA/Metal |
+| GPU (M1 Metal, §206) | ~15s | — | Correct now (gallocr direct compute); AR decode is dispatch-bound so currently ~slower than threaded CPU. GPU-decode graph caching is the perf follow-up. |
