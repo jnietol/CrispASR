@@ -574,6 +574,21 @@ lfm2_audio_context* lfm2_audio_init_from_file(const char* path_model, lfm2_audio
     auto* ctx = new lfm2_audio_context();
     ctx->n_threads = params.n_threads;
     ctx->verbosity = params.verbosity;
+    // The GPU compute path is currently broken: the hybrid (ShortConv + GQA)
+    // backbone diverges on Metal/CUDA (logits become garbage while the CPU path
+    // is bit-correct), and the embedding lookups crash on CUDA (device-pointer
+    // deref). CPU output is verified correct, so default this backend to CPU
+    // regardless of the global --gpu request. Set CRISPASR_LFM2_AUDIO_GPU=1 to
+    // opt into the experimental GPU path for debugging. See PLAN §201 / HISTORY §205.
+    if (params.use_gpu) {
+        const char* e = std::getenv("CRISPASR_LFM2_AUDIO_GPU");
+        if (!(e && *e && *e != '0')) {
+            if (params.verbosity >= 1)
+                fprintf(stderr, "lfm2-audio: GPU path is broken for this backend — running on CPU "
+                                "(set CRISPASR_LFM2_AUDIO_GPU=1 to override)\n");
+            params.use_gpu = false;
+        }
+    }
     ctx->use_gpu = params.use_gpu;
     // Initialize backend: GPU if available and requested, else CPU
     ctx->backend = params.use_gpu ? ggml_backend_init_best() : ggml_backend_cpu_init();

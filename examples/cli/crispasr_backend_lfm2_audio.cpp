@@ -83,7 +83,10 @@ public:
             return out;
 
         lfm2_audio_set_beam_size(ctx_, params.beam_size > 0 ? params.beam_size : 1);
-        char* text = lfm2_audio_transcribe(ctx_, samples, n_samples, nullptr, 0);
+        // Forward the language hint (e.g. `-l en`) so transcribe picks the right
+        // prompt prefix; nullptr keeps the model's default (Japanese).
+        const char* lang = params.language.empty() ? nullptr : params.language.c_str();
+        char* text = lfm2_audio_transcribe(ctx_, samples, n_samples, lang, 0);
         if (!text)
             return out;
 
