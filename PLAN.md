@@ -706,7 +706,8 @@ The first full-coverage Kaggle GPU sweep (`tools/kaggle-benchmark-all-backends.p
 streamed to `cstr/crispasr-kaggle-progress/full-backend-sweep/`, see PERFORMANCE.md
 2026-06-20) ran 59 backends. The first pass showed 10 "failures", but a follow-up
 audit + a fixed-subset re-test (run tag `voicefix-retest`) found **2 were benchmark
-mistakes, not bugs**, leaving **7 genuine failures** (+1 pending):
+mistakes, not bugs**, leaving **7 genuine failures** (+1 pending). Of those 7,
+**fastpitch + speecht5 are now fixed** (HISTORY §204), leaving **5 open**:
 
 **RESOLVED — were benchmark args/category, fixed in the script (commit on main):**
 - ✅ **vibevoice-1.5b** — is a *TTS* model (`vibevoice-1.5b-tts-q4_k.gguf`), was
@@ -719,21 +720,14 @@ mistakes, not bugs**, leaving **7 genuine failures** (+1 pending):
   but **TIMEOUT at 120 s** in the re-test. Bump the smoke timeout (≥240 s) and
   re-run to settle pass-vs-stuck; passes on M1 Metal locally.
 
+**FIXED — moved to HISTORY §204 (FastPitch + SpeechT5 GPU/CUDA):**
+- ✅ **fastpitch** (TTS) + **speecht5** (TTS) — both fixed by `69dc1789`. Two
+  Metal-masked HiFi-GAN bugs (sched-allocated decoder/vocoder graphs computed on
+  `backend_cpu`; channel-major `convt1d_decomp` on a time-major input). Both
+  validated on M1 Metal. CUDA re-test pending. Full write-up in HISTORY §204.
+
 **GENUINE bugs — fail on CUDA even with correct args (TODO):**
 - [ ] **lfm2-audio** (ASR) — CRASHes mid-run (~9.8 s). Hybrid conv+attn backbone.
-- [x] **speecht5** (TTS) — FIXED (shared `core_hifigan` fix, commit `69dc1789`,
-  §204). Same latent HiFi-GAN ConvTranspose layout bug as fastpitch below — both
-  pass `ups_w_perm` and feed time-major `mel_in=(T_mel, n_mel)`, so the code path
-  is identical to the fastpitch fix. **Validated on M1 Metal** (re-downloaded
-  cstr/speecht5-tts-GGUF f16): GPU + CPU both synthesise, ASR roundtrip
-  intelligible ("the quick brown fox jumps over lazy dog"); pre-fix it aborted
-  0-byte. CUDA re-test pending.
-- [x] **fastpitch** (TTS) — FIXED (commit `69dc1789`, §204). Two Metal-masked
-  bugs: (1) decoder+vocoder graphs were `sched_alloc`'d then computed on
-  `backend_cpu` → GPU device-ptr deref (CUDA-only crash); (2) `core_hifigan`
-  ConvTranspose used channel-major `convt1d_decomp` on a time-major input →
-  `ggml_can_mul_mat` abort on *all* backends. Validated on M1 Metal: GPU/CPU
-  byte-identical + verbatim ASR roundtrip.
 - [ ] **orpheus** (TTS) — 0-byte (~17 s) with `--voice tara`. Llama-3.2 + SNAC.
 - [ ] **chatterbox** (TTS) — 0-byte (~14 s) with `--voice <wav> --i-have-rights`;
   the #83 S3Gen GPU fix was Metal-validated — re-check the CUDA S3Gen path.
@@ -745,12 +739,12 @@ mistakes, not bugs**, leaving **7 genuine failures** (+1 pending):
 
 **Method:** per-backend JSONs in the dataset have timing context; reproduce on a
 CUDA worker (Kaggle T4/P100 or the A1000) with `CRISPASR_VERBOSE=1` +
-`CRISPASR_<BACKEND>_DEBUG=1`. Group fast-crashers (speecht5, fastpitch,
-cosyvoice3) vs empty-output finishers (kugelaudio, orpheus, chatterbox). Several
-pass on M1 Metal → CUDA-path-specific; cross-check Metal first. Note: the small
-ones (speecht5 ~300 MB, fastpitch ~120 MB, lfm2-audio ~1.6 GB) also fit the 8 GB
-CPU-only VPS, where the diff harness can drive the fix if the bug reproduces on
-CPU.
+`CRISPASR_<BACKEND>_DEBUG=1`. Group fast-crashers (cosyvoice3, lfm2-audio) vs
+empty-output finishers (kugelaudio, orpheus, chatterbox). Several pass on M1
+Metal → CUDA-path-specific; cross-check Metal first. Note: the small ones
+(lfm2-audio ~1.6 GB) also fit the 8 GB CPU-only VPS, where the diff harness can
+drive the fix if the bug reproduces on CPU. The fastpitch+speecht5 fix (§204)
+came exactly this way — the HiFi-GAN layout bug reproduced on CPU locally.
 
 ---
 
