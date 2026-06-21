@@ -6,6 +6,28 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-06-21 §217 Chatterbox-turbo — emotion/style tags now work at runtime
+
+Follow-up to the #181 data fix: the turbo GGUFs now carry the 19 emotion/style
+control tokens (`[laugh] [whispering] [angry] [sigh] [gasp] [clear throat] …`,
+ids 50257..50275), but `tokenize_text_bpe` byte-level-BPE'd them as literal
+characters. Taught it to split out bracketed special tokens: scan the text for
+any `[...]` substring whose exact string is a vocab key (the byte-level GPT-2 base
+vocab never stores literal `[...]`, so a hit is necessarily an added token), emit
+that id directly, and BPE the surrounding text via the existing space-split
+pre-tokenizer. Safe by construction — text without a recognised `[tag]` tokenizes
+bit-identically to before, and older 50257 GGUFs (no such vocab key) fall through
+to literal BPE.
+
+**Verified end-to-end** (turbo q4_k): `[laugh].` → 2 BPE tokens (1 special id +
+`.`), `[clear throat].` (with a space) → 2 — i.e. one id each, not literal BPE.
+And the checkpoint *responds*: `[laugh]` alone synthesises 2.0 s of audio that ASR
+transcribes as empty (wordless laughter), and `[laugh] Thank you so much!` runs
+2.24 s vs 1.48 s for the plain line (same words + ~0.76 s of extra non-verbal
+audio). Users can now drive turbo prosody with the bracketed tags.
+
+---
+
 ## 2026-06-21 #181 Chatterbox-turbo — vocab-mismatch load regression, directional fix
 
 External report (niksedk, via Subtitle Edit): `chatterbox-turbo-t3-*.gguf` failed
@@ -38,9 +60,7 @@ copy all other KV + tensors byte-for-byte, no re-quantize). Re-uploaded all thre
 (`-t3-{q4_k,q8_0,f16}.gguf`) to `cstr/chatterbox-turbo-GGUF` — now internally
 consistent (50276==50276, no load warning), each verified to load + synthesize +
 ASR-roundtrip verbatim. Xet deduped the unchanged weights (only the tokenizer
-delta uploaded). NB: the tokens are now *present* but the runtime doesn't emit the
-`[emotion]` tags yet (`tokenize_text_bpe` BPEs them literally) — that's a separate
-feature, PLAN §217.
+delta uploaded). The runtime now also emits the `[emotion]` tags (§217 above).
 
 ---
 

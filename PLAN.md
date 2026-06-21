@@ -139,31 +139,6 @@ PERFORMANCE §214.
 
 4. **Generalize B=2 to the other CFG backends — see §215.**
 
----
-
-## §217 — chatterbox-turbo emotion/style tokens at runtime (OPEN)
-
-The turbo tokenizer has 19 special control tokens at ids 50257..50275 —
-`[laugh] [whispering] [angry] [sigh] [gasp] [cough] [narration] [sarcastic]
-[dramatic] [happy] [crying] [fear] [surprised] [advertisement] [clear throat]
-[shush] [groan] [sniff] [chuckle]` (from `added_tokens.json`). #181 fixed the
-GGUFs to *carry* these (re-uploaded to `cstr/chatterbox-turbo-GGUF`, 50276 tokens)
-and the converter to include them, but the runtime does **not emit them yet**:
-`tokenize_text_bpe` (`chatterbox.cpp` ~230) byte-level-BPEs everything, so a literal
-`[laugh]` in the text is tokenized as characters, not id 50275.
-
-To enable emotion tags: before the space-split/BPE loop, scan the text for any
-bracketed substring `[...]` whose exact string is present in `tok.token_to_id`
-(the added tokens), emit that id directly, and BPE the surrounding text — matching
-how HF `EnTokenizer`/`PreTrainedTokenizer` splits added_tokens out ahead of BPE.
-Keep it gated/safe (only `[known-token]` strings are special; unknown `[...]`
-stays literal). Then VALIDATE the turbo model actually responds to the tags
-(synthesize "Hello [laugh] world" and confirm an audible laugh vs the plain line)
-— the tokens existing in the vocab doesn't guarantee the checkpoint was trained to
-act on all 19. Low risk, self-contained; the payoff is the turbo emotion-control
-feature users get from the bracketed tags.
-
----
 
 ## §215 — batched-CFG (B=2) for the remaining TTS backends (OPEN)
 

@@ -263,27 +263,62 @@ static std::vector<int32_t> tokenize_text_bpe(const cb_tokenizer& tok, const std
         core_bpe::bpe_one(tok.token_to_id, tok.merge_rank, encoded, result);
     };
 
-    size_t i = 0;
+    // BPE a contiguous run of ordinary (non-special) text via the GPT-2
+    // space-split pre-tokenizer.
+    auto bpe_segment = [&](const char* sbeg, const char* send) {
+        const char* p = sbeg;
+        while (p < send) {
+            const char* start = p;
+            if (*p == ' ') {
+                // Consume one leading space if it's followed by a non-space char
+                // (the " ?\p{L}+" arm). Multiple consecutive spaces are emitted as
+                // one whitespace chunk (the "\s+" arm), so the BPE merger can
+                // recover any multi-Ġ vocab entry the trained tokenizer used.
+                if (p + 1 < send && *(p + 1) != ' ') {
+                    ++p;
+                } else {
+                    while (p < send && *p == ' ')
+                        ++p;
+                    encode_chunk(start, p);
+                    continue;
+                }
+            }
+            while (p < send && *p != ' ')
+                ++p;
+            encode_chunk(start, p);
+        }
+    };
+
+    // §217: emit known bracketed special/added tokens directly as their vocab
+    // id instead of BPE-ing the literal characters. These are the chatterbox-
+    // turbo emotion/style controls ([laugh], [whispering], [clear throat], …,
+    // ids 50257..50275 from added_tokens.json) and base [SPACE]/[START]/[STOP].
+    // A bracketed substring is special iff its exact string is a vocab key — the
+    // byte-level GPT-2 base vocab never stores literal "[...]" strings, so a hit
+    // is necessarily an added token. Falls back to literal BPE when the GGUF
+    // lacks the token (older 50257 turbo files), so behaviour is unchanged for
+    // text without recognised tags.
+    size_t i = 0, seg_start = 0;
     while (i < text.size()) {
-        const size_t start = i;
-        if (text[i] == ' ') {
-            // Consume one leading space if it's followed by a non-space char
-            // (the " ?\p{L}+" arm). Multiple consecutive spaces are emitted as
-            // one whitespace chunk (the "\s+" arm), so the BPE merger can
-            // recover any multi-Ġ vocab entry the trained tokenizer used.
-            if (i + 1 < text.size() && text[i + 1] != ' ') {
-                ++i;
-            } else {
-                while (i < text.size() && text[i] == ' ')
-                    ++i;
-                encode_chunk(text.data() + start, text.data() + i);
-                continue;
+        if (text[i] == '[') {
+            const size_t close = text.find(']', i);
+            if (close != std::string::npos) {
+                const std::string cand = text.substr(i, close - i + 1);
+                auto it = tok.token_to_id.find(cand);
+                if (it != tok.token_to_id.end()) {
+                    if (i > seg_start)
+                        bpe_segment(text.data() + seg_start, text.data() + i);
+                    result.push_back(it->second);
+                    i = close + 1;
+                    seg_start = i;
+                    continue;
+                }
             }
         }
-        while (i < text.size() && text[i] != ' ')
-            ++i;
-        encode_chunk(text.data() + start, text.data() + i);
+        ++i;
     }
+    if (seg_start < text.size())
+        bpe_segment(text.data() + seg_start, text.data() + text.size());
     return result;
 }
 
