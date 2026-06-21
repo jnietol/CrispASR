@@ -260,6 +260,12 @@ struct kugelaudio_context {
     ggml_backend_buffer_t buf = nullptr;
     ggml_backend_buffer_t buf_cpu = nullptr;
     ggml_backend_sched_t sched = nullptr;
+    // Backbone graphs compute directly on `backend` via this gallocr (NOT the
+    // sched): their leading op is a weight-less RMSNorm, which ggml_backend_sched
+    // would place — with the leaf input — on the CPU backend and then feed the GPU
+    // a miscomputed cross-backend copy, producing garbage on Metal/CUDA. Direct
+    // single-backend compute avoids that copy. See HISTORY §206 (lfm2-audio).
+    ggml_gallocr_t galloc = nullptr;
     ggml_context* weight_ctx = nullptr;
 
     // KV cache for positive (main) LM path
@@ -455,6 +461,7 @@ extern "C" struct kugelaudio_context* kugelaudio_init_from_file(const char* path
             backends[n_be++] = ctx->backend_cpu;
         ctx->sched = ggml_backend_sched_new(backends, nullptr, n_be, 65536, false, false);
     }
+    ctx->galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(ctx->backend));
     ctx->compute_meta.resize(ggml_tensor_overhead() * 8192 + ggml_graph_overhead_custom(65536, false));
 
     // Read scaling factors from tensor data
@@ -513,6 +520,8 @@ extern "C" void kugelaudio_free(struct kugelaudio_context* ctx) {
         ggml_backend_buffer_free(ctx->kv_buf);
     if (ctx->kv_ctx)
         ggml_free(ctx->kv_ctx);
+    if (ctx->galloc)
+        ggml_gallocr_free(ctx->galloc);
     if (ctx->sched)
         ggml_backend_sched_free(ctx->sched);
     if (ctx->buf)
@@ -1331,11 +1340,10 @@ extern "C" float* kugelaudio_synthesize(struct kugelaudio_context* ctx, const ch
         ggml_set_output(out);
         ggml_build_forward_expand(gf, out);
 
-        ggml_backend_sched_reset(ctx->sched);
-        if (!ggml_backend_sched_alloc_graph(ctx->sched, gf))
+        if (!ggml_gallocr_alloc_graph(ctx->galloc, gf))
             return false;
         ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "emb_ids"), ids, 0, (size_t)n_ids * sizeof(int32_t));
-        if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS)
+        if (ggml_backend_graph_compute(ctx->backend, gf) != GGML_STATUS_SUCCESS)
             return false;
 
         embeds.resize((size_t)hp.d_lm * n_ids);
@@ -1382,12 +1390,11 @@ extern "C" float* kugelaudio_synthesize(struct kugelaudio_context* ctx, const ch
             ggml_set_output(h);
             ggml_build_forward_expand(gf, h);
 
-            ggml_backend_sched_reset(ctx->sched);
-            if (!ggml_backend_sched_alloc_graph(ctx->sched, gf))
+            if (!ggml_gallocr_alloc_graph(ctx->galloc, gf))
                 break;
             ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "conn_in"), &scaled_voice[fi * vae_dim], 0,
                                     vae_dim * sizeof(float));
-            if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS)
+            if (ggml_backend_graph_compute(ctx->backend, gf) != GGML_STATUS_SUCCESS)
                 break;
 
             // Replace embedding at voice_token_start + fi
@@ -1422,9 +1429,8 @@ extern "C" float* kugelaudio_synthesize(struct kugelaudio_context* ctx, const ch
         }
 
         KUGELAUDIO_TRACE("kugelaudio: sched_reset...\n");
-        ggml_backend_sched_reset(ctx->sched);
         KUGELAUDIO_TRACE("kugelaudio: alloc_graph n_nodes=%d...\n", ggml_graph_n_nodes(gf));
-        if (!ggml_backend_sched_alloc_graph(ctx->sched, gf))
+        if (!ggml_gallocr_alloc_graph(ctx->galloc, gf))
             return false;
         KUGELAUDIO_TRACE("kugelaudio: alloc_graph OK, setting inputs...\n");
 
@@ -1447,7 +1453,7 @@ extern "C" float* kugelaudio_synthesize(struct kugelaudio_context* ctx, const ch
         }
 
         KUGELAUDIO_TRACE("kugelaudio: graph_compute...\n");
-        if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS)
+        if (ggml_backend_graph_compute(ctx->backend, gf) != GGML_STATUS_SUCCESS)
             return false;
         KUGELAUDIO_TRACE("kugelaudio: graph_compute OK\n");
 
@@ -1536,8 +1542,7 @@ extern "C" float* kugelaudio_synthesize(struct kugelaudio_context* ctx, const ch
 
                 // Run prediction head
                 ggml_cgraph* pred_gf = build_pred_head_graph(ctx, 1);
-                ggml_backend_sched_reset(ctx->sched);
-                if (!ggml_backend_sched_alloc_graph(ctx->sched, pred_gf)) {
+                if (!ggml_gallocr_alloc_graph(ctx->galloc, pred_gf)) {
                     fprintf(stderr, "kugelaudio: pred head alloc failed at step %d\n", si);
                     break;
                 }
@@ -1550,7 +1555,7 @@ extern "C" float* kugelaudio_synthesize(struct kugelaudio_context* ctx, const ch
                                         hp.d_lm * sizeof(float));
 
                 KUGELAUDIO_TRACE("kugelaudio: diff step %d pred compute...\n", si);
-                if (ggml_backend_sched_graph_compute(ctx->sched, pred_gf) != GGML_STATUS_SUCCESS) {
+                if (ggml_backend_graph_compute(ctx->backend, pred_gf) != GGML_STATUS_SUCCESS) {
                     fprintf(stderr, "kugelaudio: pred head compute failed at step %d\n", si);
                     break;
                 }
@@ -1592,6 +1597,12 @@ extern "C" float* kugelaudio_synthesize(struct kugelaudio_context* ctx, const ch
             KUGELAUDIO_TRACE("kugelaudio: building VAE decoder graph...\n");
             ggml_cgraph* dec_gf = build_vae_decoder_graph(ctx, 1);
             KUGELAUDIO_TRACE("kugelaudio: VAE decoder graph built OK\n");
+            // The VAE decoder uses ggml_pad (causal-conv left-pad), which the
+            // Metal backend does not support — so this graph alone runs through
+            // ggml_backend_sched (which falls back to CPU for PAD), NOT the direct
+            // gallocr path used by the LM/diffusion graphs. The VAE has no §206
+            // weight-less-first-op issue (its first op is a conv), so the sched's
+            // cross-backend copies here are the safe, mid-graph kind.
             ggml_backend_sched_reset(ctx->sched);
             if (!ggml_backend_sched_alloc_graph(ctx->sched, dec_gf)) {
                 fprintf(stderr, "kugelaudio: decoder alloc failed\n");
@@ -1642,12 +1653,11 @@ extern "C" float* kugelaudio_synthesize(struct kugelaudio_context* ctx, const ch
                 ggml_set_output(h);
                 ggml_build_forward_expand(gf_conn, h);
 
-                ggml_backend_sched_reset(ctx->sched);
-                if (!ggml_backend_sched_alloc_graph(ctx->sched, gf_conn))
+                if (!ggml_gallocr_alloc_graph(ctx->galloc, gf_conn))
                     break;
                 ggml_backend_tensor_set(ggml_graph_get_tensor(gf_conn, "conn_in"), scaled_latent.data(), 0,
                                         vae_dim * sizeof(float));
-                if (ggml_backend_sched_graph_compute(ctx->sched, gf_conn) != GGML_STATUS_SUCCESS)
+                if (ggml_backend_graph_compute(ctx->backend, gf_conn) != GGML_STATUS_SUCCESS)
                     break;
 
                 std::vector<float> next_embed(hp.d_lm);
@@ -1726,15 +1736,14 @@ extern "C" float* kugelaudio_run_diffusion_step(struct kugelaudio_context* ctx, 
     compute_sinusoidal_embed((float)timestep, t_sin.data(), 256);
 
     ggml_cgraph* gf = build_pred_head_graph(ctx, 1);
-    ggml_backend_sched_reset(ctx->sched);
-    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf))
+    if (!ggml_gallocr_alloc_graph(ctx->galloc, gf))
         return nullptr;
 
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "pred_noisy"), noisy_latent, 0, vae_dim * sizeof(float));
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "pred_t_sin"), t_sin.data(), 0, 256 * sizeof(float));
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "pred_condition"), condition, 0, d_lm * sizeof(float));
 
-    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS)
+    if (ggml_backend_graph_compute(ctx->backend, gf) != GGML_STATUS_SUCCESS)
         return nullptr;
 
     *out_dim = vae_dim;
@@ -1749,13 +1758,12 @@ extern "C" float* kugelaudio_run_acoustic_decoder(struct kugelaudio_context* ctx
         return nullptr;
 
     ggml_cgraph* gf = build_vae_decoder_graph(ctx, 1);
-    ggml_backend_sched_reset(ctx->sched);
-    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf))
+    if (!ggml_gallocr_alloc_graph(ctx->galloc, gf))
         return nullptr;
 
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "dec_latent"), latent, 0, vae_dim * sizeof(float));
 
-    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS)
+    if (ggml_backend_graph_compute(ctx->backend, gf) != GGML_STATUS_SUCCESS)
         return nullptr;
 
     ggml_tensor* audio = ggml_graph_get_tensor(gf, "dec_audio");
