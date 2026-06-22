@@ -1252,6 +1252,34 @@ static bool kv_alloc(chatterbox_context* c, int max_ctx) {
     if (c->kv_ctx && max_ctx <= c->kv_max_ctx)
         return true;
 
+    // #182/§218: reallocating the KV cache invalidates anything that baked in
+    // pointers to the old kv_k/kv_v (and kv_k_cfg/kv_v_cfg) tensors — namely the
+    // §186 cached bucket step graphs and their scheduler allocations. Without
+    // this, a second synthesize() with longer text reallocates the cache and the
+    // next bucketed decode reads freed tensors (use-after-free crash, hit by the
+    // CLI/server long-form chunk loop). Drop the cached bucket graphs so they
+    // rebuild against the new tensors; the step schedulers re-alloc lazily once
+    // the active-bucket marker is cleared. (The non-bucket run_t3_kv path and the
+    // B2 path rebuild their graphs against c->kv_k every call, so they're safe.)
+    for (auto& bk : c->t3_buckets) {
+        if (bk.ctx)
+            ggml_free(bk.ctx);
+        bk.ctx = nullptr;
+        bk.gf = nullptr;
+    }
+    for (auto& bk : c->t3_buckets_cfg) {
+        if (bk.ctx)
+            ggml_free(bk.ctx);
+        bk.ctx = nullptr;
+        bk.gf = nullptr;
+    }
+    c->t3_active_bucket = -1;
+    c->t3_active_bucket_cfg = -1;
+    if (c->t3_step_sched)
+        ggml_backend_sched_reset(c->t3_step_sched);
+    if (c->t3_step_sched_cfg)
+        ggml_backend_sched_reset(c->t3_step_sched_cfg);
+
     // Free existing
     if (c->kv_buf)
         ggml_backend_buffer_free(c->kv_buf);

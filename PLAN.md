@@ -195,23 +195,6 @@ the "don't extract single-consumer helpers" rule.
 
 ---
 
-## §218 — chatterbox CLI long-form: sentence-chunk `--tts` (OPEN)
-
-#182 fixed the segfault (over-long text now truncates to the positional limit with
-a warning, `cap_text_tokens`), but truncation drops content. The server
-`/v1/audio/speech` path already chunks long input on sentence boundaries
-(`examples/cli/crispasr_tts_chunking.h`, issue #66) and concatenates per-chunk
-PCM; the CLI `--tts` path calls `chatterbox_synthesize` on the whole string
-(`crispasr_backend_chatterbox.cpp` ~198) with no chunking. Wire the same chunk
-helper into the CLI synthesize so long prompts are split into sentences (each well
-under the 2050 base / ~8k turbo positional horizon) and the per-chunk WAVs are
-concatenated — full synthesis instead of truncation. Voice consistency holds
-across chunks (same conditioning). Low risk; reuse the existing helper +
-test_server_chunking pattern. Then the cap_text_tokens truncation only ever fires
-on a single un-splittable mega-sentence.
-
----
-
 ## §166 follow-up — WASM `asr*` session surface needs a build-verify (OPEN)
 
 Round 4 (2026-06-13, see HISTORY) added a backend-agnostic ASR session surface to

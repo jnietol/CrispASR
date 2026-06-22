@@ -41,6 +41,7 @@
 #include "speaker_db.h"
 
 #include "crispasr_c2pa.h"
+#include "crispasr_tts_chunking.h"
 #include "crispasr_tts_disclaimer.h"
 #include "crispasr_watermark.h"
 #include "crispasr_watermark_dispatch.h"
@@ -1494,16 +1495,40 @@ int crispasr_run_backend(const whisper_params& params_in) {
                     params.tts_consent_attestation.c_str());
         }
 
-        auto audio = backend->synthesize(params.tts_text, params);
-        if (audio.empty()) {
-            fprintf(stderr, "crispasr: error: TTS synthesis failed\n");
-            return 15;
-        }
-
         // Sample rate of the synthesized PCM — backend-declared. Most TTS
         // backends emit 24 kHz; voxcpm2-tts emits 48 kHz. Hard-coding 24 kHz
         // here is why voxcpm2 output played at half-speed before this fix.
         const int sr_in = backend->tts_sample_rate();
+
+        // §218 (#182): sentence-chunk long input before synthesis — every TTS
+        // talker has a finite positional/training horizon (chatterbox base T3
+        // hard-caps at 2050 text positions; longer text was truncated). Split on
+        // sentence boundaries, synthesize each chunk within the model's healthy
+        // horizon, and concatenate with a 200 ms pause between chunks. The
+        // server `/v1/audio/speech` path already does this (#66); this brings the
+        // CLI `--tts` path to parity. Single-sentence input is a 1-element vector
+        // (one std::vector move of overhead). The policy wrapper keeps VibeVoice
+        // voice cloning single-shot (chunking breaks its continuous-prompt ICL).
+        std::vector<float> audio;
+        {
+            const std::vector<std::string> chunks_txt =
+                crispasr_tts_plan_chunks_for_backend(params.tts_text, backend->name());
+            std::vector<std::vector<float>> chunk_pcm;
+            chunk_pcm.reserve(chunks_txt.size());
+            for (size_t ci = 0; ci < chunks_txt.size(); ci++) {
+                if (params.verbose && chunks_txt.size() > 1)
+                    fprintf(stderr, "crispasr[tts]: chunk %zu/%zu (%zu chars)\n", ci + 1, chunks_txt.size(),
+                            chunks_txt[ci].size());
+                std::vector<float> c = backend->synthesize(chunks_txt[ci], params);
+                if (!c.empty())
+                    chunk_pcm.push_back(std::move(c));
+            }
+            audio = crispasr_tts_concat_with_silence(chunk_pcm, sr_in / 5);
+        }
+        if (audio.empty()) {
+            fprintf(stderr, "crispasr: error: TTS synthesis failed\n");
+            return 15;
+        }
 
         // Prepend spoken AI-disclosure for voice-cloned output. The
         // disclaimer is synthesized with the neutral/default voice (not

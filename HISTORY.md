@@ -6,6 +6,30 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-06-22 §218 Chatterbox CLI long-form — sentence-chunk `--tts` (+ KV-realloc UAF fix)
+
+Follow-up to the #182 cap: instead of truncating long input, chunk it. The CLI
+`--tts` path called `backend->synthesize` on the whole string; now it runs the
+same sentence-chunk pipeline the server `/v1/audio/speech` uses (#66):
+`crispasr_tts_plan_chunks_for_backend` → synthesize each chunk → `…concat_with_
+silence` (200 ms gaps). Each chunk stays within the model's healthy horizon and
+voice consistency holds (same conditioning every call).
+
+**Latent bug surfaced + fixed:** the first multi-chunk run crashed on chunk 2.
+`kv_alloc` reallocates `kv_k/kv_v` when a later chunk needs a larger `max_ctx`,
+but the §186 cached bucket step graphs still pointed at the freed tensors →
+use-after-free (intermittent: only when a later chunk grew the cache). This also
+affected the server's chunk loop. Fixed in `kv_alloc`: on realloc, free the
+cached bucket graphs (`t3_buckets`/`t3_buckets_cfg`) and reset the step
+schedulers so they rebuild against the new tensors. (The non-bucket and B2 decode
+paths rebuild per call, so they were already safe.)
+
+Verified: a 5-sentence prompt now synthesises all 5 chunks (21.9 s, exit 0, was a
+crash or 1-sentence truncation) and ASR-roundtrips all five sentences verbatim.
+`cap_text_tokens` (#182) now only fires on a single un-splittable mega-sentence.
+
+---
+
 ## 2026-06-22 #182 Chatterbox — segfault on very long text (text-position OOB)
 
 External report (BergmannAtmet): a very long `--tts` prompt segfaulted in
