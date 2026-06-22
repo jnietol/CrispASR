@@ -1996,6 +1996,28 @@ catch_discover_tests(test-core-seanet
     PROPERTIES LABELS "unit"
 )
 
+# ─── test-audio-formats — Catch2 unit tests for crispasr_audio_load format coverage
+#
+# Validates AU (µ-law), AMR-NB, and WebM (Opus) decode against the WAV
+# reference (jfk.wav). Cross-correlation + length + energy checks. Pure CPU,
+# no model load — only requires sample files in samples/.
+add_executable(test-audio-formats test-audio-formats.cpp)
+target_include_directories(test-audio-formats PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/ggml/include
+)
+target_link_libraries(test-audio-formats PRIVATE
+    Catch2::Catch2WithMain
+    crispasr-lib
+)
+target_compile_definitions(test-audio-formats PRIVATE
+    SAMPLES_DIR="${PROJECT_SOURCE_DIR}/samples"
+)
+catch_discover_tests(test-audio-formats
+    TEST_SPEC "[audio]"
+    PROPERTIES LABELS "unit;audio"
+)
+
 # ─── test-audio-chunking — Catch2 unit tests for audio_chunking::find_energy_min_split
 #
 # Covers the energy-minimum detection helper directly: quiet window selection,

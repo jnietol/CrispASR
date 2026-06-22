@@ -257,6 +257,14 @@ if (CRISPASR_OPUS)
         # Static fallback. libogg + libopus ship upstream CMake; opusfile is
         # autotools-only, so compile its (HTTP-free) core sources directly.
         include(FetchContent)
+        # Suppress Opus/Ogg test targets without clobbering the global
+        # BUILD_TESTING that CTest relies on (include(CTest) runs later
+        # and needs BUILD_TESTING to default to ON).
+        if (DEFINED CACHE{BUILD_TESTING})
+            set(_crispasr_save_build_testing "$CACHE{BUILD_TESTING}")
+        else()
+            set(_crispasr_save_build_testing "__UNSET__")
+        endif()
         set(BUILD_TESTING       OFF CACHE BOOL "" FORCE)
         set(OPUS_BUILD_TESTING  OFF CACHE BOOL "" FORCE)
         # libogg/opus ship pre-3.5 cmake_minimum_required, which CMake >= 4.0
@@ -282,6 +290,13 @@ if (CRISPASR_OPUS)
         target_link_libraries(crispasr-lib PRIVATE crispasr_opusfile)
         set(_crispasr_opus_ok ON)
         message(STATUS "CrispASR: .opus via FetchContent static opus/ogg/opusfile")
+        # Restore BUILD_TESTING so include(CTest) in the root CMakeLists
+        # defaults correctly (it checks the cache variable).
+        if (_crispasr_save_build_testing STREQUAL "__UNSET__")
+            unset(BUILD_TESTING CACHE)
+        else()
+            set(BUILD_TESTING "${_crispasr_save_build_testing}" CACHE BOOL "" FORCE)
+        endif()
     endif()
 
     if (_crispasr_opus_ok)
@@ -292,6 +307,101 @@ if (CRISPASR_OPUS)
         target_compile_definitions(crispasr-lib PRIVATE CRISPASR_HAVE_OPUS=1)
     elseif (NOT CRISPASR_OPUS_FETCH)
         message(STATUS "CrispASR: .opus disabled — opusfile not found (set -DCRISPASR_OPUS_FETCH=ON to build it)")
+    endif()
+endif()
+
+# ── Optional AMR-NB/WB decode in crispasr_audio.cpp ──────────────────────────
+# Telephony / voicemail speech via opencore-amr (Apache-2.0). AMR-NB (8 kHz)
+# and AMR-WB (16 kHz) are the standard codecs for mobile voice recordings and
+# voicemail. Decoded PCM is resampled to 16 kHz via miniaudio.
+# Disable with -DCRISPASR_AMR=OFF; force static build with -DCRISPASR_AMR_FETCH=ON.
+option(CRISPASR_AMR       "Decode AMR-NB/WB via opencore-amr" ON)
+option(CRISPASR_AMR_FETCH "Skip system pkg-config; build opencore-amr statically via FetchContent" OFF)
+
+if (CRISPASR_AMR)
+    set(_crispasr_amr_ok OFF)
+
+    if (NOT CRISPASR_AMR_FETCH)
+        find_package(PkgConfig QUIET)
+        if (PkgConfig_FOUND)
+            pkg_check_modules(OPENCORE_AMRNB QUIET IMPORTED_TARGET opencore-amrnb)
+            pkg_check_modules(OPENCORE_AMRWB QUIET IMPORTED_TARGET opencore-amrwb)
+            if (OPENCORE_AMRNB_FOUND AND OPENCORE_AMRWB_FOUND)
+                target_link_libraries(crispasr-lib PRIVATE PkgConfig::OPENCORE_AMRNB PkgConfig::OPENCORE_AMRWB)
+                set(_crispasr_amr_ok ON)
+                message(STATUS "CrispASR: AMR via system opencore-amr (pkg-config)")
+            endif()
+        endif()
+    endif()
+
+    if (NOT _crispasr_amr_ok)
+        # Static fallback. opencore-amr has autotools upstream; we compile the
+        # sources directly with add_library since there's no upstream CMakeLists.
+        include(FetchContent)
+        FetchContent_Declare(crispasr_opencore_amr
+            GIT_REPOSITORY https://github.com/niclas-timm/opencore-amr.git
+            GIT_TAG        v0.1.6
+            GIT_SHALLOW    TRUE)
+        FetchContent_GetProperties(crispasr_opencore_amr)
+        if (NOT crispasr_opencore_amr_POPULATED)
+            FetchContent_Populate(crispasr_opencore_amr)
+        endif()
+
+        # AMR-NB decoder
+        file(GLOB _amrnb_srcs "${crispasr_opencore_amr_SOURCE_DIR}/opencore/codecs_v2/audio/gsm_amr/amr_nb/dec/src/*.cpp")
+        file(GLOB _amrnb_common "${crispasr_opencore_amr_SOURCE_DIR}/opencore/codecs_v2/audio/gsm_amr/common/dec/src/*.cpp")
+        add_library(crispasr_amrnb STATIC
+            ${crispasr_opencore_amr_SOURCE_DIR}/amrnb/wrapper.cpp
+            ${_amrnb_srcs} ${_amrnb_common})
+        target_include_directories(crispasr_amrnb PUBLIC
+            ${crispasr_opencore_amr_SOURCE_DIR}/amrnb
+            ${crispasr_opencore_amr_SOURCE_DIR}/opencore/codecs_v2/audio/gsm_amr/amr_nb/dec/src
+            ${crispasr_opencore_amr_SOURCE_DIR}/opencore/codecs_v2/audio/gsm_amr/amr_nb/dec/include
+            ${crispasr_opencore_amr_SOURCE_DIR}/opencore/codecs_v2/audio/gsm_amr/amr_nb/common/include
+            ${crispasr_opencore_amr_SOURCE_DIR}/opencore/codecs_v2/audio/gsm_amr/common/dec/include)
+        set_target_properties(crispasr_amrnb PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+        # AMR-WB decoder
+        file(GLOB _amrwb_srcs "${crispasr_opencore_amr_SOURCE_DIR}/opencore/codecs_v2/audio/gsm_amr/amr_wb/dec/src/*.cpp")
+        add_library(crispasr_amrwb STATIC
+            ${crispasr_opencore_amr_SOURCE_DIR}/amrwb/wrapper.cpp
+            ${_amrwb_srcs})
+        target_include_directories(crispasr_amrwb PUBLIC
+            ${crispasr_opencore_amr_SOURCE_DIR}/amrwb
+            ${crispasr_opencore_amr_SOURCE_DIR}/opencore/codecs_v2/audio/gsm_amr/amr_wb/dec/src
+            ${crispasr_opencore_amr_SOURCE_DIR}/opencore/codecs_v2/audio/gsm_amr/amr_wb/dec/include)
+        set_target_properties(crispasr_amrwb PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+        target_link_libraries(crispasr-lib PRIVATE crispasr_amrnb crispasr_amrwb)
+        set(_crispasr_amr_ok ON)
+        message(STATUS "CrispASR: AMR via FetchContent static opencore-amr")
+    endif()
+
+    if (_crispasr_amr_ok)
+        target_compile_definitions(crispasr-lib PRIVATE CRISPASR_HAVE_AMR=1)
+    elseif (NOT CRISPASR_AMR_FETCH)
+        message(STATUS "CrispASR: AMR disabled — opencore-amr not found (set -DCRISPASR_AMR_FETCH=ON to build it)")
+    endif()
+endif()
+
+# ── Optional AAC/M4A decode via fdk-aac (Fraunhofer, permissive) ─────────────
+# Covers AAC/M4A/ADTS on platforms without a native AAC decoder (Linux).
+# fdk-aac is not OSI-approved but is permissive (BSD-like + patent clause),
+# not GPL, not NC. On Apple, AudioToolbox is preferred; on Windows, Media
+# Foundation. Disable with -DCRISPASR_FDK_AAC=OFF.
+option(CRISPASR_FDK_AAC "Decode AAC/M4A via fdk-aac" ON)
+
+if (CRISPASR_FDK_AAC AND NOT APPLE)
+    find_package(PkgConfig QUIET)
+    if (PkgConfig_FOUND)
+        pkg_check_modules(FDK_AAC QUIET IMPORTED_TARGET fdk-aac)
+        if (FDK_AAC_FOUND)
+            target_link_libraries(crispasr-lib PRIVATE PkgConfig::FDK_AAC)
+            target_compile_definitions(crispasr-lib PRIVATE CRISPASR_HAVE_FDK_AAC=1)
+            message(STATUS "CrispASR: AAC/M4A via system fdk-aac ${FDK_AAC_VERSION} (pkg-config)")
+        else()
+            message(STATUS "CrispASR: AAC/M4A disabled — fdk-aac not found (apt install libfdk-aac-dev)")
+        endif()
     endif()
 endif()
 
