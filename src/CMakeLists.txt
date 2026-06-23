@@ -334,8 +334,8 @@ if (CRISPASR_AMR)
         endif()
     endif()
 
-    if (NOT _crispasr_amr_ok)
-        # Static fallback: build opencore-amr from source with minimal OSCL
+    if (NOT _crispasr_amr_ok AND CRISPASR_AMR_FETCH)
+        # Static fallback (opt-in via -DCRISPASR_AMR_FETCH=ON): build opencore-amr from source with minimal OSCL
         # shim headers. The upstream Android/AOSP opencore-amr depends on a
         # full OSCL library; we generate trivial stubs so the decoder compiles
         # standalone. The source is Brian Aker's CMake-enabled fork.
@@ -344,7 +344,7 @@ if (CRISPASR_AMR)
             set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
         endif()
         FetchContent_Declare(crispasr_opencore_amr
-            GIT_REPOSITORY https://github.com/ArtifexSoftware/opencore-amr.git
+            GIT_REPOSITORY https://github.com/CrispStrobe/opencore-amr.git
             GIT_TAG v0.1.6
             GIT_SHALLOW TRUE)
         FetchContent_GetProperties(crispasr_opencore_amr)
