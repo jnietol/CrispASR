@@ -28,6 +28,10 @@
 #include <mfreadwrite.h>
 #endif
 
+// cstdint before anything else — MinGW GCC doesn't pull in uint32_t
+// via windows.h, and stb_vorbis / miniaudio use fixed-width types.
+#include <cstdint>
+
 // stb_vorbis lives in examples/ — use relative path from src/
 #define STB_VORBIS_HEADER_ONLY
 #include "../examples/stb_vorbis.c"
