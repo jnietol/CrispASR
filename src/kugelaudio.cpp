@@ -821,9 +821,12 @@ static ggml_cgraph* build_pred_head_graph(kugelaudio_context* ctx, int n_frames)
         KUGELAUDIO_TRACE("pred: L%d adaln_out=[%lld,%lld]\n", i, (long long)adaln_out->ne[0],
                          (long long)adaln_out->ne[1]);
         size_t nb1 = adaln_out->nb[1];
-        ggml_tensor* shift = ggml_view_2d(ctx0, adaln_out, d_lm, n_frames, nb1, 0);
-        ggml_tensor* scale = ggml_view_2d(ctx0, adaln_out, d_lm, n_frames, nb1, (size_t)d_lm * sizeof(float));
-        ggml_tensor* gate = ggml_view_2d(ctx0, adaln_out, d_lm, n_frames, nb1, (size_t)2 * d_lm * sizeof(float));
+        // ggml_cont: non-contiguous views segfault on Vulkan/RDNA4 (issue #184).
+        ggml_tensor* shift = ggml_cont(ctx0, ggml_view_2d(ctx0, adaln_out, d_lm, n_frames, nb1, 0));
+        ggml_tensor* scale =
+            ggml_cont(ctx0, ggml_view_2d(ctx0, adaln_out, d_lm, n_frames, nb1, (size_t)d_lm * sizeof(float)));
+        ggml_tensor* gate =
+            ggml_cont(ctx0, ggml_view_2d(ctx0, adaln_out, d_lm, n_frames, nb1, (size_t)2 * d_lm * sizeof(float)));
         KUGELAUDIO_TRACE("pred: L%d shift=[%lld,%lld] scale=[%lld,%lld] gate=[%lld,%lld]\n", i, (long long)shift->ne[0],
                          (long long)shift->ne[1], (long long)scale->ne[0], (long long)scale->ne[1],
                          (long long)gate->ne[0], (long long)gate->ne[1]);
@@ -869,8 +872,9 @@ static ggml_cgraph* build_pred_head_graph(kugelaudio_context* ctx, int n_frames)
         KUGELAUDIO_TRACE("pred: final adaln_out=[%lld,%lld]\n", (long long)adaln_out->ne[0],
                          (long long)adaln_out->ne[1]);
         size_t nb1_f = adaln_out->nb[1];
-        ggml_tensor* shift = ggml_view_2d(ctx0, adaln_out, d_lm, n_frames, nb1_f, 0);
-        ggml_tensor* scale = ggml_view_2d(ctx0, adaln_out, d_lm, n_frames, nb1_f, (size_t)d_lm * sizeof(float));
+        ggml_tensor* shift = ggml_cont(ctx0, ggml_view_2d(ctx0, adaln_out, d_lm, n_frames, nb1_f, 0));
+        ggml_tensor* scale =
+            ggml_cont(ctx0, ggml_view_2d(ctx0, adaln_out, d_lm, n_frames, nb1_f, (size_t)d_lm * sizeof(float)));
         KUGELAUDIO_TRACE("pred: final shift=[%lld,%lld] scale=[%lld,%lld]\n", (long long)shift->ne[0],
                          (long long)shift->ne[1], (long long)scale->ne[0], (long long)scale->ne[1]);
 

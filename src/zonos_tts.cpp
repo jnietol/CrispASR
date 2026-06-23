@@ -1295,8 +1295,10 @@ static ggml_cgraph* build_graph_backbone(zonos_tts_context* ctx, int n_past, int
             ggml_tensor* gate_up = ggml_mul_mat(ctx0, layer.ffn_gate_up_w, cur);
             const int ff = (int)hp.ff_dim;
             const size_t ts = ggml_type_size(gate_up->type);
-            ggml_tensor* y = ggml_view_2d(ctx0, gate_up, ff, (int)gate_up->ne[1], gate_up->nb[1], 0);
-            ggml_tensor* gate = ggml_view_2d(ctx0, gate_up, ff, (int)gate_up->ne[1], gate_up->nb[1], (size_t)ff * ts);
+            // ggml_cont: non-contiguous views segfault on Vulkan/RDNA4 (issue #184).
+            ggml_tensor* y = ggml_cont(ctx0, ggml_view_2d(ctx0, gate_up, ff, (int)gate_up->ne[1], gate_up->nb[1], 0));
+            ggml_tensor* gate =
+                ggml_cont(ctx0, ggml_view_2d(ctx0, gate_up, ff, (int)gate_up->ne[1], gate_up->nb[1], (size_t)ff * ts));
             cur = ggml_add(ctx0, residual,
                            ggml_mul_mat(ctx0, layer.ffn_down_w, ggml_mul(ctx0, y, ggml_silu(ctx0, gate))));
         }

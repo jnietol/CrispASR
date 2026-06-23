@@ -1135,8 +1135,10 @@ static ggml_cgraph* build_cond_enc_graph(indextts_context* c, int T_mel) {
         ggml_tensor* pw1_b = core_gguf::try_get(ts, fmt("conv.pw1.bias").c_str());
         ggml_tensor* pw1_w2d = ggml_reshape_2d(ctx0, pw1_w, d, 2 * d);
         ggml_tensor* cnv = mm_bias(pw1_w2d, x, pw1_b);
-        ggml_tensor* cnv_gate = ggml_view_2d(ctx0, cnv, d, T_enc, cnv->nb[1], d * sizeof(float));
-        cnv = ggml_mul(ctx0, ggml_view_2d(ctx0, cnv, d, T_enc, cnv->nb[1], 0), ggml_sigmoid(ctx0, cnv_gate));
+        // ggml_cont: non-contiguous views segfault on Vulkan/RDNA4 (issue #184).
+        ggml_tensor* cnv_gate = ggml_cont(ctx0, ggml_view_2d(ctx0, cnv, d, T_enc, cnv->nb[1], d * sizeof(float)));
+        cnv = ggml_mul(ctx0, ggml_cont(ctx0, ggml_view_2d(ctx0, cnv, d, T_enc, cnv->nb[1], 0)),
+                       ggml_sigmoid(ctx0, cnv_gate));
 
         // dw conv (k=15, padding=7)
         const int K_conv = 15;
