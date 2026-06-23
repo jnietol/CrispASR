@@ -246,7 +246,12 @@ if (CRISPASR_OPUS)
         if (PkgConfig_FOUND)
             pkg_check_modules(OPUSFILE QUIET IMPORTED_TARGET opusfile)
             if (OPUSFILE_FOUND)
-                target_link_libraries(crispasr-lib PRIVATE PkgConfig::OPUSFILE)
+                # `${OPUSFILE_STATIC_LIBRARIES}` instead of `PkgConfig::OPUSFILE` to include
+                # private dependencies of libopusfile. This avoids linking errors to undefined
+                # references from libopus.
+                # With this you e.g. get `-lopusfile -logg -lopus` instead of just
+                # `/usr/lib/libopusfile.so` passed to the linker.
+                target_link_libraries(crispasr-lib PRIVATE ${OPUSFILE_STATIC_LIBRARIES})
                 set(_crispasr_opus_ok ON)
                 message(STATUS "CrispASR: .opus via system opusfile ${OPUSFILE_VERSION} (pkg-config)")
             endif()
