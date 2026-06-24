@@ -4219,7 +4219,7 @@ static float* codec_decode_codes(qwen3_tts_context* c, const int32_t* codes, int
     if (const char* e = std::getenv("QWEN3_TTS_CODEC_CTX"))
         ctx = atoi(e);
     if (ctx < window)
-        ctx = window;    // left-context must cover the sliding window
+        ctx = window; // left-context must cover the sliding window
     if (cuda_codec && !std::getenv("QWEN3_TTS_CODEC_ALLOW_FULL")) {
         if (chunk <= 0) {
             chunk = cuda_chunk_cap;
