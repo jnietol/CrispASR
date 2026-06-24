@@ -470,7 +470,7 @@ cmake -B build-ios-sim -G Xcode \
     -DCRISPASR_COREML="ON" \
     -DCRISPASR_COREML_ALLOW_FALLBACK="ON" \
     -S .
-cmake --build build-ios-sim --config Release -- -quiet
+cmake --build build-ios-sim --config Release -- -quiet || { echo "::error::xcframework slice build-ios-sim failed to build"; exit 1; }
 
 echo "Building for iOS devices..."
 cmake -B build-ios-device -G Xcode \
@@ -484,7 +484,7 @@ cmake -B build-ios-device -G Xcode \
     -DCRISPASR_COREML="ON" \
     -DCRISPASR_COREML_ALLOW_FALLBACK="ON" \
     -S .
-cmake --build build-ios-device --config Release -- -quiet
+cmake --build build-ios-device --config Release -- -quiet || { echo "::error::xcframework slice build-ios-device failed to build"; exit 1; }
 
 echo "Building for macOS..."
 cmake -B build-macos -G Xcode \
@@ -496,7 +496,7 @@ cmake -B build-macos -G Xcode \
     -DCRISPASR_COREML="ON" \
     -DCRISPASR_COREML_ALLOW_FALLBACK="ON" \
     -S .
-cmake --build build-macos --config Release -- -quiet
+cmake --build build-macos --config Release -- -quiet || { echo "::error::xcframework slice build-macos failed to build"; exit 1; }
 
 # visionOS/tvOS: build with -DCRISPASR_OPUS=OFF. Opus 1.5.2's FetchContent
 # build doesn't compile cleanly on these SDKs (the u_int/_XOPEN_SOURCE compat
@@ -515,7 +515,7 @@ cmake -B build-visionos -G Xcode \
     -DCMAKE_C_FLAGS="-D_XOPEN_SOURCE=700 ${COMMON_C_FLAGS}" \
     -DCMAKE_CXX_FLAGS="-D_XOPEN_SOURCE=700 ${COMMON_CXX_FLAGS}" \
     -S .
-cmake --build build-visionos --config Release -- -quiet
+cmake --build build-visionos --config Release -- -quiet || { echo "::error::xcframework slice build-visionos failed to build"; exit 1; }
 
 echo "Building for visionOS simulator..."
 cmake -B build-visionos-sim -G Xcode \
@@ -529,7 +529,7 @@ cmake -B build-visionos-sim -G Xcode \
     -DCMAKE_C_FLAGS="-D_XOPEN_SOURCE=700 ${COMMON_C_FLAGS}" \
     -DCMAKE_CXX_FLAGS="-D_XOPEN_SOURCE=700 ${COMMON_CXX_FLAGS}" \
     -S .
-cmake --build build-visionos-sim --config Release -- -quiet
+cmake --build build-visionos-sim --config Release -- -quiet || { echo "::error::xcframework slice build-visionos-sim failed to build"; exit 1; }
 
 # Add tvOS builds (might need the same u_int definitions as watchOS and visionOS)
 echo "Building for tvOS simulator..."
@@ -545,7 +545,7 @@ cmake -B build-tvos-sim -G Xcode \
     -DCMAKE_C_FLAGS="${COMMON_C_FLAGS}" \
     -DCMAKE_CXX_FLAGS="${COMMON_CXX_FLAGS}" \
     -S .
-cmake --build build-tvos-sim --config Release -- -quiet
+cmake --build build-tvos-sim --config Release -- -quiet || { echo "::error::xcframework slice build-tvos-sim failed to build"; exit 1; }
 
 echo "Building for tvOS devices..."
 cmake -B build-tvos-device -G Xcode \
@@ -560,7 +560,7 @@ cmake -B build-tvos-device -G Xcode \
     -DCMAKE_C_FLAGS="${COMMON_C_FLAGS}" \
     -DCMAKE_CXX_FLAGS="${COMMON_CXX_FLAGS}" \
     -S .
-cmake --build build-tvos-device --config Release -- -quiet
+cmake --build build-tvos-device --config Release -- -quiet || { echo "::error::xcframework slice build-tvos-device failed to build"; exit 1; }
 
 # Setup frameworks and copy binaries and headers
 echo "Setting up framework structures..."
