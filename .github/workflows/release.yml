@@ -254,13 +254,16 @@ jobs:
     container:
       image: rocm/dev-ubuntu-22.04:6.3
     steps:
+      - name: Install git
+        run: apt-get update -y && apt-get install -y git
+
       - uses: actions/checkout@v6
         with:
           submodules: recursive
           ref: ${{ inputs.tag || github.ref }}
 
       - name: Install deps
-        run: apt-get update && apt-get install -y cmake g++
+        run: apt-get install -y cmake g++
 
       - name: Build
         run: |
@@ -306,13 +309,16 @@ jobs:
     container:
       image: rocm/dev-ubuntu-22.04:6.3
     steps:
+      - name: Install git
+        run: apt-get update -y && apt-get install -y git
+
       - uses: actions/checkout@v6
         with:
           submodules: recursive
           ref: ${{ inputs.tag || github.ref }}
 
       - name: Install deps
-        run: apt-get update && apt-get install -y cmake g++ patchelf
+        run: apt-get install -y cmake g++ patchelf
 
       - name: Build (shared libs, HIP)
         run: |
@@ -1600,6 +1606,10 @@ jobs:
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -1620,6 +1630,14 @@ jobs:
             artifacts/**/*.tar.gz
             artifacts/**/*.zip
           fail_on_unmatched_files: false
-          # Preserve existing release body (manually-curated notes)
-          # rather than letting auto-generation overwrite it.
           generate_release_notes: false
+
+      - name: Set release notes body
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          NOTES="RELEASE_NOTES_${TAG}.md"
+          if [ -f "$NOTES" ]; then
+            gh release edit "$TAG" --notes-file "$NOTES"
+          fi

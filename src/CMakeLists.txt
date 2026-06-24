@@ -481,6 +481,12 @@ if (WIN32)
     target_link_libraries(crispasr-lib PUBLIC winhttp mfplat mfreadwrite mfuuid ole32)
 endif()
 
+if (ANDROID)
+    # mediandk: AMediaExtractor/AMediaCodec NDK API used by crispasr_audio.cpp
+    # for hardware-accelerated AAC/MP3 decode (API 21+).
+    target_link_libraries(crispasr-lib PUBLIC mediandk)
+endif()
+
 if (CRISPASR_COREML)
     target_link_libraries(crispasr-lib PRIVATE crispasr.coreml)
 endif()
