@@ -10827,3 +10827,28 @@ design (the code comment says "multiple worker isolates can run
 concurrently"). The init/free overhead is ~microseconds (small
 malloc). Caching them as statics would break concurrent server use
 for negligible gain.
+
+### TADA TTS: prompt-phase time embeddings must be zero (not FM-predicted)
+
+During the prompt-phase prefill loop, C++ runs the FM network at every step
+to keep the KV state moving — but the resulting `pred_t_before`/`pred_t_after`
+must NOT be fed back as the time embedding for the next step while still in the
+`in_prefix` region.  Python's batch prefill zero-initialises the time tensor
+and only overwrites positions `shift+1..shift+n_t` with the actual prompt time
+values; all prefix positions (`feat_idx 0..prefix_len-1`) get zero time
+embeddings.
+
+**Bug pattern:** `cur_t_before = pred_t_before` in the `in_prefix` branch of the
+AR loop → non-zero time embeddings corrupt the KV state → divergent duration
+predictions → wrong phonemes ("Costella" instead of "Stella").
+
+**Fix:** `cur_t_before = 0; cur_t_after = 0;` for all in_prefix steps.
+`in_prompt` steps (feat_idx ≥ prefix_len) correctly use
+`ctx->prompt_time_before[prompt_feat_idx + 1]` which is indexed from 1 to
+match Python's `time_len_before[k]` alignment.
+
+**General principle:** for any TTS model with a prompt-phase prefill, verify
+that the EXACT same inputs (token, acoustic, time) are fed step-by-step as the
+model's batch prefill would use.  Run a diff harness that compares the hidden
+state after step 0, 1, prefix_len, and prefix_len+1 before chasing output
+divergence.
