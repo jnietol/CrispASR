@@ -2329,10 +2329,16 @@ int main(int argc, char** argv) {
         if (synth_text.empty())
             synth_text = "Hello world.";
         std::string dump_path = dirname_of(ref_path) + "/.tada-diff-codec-input.bin";
+        std::string acoustic_dump_path = dirname_of(ref_path) + "/.tada-diff-acoustic-features.bin";
+        std::string time_dump_path = dirname_of(ref_path) + "/.tada-diff-time-before.bin";
 #ifdef _WIN32
         _putenv_s("TADA_DUMP_FEATURES", dump_path.c_str());
+        _putenv_s("TADA_DUMP_ACOUSTIC_FEATURES", acoustic_dump_path.c_str());
+        _putenv_s("TADA_DUMP_TIME_BEFORE", time_dump_path.c_str());
 #else
         setenv("TADA_DUMP_FEATURES", dump_path.c_str(), 1);
+        setenv("TADA_DUMP_ACOUSTIC_FEATURES", acoustic_dump_path.c_str(), 1);
+        setenv("TADA_DUMP_TIME_BEFORE", time_dump_path.c_str(), 1);
 #endif
 
         tada_context_params tp = tada_context_default_params();
@@ -2406,6 +2412,61 @@ int main(int argc, char** argv) {
             n_fail++;
         }
         tada_free(tctx);
+
+        std::vector<float> gen_acoustic_features;
+        int gen_acoustic_frames = 0, gen_acoustic_dim = 0;
+        if (FILE* f = fopen(acoustic_dump_path.c_str(), "rb")) {
+            uint32_t hdr[2] = {0, 0};
+            if (fread(hdr, sizeof(hdr), 1, f) == 1) {
+                gen_acoustic_frames = (int)hdr[0];
+                gen_acoustic_dim = (int)hdr[1];
+                if (gen_acoustic_frames > 0 && gen_acoustic_dim > 0) {
+                    gen_acoustic_features.resize((size_t)gen_acoustic_frames * gen_acoustic_dim);
+                    size_t got = fread(gen_acoustic_features.data(), sizeof(float), gen_acoustic_features.size(), f);
+                    if (got != gen_acoustic_features.size())
+                        gen_acoustic_features.clear();
+                }
+            }
+            fclose(f);
+            remove(acoustic_dump_path.c_str());
+        }
+        if (!gen_acoustic_features.empty() && ref.has("acoustic_features")) {
+            auto rep = ref.compare("acoustic_features", gen_acoustic_features.data(), gen_acoustic_features.size(),
+                                   crispasr_diff::Ref::COS_LAST_DIM);
+            print_row_exact("acoustic_features(generated)", rep, COS_THRESHOLD, 1e-3f);
+            if (!rep.found)
+                n_skip++;
+            else if (rep.n_nonfinite == 0 && rep.cos_min >= COS_THRESHOLD && rep.max_abs <= 1e-3f)
+                n_pass++;
+            else
+                n_fail++;
+            printf("tada-tts: generated acoustic_features frames=%d dim=%d\n", gen_acoustic_frames, gen_acoustic_dim);
+        }
+
+        std::vector<float> gen_time_before;
+        if (FILE* f = fopen(time_dump_path.c_str(), "rb")) {
+            uint32_t n = 0;
+            if (fread(&n, sizeof(n), 1, f) == 1 && n > 0) {
+                gen_time_before.resize(n);
+                size_t got = fread(gen_time_before.data(), sizeof(float), gen_time_before.size(), f);
+                if (got != gen_time_before.size())
+                    gen_time_before.clear();
+            }
+            fclose(f);
+            remove(time_dump_path.c_str());
+        }
+        if (!gen_time_before.empty() && ref.has("time_before")) {
+            auto rep = ref.compare("time_before", gen_time_before.data(), gen_time_before.size(),
+                                   crispasr_diff::Ref::COS_LAST_DIM);
+            print_row_exact("time_before(generated)", rep, COS_THRESHOLD, 1e-3f);
+            if (!rep.found)
+                n_skip++;
+            else if (rep.n_nonfinite == 0 && rep.cos_min >= COS_THRESHOLD && rep.max_abs <= 1e-3f)
+                n_pass++;
+            else
+                n_fail++;
+            printf("tada-tts: generated time_before values=%zu\n", gen_time_before.size());
+        }
 
         std::vector<float> gen_codec_input;
         int gen_frames = 0, gen_dim = 0;

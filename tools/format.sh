@@ -78,6 +78,26 @@ if [[ ${#files[@]} -eq 0 ]]; then
     )
 fi
 
+fmt_files=()
+skipped=()
+for f in "${files[@]}"; do
+    case "$f" in
+        *.c|*.cc|*.cpp|*.cxx|*.h|*.hh|*.hpp|*.hxx) fmt_files+=("$f") ;;
+        *) skipped+=("$f") ;;
+    esac
+done
+files=()
+if [[ ${#fmt_files[@]} -gt 0 ]]; then
+    files=("${fmt_files[@]}")
+fi
+
+if [[ ${#files[@]} -eq 0 ]]; then
+    if [[ ${#skipped[@]} -gt 0 ]]; then
+        echo "format.sh: skipped ${#skipped[@]} non-C/C++ file(s)"
+    fi
+    exit 0
+fi
+
 if [[ "$mode" == "fix" ]]; then
     "$CLANG_FMT" -i "${files[@]}"
     echo "format.sh: rewrote ${#files[@]} file(s) with $("$CLANG_FMT" --version | head -1)"

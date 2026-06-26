@@ -134,7 +134,7 @@ def main():
     ap.add_argument("--input", required=True,
                     help="HF model ID (e.g. HumeAI/tada-3b-ml or HumeAI/tada-1b) or local dir")
     ap.add_argument("--output", required=True, help="Output GGUF path")
-    ap.add_argument("--outtype", default="f16", choices=["f32", "f16"])
+    ap.add_argument("--outtype", default="f16", choices=["f32", "f16", "bf16"])
     args = ap.parse_args()
 
     model_dir = load_model_dir(args.input)
@@ -194,8 +194,15 @@ def main():
     print(f"  Bottleneck:    {bottleneck_dim}")
     print(f"  Tied embeds:   {tie_word_embeddings}")
 
-    out_dtype = np.float16 if args.outtype == "f16" else np.float32
-    out_qt = GGMLQuantizationType.F16 if args.outtype == "f16" else GGMLQuantizationType.F32
+    if args.outtype == "f16":
+        out_dtype = np.float16
+        out_qt = GGMLQuantizationType.F16
+    elif args.outtype == "bf16":
+        out_dtype = None
+        out_qt = GGMLQuantizationType.BF16
+    else:
+        out_dtype = np.float32
+        out_qt = GGMLQuantizationType.F32
 
     st_files = sorted(model_dir.glob("*.safetensors"))
     if not st_files:
@@ -311,11 +318,19 @@ def main():
             n_skipped += 1
             continue
 
-        t = handles[name_to_idx[hf_name]].get_tensor(hf_name).to(torch.float32).numpy()
-        if t.ndim <= 1:
+        t_pt = handles[name_to_idx[hf_name]].get_tensor(hf_name)
+        if t_pt.ndim <= 1:
+            t = t_pt.to(torch.float32).numpy()
             t = np.ascontiguousarray(t.astype(np.float32))
             w.add_tensor(gn, t, raw_dtype=GGMLQuantizationType.F32)
+        elif args.outtype == "bf16":
+            if t_pt.dtype == torch.bfloat16:
+                t = np.ascontiguousarray(t_pt.view(torch.uint16).numpy())
+            else:
+                t = np.ascontiguousarray(t_pt.to(torch.bfloat16).view(torch.uint16).numpy())
+            w.add_tensor(gn, t, raw_dtype=out_qt)
         else:
+            t = t_pt.to(torch.float32).numpy()
             t = np.ascontiguousarray(t.astype(out_dtype))
             w.add_tensor(gn, t, raw_dtype=out_qt)
         n_mapped += 1

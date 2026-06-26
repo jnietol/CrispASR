@@ -2366,6 +2366,39 @@ float* tada_synthesize(struct tada_context* ctx, const char* text, int* out_n_sa
     // Use only features from skip_frames onwards
     std::vector<std::vector<float>> decode_feats(acoustic_features.begin() + skip_frames, acoustic_features.end());
 
+    if (const char* dump_acoustic_path = getenv("TADA_DUMP_ACOUSTIC_FEATURES");
+        dump_acoustic_path && dump_acoustic_path[0]) {
+        if (FILE* f = fopen(dump_acoustic_path, "wb")) {
+            uint32_t hdr[2] = {(uint32_t)acoustic_features.size(), (uint32_t)ad};
+            fwrite(hdr, sizeof(hdr), 1, f);
+            for (const auto& feat : acoustic_features) {
+                for (int d = 0; d < ad; d++) {
+                    float v = feat[d] * ac_std + ac_mean;
+                    fwrite(&v, sizeof(float), 1, f);
+                }
+            }
+            fclose(f);
+            if (ctx->params.verbosity >= 1)
+                fprintf(stderr, "tada: dumped %zu acoustic features to %s\n", acoustic_features.size(),
+                        dump_acoustic_path);
+        }
+    }
+
+    if (const char* dump_time_path = getenv("TADA_DUMP_TIME_BEFORE"); dump_time_path && dump_time_path[0]) {
+        if (FILE* f = fopen(dump_time_path, "wb")) {
+            std::vector<float> dump_times;
+            dump_times.reserve(all_times.size() + (all_times.empty() ? 0 : 1));
+            for (int t : all_times)
+                dump_times.push_back((float)t);
+            if (!all_times.empty())
+                dump_times.push_back((float)all_times.back());
+            uint32_t n = (uint32_t)dump_times.size();
+            fwrite(&n, sizeof(n), 1, f);
+            fwrite(dump_times.data(), sizeof(float), dump_times.size(), f);
+            fclose(f);
+        }
+    }
+
     for (size_t i = 0; i < decode_feats.size(); i++) {
         // Insert (time - 1) zero frames before this feature
         int n_zeros = std::max(0, all_times[i] - 1);
