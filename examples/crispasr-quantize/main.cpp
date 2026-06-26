@@ -16,6 +16,8 @@
 #include "common.h"
 #include "common-ggml.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -298,6 +300,38 @@ static bool crispasr_model_quantize(const std::string& fname_inp, const std::str
     if (is_tada && tada_quant_all) {
         printf("%s: tada-tts - quantizing precision-sensitive tada.* tensors (experimental override)\n", __func__);
     }
+    int tada_n_layers = 0;
+    int tada_keep_head = 0;
+    int tada_keep_tail = 0;
+    if (is_tada) {
+        int key = gguf_find_key(ctx_in, "tada.talker.n_layers");
+        if (key >= 0)
+            tada_n_layers = (int)gguf_get_val_u32(ctx_in, key);
+        if (const char* env_h = std::getenv("CRISPASR_TADA_KEEP_F16_HEAD"))
+            tada_keep_head = std::max(0, atoi(env_h));
+        if (const char* env_t = std::getenv("CRISPASR_TADA_KEEP_F16_TAIL"))
+            tada_keep_tail = std::max(0, atoi(env_t));
+        if (tada_quant_all) {
+            tada_keep_head = 0;
+            tada_keep_tail = 0;
+        }
+        if (!tada_quant_all && (tada_keep_head > 0 || tada_keep_tail > 0)) {
+            const int tail_start = std::max(0, tada_n_layers - tada_keep_tail);
+            if (tada_keep_head > 0 && tada_keep_tail > 0) {
+                printf("%s: tada-tts - keeping talker.blk.0-%d (head) + talker.blk.%d-%d (tail) at source precision "
+                       "(override with CRISPASR_TADA_KEEP_F16_HEAD/TAIL, full quant with CRISPASR_TADA_QUANT_ALL=1)\n",
+                       __func__, tada_keep_head - 1, tail_start, tada_n_layers - 1);
+            } else if (tada_keep_head > 0) {
+                printf("%s: tada-tts - keeping talker.blk.0-%d (head) at source precision "
+                       "(override with CRISPASR_TADA_KEEP_F16_HEAD/TAIL, full quant with CRISPASR_TADA_QUANT_ALL=1)\n",
+                       __func__, tada_keep_head - 1);
+            } else {
+                printf("%s: tada-tts - keeping talker.blk.%d-%d (tail) at source precision "
+                       "(override with CRISPASR_TADA_KEEP_F16_HEAD/TAIL, full quant with CRISPASR_TADA_QUANT_ALL=1)\n",
+                       __func__, tail_start, tada_n_layers - 1);
+            }
+        }
+    }
 
     // First pass: determine which tensors will be quantized and compute
     // their target types. We need this BEFORE adding tensors to ctx_out
@@ -362,6 +396,23 @@ static bool crispasr_model_quantize(const std::string& fname_inp, const std::str
               (sname.find("audio.") == 0 || sname.find("adapter.") == 0 || sname.find("llm.token_embd") == 0)) &&
             !(is_orpheus && sname.find("talker.token_embd") == 0) &&
             !(is_tada && !tada_quant_all && (sname.find("talker.token_embd") == 0 || sname.find("tada.") == 0)) &&
+            ([&]() {
+                if (!is_tada || tada_quant_all || (tada_keep_head == 0 && tada_keep_tail == 0))
+                    return true;
+                if (sname.rfind("talker.blk.", 0) != 0)
+                    return true;
+                int idx = 0;
+                size_t p = strlen("talker.blk.");
+                while (p < sname.size() && sname[p] >= '0' && sname[p] <= '9') {
+                    idx = idx * 10 + (sname[p] - '0');
+                    p++;
+                }
+                if (p == strlen("talker.blk."))
+                    return true;
+                const bool in_head = idx < tada_keep_head;
+                const bool in_tail = tada_keep_tail > 0 && idx >= std::max(0, tada_n_layers - tada_keep_tail);
+                return !(in_head || in_tail);
+            }()) &&
             ([&]() {
                 if (!is_omniasr_ctc || omniasr_quant_all ||
                     (omniasr_head_cutoff == 0 && omniasr_tail_cutoff >= omniasr_n_enc))

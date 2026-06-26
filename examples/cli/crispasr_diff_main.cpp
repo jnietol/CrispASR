@@ -2674,7 +2674,26 @@ int main(int argc, char** argv) {
                 n_fail++;
                 continue;
             }
-            auto rep = ref.compare(s.ref_name, our_data, (size_t)n_stage, s.mode);
+            // Python trims int(24000*time_before[0]/50) leading samples to remove the
+            // initial silence block before returning audio. Apply the same trim so we
+            // compare speech-vs-speech rather than silence-vs-speech.
+            float* cmp_data = our_data;
+            size_t cmp_n = (size_t)n_stage;
+            if (strcmp(s.graph_name, "pcm") == 0 && !token_masks.empty()) {
+                int first_voiced = 0;
+                for (int j = 0; j < (int)token_masks.size(); j++) {
+                    if (token_masks[j] != 0) {
+                        first_voiced = j;
+                        break;
+                    }
+                }
+                int trim = (first_voiced + 1) * (24000 / 50); // 24000/50=480
+                if (trim > 0 && trim < (int)cmp_n) {
+                    cmp_data += trim;
+                    cmp_n -= trim;
+                }
+            }
+            auto rep = ref.compare(s.ref_name, cmp_data, cmp_n, s.mode);
             print_row(s.ref_name, rep, COS_THRESHOLD);
             record(rep);
             free(our_data);

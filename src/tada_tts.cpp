@@ -894,6 +894,28 @@ static void mt19937_randn(mt19937_state_t* s, float* data, int N) {
     }
 }
 
+// Round-to-nearest-even F32 value to BF16 precision (matches Python bf16 cast).
+// Python's torch.bfloat16 truncates the FM noise before scaling:
+//   noise = torch.randn(lat).to(bfloat16) * noise_temperature
+// Both the initial draw and the scaled result are in BF16, so we must apply the
+// same rounding to match the Python reference bit-for-bit.
+static float tada_round_bf16(float x) {
+    uint32_t u;
+    memcpy(&u, &x, sizeof(u));
+    const uint32_t lsb = (u >> 16) & 1u;
+    const uint32_t rounding_bias = 0x7fffu + lsb;
+    u += rounding_bias;
+    u &= 0xffff0000u;
+    memcpy(&x, &u, sizeof(x));
+    return x;
+}
+
+static void tada_scale_noise_like_python(float* data, int n, float noise_temp) {
+    for (int i = 0; i < n; i++) {
+        data[i] = tada_round_bf16(tada_round_bf16(data[i]) * noise_temp);
+    }
+}
+
 // Embed tokens → float array (d_model * n_tokens)
 static float* embed_tokens(tada_context* c, const int32_t* ids, int n) {
     const int d = (int)c->hp.d_model;
@@ -1796,8 +1818,7 @@ float* tada_extract_stage(struct tada_context* ctx, const char* text, const char
 
     std::vector<float> speech(lat);
     mt19937_randn(&ctx->mt_rng, speech.data(), lat);
-    for (int j = 0; j < lat; j++)
-        speech[j] *= ctx->params.noise_temp;
+    tada_scale_noise_like_python(speech.data(), lat, ctx->params.noise_temp);
     if (strcmp(stage, "fm_noise_0") == 0) {
         float* out = (float*)malloc((size_t)lat * sizeof(float));
         if (!out) {
@@ -2197,10 +2218,9 @@ float* tada_synthesize(struct tada_context* ctx, const char* text, int* out_n_sa
         std::vector<float> speech(lat, 0.0f);
         if (need_fm) {
             // Draw noise using PyTorch-compatible MT19937 + normal_fill algorithm
-            // so that noise vectors match torch.randn(lat) when seeded identically.
+            // so that noise vectors match torch.randn(lat).to(bfloat16) * temp.
             mt19937_randn(&ctx->mt_rng, speech.data(), lat);
-            for (int j = 0; j < lat; j++)
-                speech[j] *= noise_temp;
+            tada_scale_noise_like_python(speech.data(), lat, noise_temp);
         }
 
         tada_fm_dump_record fm_rec;
