@@ -49,6 +49,36 @@ dynamic fallback for formats no permissive native decoder covers (e.g. AAC).
 
 ---
 
+## 2026-06-27 §220 TADA — multilingual voice-reference GGUFs shipped
+
+Generated `tada-ref-{ar,ch,de,es,fr,it,ja,pl,pt}.gguf` from FLEURS CC-BY-4.0
+clips using `HumeAI/tada-codec` language-specific aligners on Kaggle
+(`chr1str/tada-language-voice-reference-ggufs`, kernel v11).  Uploaded to
+`cstr/tada-tts-1b-GGUF` and `cstr/tada-tts-3b-ml-GGUF`.
+
+**How it works at runtime:** `-l fr` causes CrispASR to auto-download
+`tada-ref-fr.gguf` (132 KB), which stores the `prompt_token_values` (N×512)
+and `prompt_token_positions` (N,) acoustic fingerprint extracted offline by the
+TADA aligner from a 10 s FLEURS clip.  The decoder conditions on these tokens
+to synthesise in that language's "default" voice — no aligner needed at
+runtime.  Voice cloning (`-r ref.wav`) stays a separate path (Encoder runs
+live).
+
+**Key Kaggle gotcha fixed:** `unsloth/Llama-3.2-1B`'s `tokenizer_config.json`
+serialises `additional_special_tokens` as dicts (serialised `AddedToken`
+objects); Kaggle's `transformers` asserts `isinstance(t, (str, AddedToken))` at
+`tokenization_utils_base.py:902`.  Fixed by downloading the tokenizer to a
+local dir, converting dict entries to plain `.content` strings, and patching
+`Aligner.__init__` to use the local fixed path before import.
+
+File sizes: ar 81 KB, ch 95 KB, de 115 KB, es 37 KB, fr 133 KB, it 71 KB,
+ja 71 KB, pl 137 KB, pt 133 KB.
+
+Tooling: `tools/gen_tada_lang_refs.py`, `tools/upload_tada_lang_refs.py`,
+`tools/kaggle/tada-lang-refs/kernel.py` (all committed at `36bfe9e9`).
+
+---
+
 ## 2026-06-22 §218 Chatterbox CLI long-form — sentence-chunk `--tts` (+ KV-realloc UAF fix)
 
 Follow-up to the #182 cap: instead of truncating long input, chunk it. The CLI
