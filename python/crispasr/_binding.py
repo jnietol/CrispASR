@@ -1674,6 +1674,21 @@ class Session:
         if rc != 0 and rc != -2:
             raise RuntimeError(f"set_tts_steps failed (rc={rc})")
 
+    def set_tts_num_candidates(self, n: int) -> None:
+        """Set the number of flow-matching timing candidates ranked per token.
+
+        Honoured by TADA, where more candidates give more reliable
+        multilingual timing at higher cost. Soft no-op (rc=-2) on backends
+        that don't rank timing candidates.
+        """
+        if not hasattr(self._lib, "crispasr_session_set_tts_num_candidates"):
+            return
+        self._lib.crispasr_session_set_tts_num_candidates.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        self._lib.crispasr_session_set_tts_num_candidates.restype = ctypes.c_int
+        rc = self._lib.crispasr_session_set_tts_num_candidates(self._handle, int(n))
+        if rc != 0 and rc != -2:
+            raise RuntimeError(f"set_tts_num_candidates failed (rc={rc})")
+
     def set_top_p(self, top_p: float) -> None:
         """Set the top-p nucleus-sampling threshold. Honoured by chatterbox."""
         if not hasattr(self._lib, "crispasr_session_set_top_p"):

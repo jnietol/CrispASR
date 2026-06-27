@@ -2250,6 +2250,16 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
         p.n_threads = s->n_threads;
         p.verbosity = g_open_verbosity_tls > 0 ? g_open_verbosity_tls : 1;
         p.use_gpu = g_open_use_gpu_tls;
+        // Mirror the CLI default: rank several flow-matching timing
+        // candidates per token so multilingual output is reliable (the
+        // lib default of 1 reproduces a single noise draw, which can
+        // collapse durations). Override with TADA_NUM_CANDIDATES.
+        p.num_acoustic_candidates = 4;
+        if (const char* env = std::getenv("TADA_NUM_CANDIDATES"); env && *env) {
+            int n = atoi(env);
+            if (n >= 1)
+                p.num_acoustic_candidates = n;
+        }
         s->tada_ctx = tada_init_from_file(model_path, p);
         if (!s->tada_ctx) {
             fprintf(stderr, "crispasr: failed to init tada from '%s'\n", model_path);
@@ -7253,6 +7263,22 @@ CA_EXPORT int crispasr_session_set_tts_steps(crispasr_session* s, int steps) {
 #ifdef CA_HAVE_KUGELAUDIO
     if (s->kugelaudio_ctx) {
         kugelaudio_set_tts_steps(s->kugelaudio_ctx, steps);
+        touched++;
+    }
+#endif
+    return touched > 0 ? 0 : -2;
+}
+
+// Number of flow-matching timing candidates ranked per token (TADA). Higher
+// = more reliable multilingual timing, higher cost. Returns 0 on success,
+// -1 if session is null, -2 if no backend supports it.
+CA_EXPORT int crispasr_session_set_tts_num_candidates(crispasr_session* s, int n) {
+    if (!s)
+        return -1;
+    int touched = 0;
+#ifdef CA_HAVE_TADA
+    if (s->tada_ctx) {
+        tada_set_num_candidates(s->tada_ctx, n);
         touched++;
     }
 #endif

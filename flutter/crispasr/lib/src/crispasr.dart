@@ -2800,6 +2800,24 @@ class CrispasrSession {
     }
   }
 
+  /// Number of flow-matching timing candidates ranked per token (TADA).
+  /// Higher = more reliable multilingual timing, slower. Returns silently
+  /// on backends that don't rank timing candidates (rc=-2 soft no-op).
+  void setTtsNumCandidates(int n) {
+    if (_closed) throw StateError('CrispasrSession is closed');
+    if (!_lib.providesSymbol('crispasr_session_set_tts_num_candidates')) {
+      // Older libcrispasr without the symbol — silent no-op.
+      return;
+    }
+    final fn = _lib.lookupFunction<Int32 Function(Pointer<Void>, Int32),
+        int Function(Pointer<Void>, int)>(
+        'crispasr_session_set_tts_num_candidates');
+    final rc = fn(_handle, n);
+    if (rc != 0 && rc != -2) {
+      throw Exception('setTtsNumCandidates failed (rc=$rc)');
+    }
+  }
+
   /// Top-p nucleus sampling threshold (0.0..1.0). Honoured by
   /// chatterbox; other backends no-op.
   void setTopP(double topP) {

@@ -1956,6 +1956,10 @@ void tada_set_temperature(struct tada_context* ctx, float temp) {
     if (ctx)
         ctx->params.temperature = temp;
 }
+void tada_set_num_candidates(struct tada_context* ctx, int n) {
+    if (ctx)
+        ctx->params.num_acoustic_candidates = n > 0 ? n : 1;
+}
 
 static std::string tada_normalize_text(std::string text) {
     auto replace_all = [](std::string& s, const std::string& from, const std::string& to) {

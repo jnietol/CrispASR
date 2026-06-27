@@ -159,6 +159,12 @@ All candidates for a step are solved in a single batched flow-matching forward,
 so raising the count adds little wall-clock on top of the (model-load-dominated)
 baseline. `1` reproduces a single draw and is the fastest.
 
+The same **default of 4** applies through the session C ABI, so the bindings
+and HTTP server get robust timing out of the box. Bindings can override it at
+runtime with `set_tts_num_candidates(n)` (Python/Go/Rust/Ruby),
+`SetTtsNumCandidates` (C#/Java), or `setTtsNumCandidates` (Dart/JS) — and the
+`TADA_NUM_CANDIDATES` env var is honoured by every consumer, not just the CLI.
+
 ### Reproducible / diverse generation (`--seed`)
 
 Pass `--seed N` (any non-zero integer) for **reproducible** output —

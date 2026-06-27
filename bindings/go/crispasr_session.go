@@ -36,6 +36,7 @@ int              crispasr_session_set_tts_seed(CrispasrSession* s, unsigned long
 int              crispasr_session_set_max_new_tokens(CrispasrSession* s, int max_new_tokens);
 int              crispasr_session_set_frequency_penalty(CrispasrSession* s, float penalty);
 int              crispasr_session_set_tts_steps(CrispasrSession* s, int steps);
+int              crispasr_session_set_tts_num_candidates(CrispasrSession* s, int n);
 int              crispasr_session_set_top_p(CrispasrSession* s, float top_p);
 int              crispasr_session_set_min_p(CrispasrSession* s, float min_p);
 int              crispasr_session_set_repetition_penalty(CrispasrSession* s, float r);
@@ -480,6 +481,17 @@ func (s *CrispasrSession) SetTTSSteps(steps int) error {
 	rc := C.crispasr_session_set_tts_steps(s.handle, C.int(steps))
 	if rc != 0 && rc != -2 {
 		return errors.New("crispasr_session_set_tts_steps failed")
+	}
+	return nil
+}
+
+// SetTTSNumCandidates sets the number of flow-matching timing candidates
+// ranked per token (TADA). Higher = more reliable multilingual timing at
+// higher cost. Other backends silently no-op.
+func (s *CrispasrSession) SetTTSNumCandidates(n int) error {
+	rc := C.crispasr_session_set_tts_num_candidates(s.handle, C.int(n))
+	if rc != 0 && rc != -2 {
+		return errors.New("crispasr_session_set_tts_num_candidates failed")
 	}
 	return nil
 }

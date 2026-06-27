@@ -148,6 +148,7 @@ namespace CrispASR.Tests
         [InlineData("crispasr_session_set_max_new_tokens")]
         [InlineData("crispasr_session_set_frequency_penalty")]
         [InlineData("crispasr_session_set_tts_steps")]
+        [InlineData("crispasr_session_set_tts_num_candidates")]
         [InlineData("crispasr_session_set_top_p")]
         [InlineData("crispasr_session_set_min_p")]
         [InlineData("crispasr_session_set_repetition_penalty")]

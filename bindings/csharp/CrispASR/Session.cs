@@ -181,6 +181,10 @@ namespace CrispASR
         public void SetTtsSteps(int steps)
             => Check(NativeMethods.crispasr_session_set_tts_steps(Handle, steps), "set_tts_steps");
 
+        /// <summary>Flow-matching timing candidates ranked per token (TADA).</summary>
+        public void SetTtsNumCandidates(int n)
+            => Check(NativeMethods.crispasr_session_set_tts_num_candidates(Handle, n), "set_tts_num_candidates");
+
         /// <summary>Top-p nucleus-sampling threshold.</summary>
         public void SetTopP(float topP)
             => Check(NativeMethods.crispasr_session_set_top_p(Handle, topP), "set_top_p");

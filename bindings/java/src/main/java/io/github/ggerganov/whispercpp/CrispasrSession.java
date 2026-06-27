@@ -56,6 +56,7 @@ public final class CrispasrSession implements AutoCloseable {
         int     crispasr_session_set_max_new_tokens(Pointer session, int maxNewTokens);
         int     crispasr_session_set_frequency_penalty(Pointer session, float penalty);
         int     crispasr_session_set_tts_steps(Pointer session, int steps);
+        int     crispasr_session_set_tts_num_candidates(Pointer session, int n);
         int     crispasr_session_set_top_p(Pointer session, float topP);
         int     crispasr_session_set_min_p(Pointer session, float minP);
         int     crispasr_session_set_repetition_penalty(Pointer session, float r);
@@ -389,6 +390,12 @@ public final class CrispasrSession implements AutoCloseable {
     public void setTtsSteps(int steps) {
         int rc = Lib.INSTANCE.crispasr_session_set_tts_steps(handle, steps);
         if (rc != 0 && rc != -2) throw new IllegalStateException("set_tts_steps failed (rc=" + rc + ")");
+    }
+
+    /** Flow-matching timing candidates ranked per token (TADA). Soft no-op on other backends. */
+    public void setTtsNumCandidates(int n) {
+        int rc = Lib.INSTANCE.crispasr_session_set_tts_num_candidates(handle, n);
+        if (rc != 0 && rc != -2) throw new IllegalStateException("set_tts_num_candidates failed (rc=" + rc + ")");
     }
 
     /** Top-p nucleus-sampling threshold. Honoured by chatterbox; other backends no-op. */

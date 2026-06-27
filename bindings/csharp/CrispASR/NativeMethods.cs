@@ -107,6 +107,9 @@ namespace CrispASR
         internal static extern int crispasr_session_set_tts_steps(IntPtr s, int steps);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int crispasr_session_set_tts_num_candidates(IntPtr s, int n);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         internal static extern int crispasr_session_set_top_p(IntPtr s, float topP);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]

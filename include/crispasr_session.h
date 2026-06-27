@@ -280,6 +280,7 @@ CRISPASR_SESSION_API int crispasr_session_set_ask(crispasr_session* s, const cha
 CRISPASR_SESSION_API int crispasr_session_set_temperature(crispasr_session* s, float temperature, uint64_t seed);
 CRISPASR_SESSION_API int crispasr_session_set_tts_seed(crispasr_session* s, uint64_t seed);
 CRISPASR_SESSION_API int crispasr_session_set_tts_steps(crispasr_session* s, int steps);
+CRISPASR_SESSION_API int crispasr_session_set_tts_num_candidates(crispasr_session* s, int n);
 CRISPASR_SESSION_API int crispasr_session_set_g2p_dict(crispasr_session* s, const char* source);
 CRISPASR_SESSION_API int crispasr_session_set_top_p(crispasr_session* s, float top_p);
 CRISPASR_SESSION_API int crispasr_session_set_min_p(crispasr_session* s, float min_p);

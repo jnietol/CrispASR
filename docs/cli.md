@@ -1139,6 +1139,8 @@ reuse, etc.) see [`tts.md`](tts.md):
   noise-sensitive, so a single draw (`N=1`, fastest) can occasionally collapse
   timing into rushed/garbled speech; `4`–`8` make it robust. All candidates
   for a step solve in one batched forward, so higher `N` adds little wall-clock.
+  Default `4` also applies through the C ABI / bindings / server; override there
+  at runtime with `set_tts_num_candidates(n)`.
   See [`tts.md`](tts.md#timing-quality-tada_num_candidates).
 - `VIBEVOICE_VAE_BACKEND={auto,cpu,gpu}` — VAE decoder placement
 - `VIBEVOICE_TTS_FLASH_ATTN={1,0}` — TTS LM attention: `1` (default)

@@ -887,6 +887,17 @@ impl Session {
         Ok(())
     }
 
+    /// Set the number of flow-matching timing candidates ranked per token
+    /// (TADA). Higher = more reliable multilingual timing at higher cost.
+    /// Other backends silently no-op.
+    pub fn set_tts_num_candidates(&self, n: i32) -> Result<(), String> {
+        let rc = unsafe { crispasr_sys::crispasr_session_set_tts_num_candidates(self.handle, n) };
+        if rc != 0 && rc != -2 {
+            return Err(format!("set_tts_num_candidates failed (rc={})", rc));
+        }
+        Ok(())
+    }
+
     /// Set the top-p nucleus-sampling threshold. Honoured by chatterbox.
     pub fn set_top_p(&self, top_p: f32) -> Result<(), String> {
         let rc = unsafe { crispasr_sys::crispasr_session_set_top_p(self.handle, top_p) };

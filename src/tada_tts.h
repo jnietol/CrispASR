@@ -58,6 +58,11 @@ void tada_set_seed(struct tada_context* ctx, uint64_t seed);
 // Set text sampling temperature.
 void tada_set_temperature(struct tada_context* ctx, float temp);
 
+// Set the number of flow-matching timing candidates ranked per token by
+// reconstruction likelihood (0/1 = single noise draw; higher = more
+// reliable multilingual timing at higher cost). See TADA_NUM_CANDIDATES.
+void tada_set_num_candidates(struct tada_context* ctx, int n);
+
 // Synthesize text to 24 kHz mono PCM. Returns heap-allocated float array;
 // caller must free with tada_pcm_free(). *out_n_samples is set to the
 // number of float samples. Returns NULL on failure.
