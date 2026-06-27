@@ -31,7 +31,7 @@ REPO = WORK / "CrispASR"
 OUT  = WORK / "lang-refs"
 OUT.mkdir(exist_ok=True)
 
-# %% [code]  clone CrispASR + import harness (bundled copy as fallback)
+# -- Phase 0: Clone CrispASR + import harness (bundled copy as fallback) --
 CRISPASR_URL = "https://github.com/CrispStrobe/CrispASR.git"
 if not REPO.exists():
     try:
@@ -50,22 +50,27 @@ if str(REPO / "tools" / "kaggle") not in sys.path:
 import kaggle_harness as kh
 kh.init_progress()
 
-# ── HF auth — first thing after harness init ────────────────────────
-token = kh.resolve_hf_token()   # env → Secret (retry) → dataset file
+# -- Phase 1: Install deps --
+# hf_transfer MUST be installed before resolve_hf_token() sets
+# HF_HUB_ENABLE_HF_TRANSFER=1, or every HF download in the gen script fails.
+# Do NOT reinstall torch/torchaudio — Kaggle pre-installs them (gotcha #11).
+kh.step("install deps")
+kh.sh("pip uninstall -y tensorflow tf-keras", check=False)   # avoid protobuf clash
+kh.sh_with_progress(
+    "pip install -q "
+    "gguf datasets soundfile scipy hf_transfer huggingface_hub hume-tada"
+)
 
-# %% [code]  remove tensorflow to prevent protobuf clash
-kh.step("pip-remove-tf")
-kh.sh(f"{sys.executable} -m pip uninstall -y tensorflow tf-keras",
-      check=False)
+# -- Phase 2: Resolve HF token --
+kh.step("resolve HF token")
+hf_token = kh.resolve_hf_token()   # env → Secret(retry) → dataset file
+if hf_token:
+    print("  HF_TOKEN resolved OK", flush=True)
+else:
+    print("  WARNING: no HF_TOKEN — HumeAI/tada-codec downloads may fail", flush=True)
 
-# %% [code]  install deps
-# NOTE: do NOT reinstall torch/torchaudio — Kaggle pre-installs them
-kh.step("pip-install")
-kh.sh(f"{sys.executable} -m pip install --quiet "
-      "gguf datasets soundfile scipy hume-tada hf_transfer")
-
-# %% [code]  generate
-# subprocess env already has HF_TOKEN from kh.resolve_hf_token()
+# -- Phase 3: Generate lang refs --
+# subprocess inherits HF_TOKEN + HF_HUB_ENABLE_HF_TRANSFER from env
 kh.step("gen.begin")
 rc = kh.sh(
     f"{sys.executable} {REPO}/tools/gen_tada_lang_refs.py "
@@ -74,7 +79,7 @@ rc = kh.sh(
 )
 kh.step("gen.done", returncode=rc)
 
-# %% [code]  report
+# -- Report --
 files = sorted(OUT.glob("*.gguf"))
 print(f"\n=== generated {len(files)} lang ref(s) ===")
 for p in files:
