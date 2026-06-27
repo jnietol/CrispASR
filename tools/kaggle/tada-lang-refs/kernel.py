@@ -4,8 +4,7 @@
 # Generates tada-ref-{ar,ch,de,es,fr,it,ja,pl,pt}.gguf from FLEURS CC-BY-4.0
 # clips using the HumeAI/tada-codec language-specific aligners.
 #
-# NO HF upload from here — Kaggle Secrets flake (HTTPError 400).
-# Output lands in /kaggle/working/lang-refs/; fetch locally then upload:
+# NO HF upload from here — use kaggle_harness token path + local upload:
 #
 #   kaggle kernels output chr1str/tada-language-voice-reference-ggufs \
 #       -p /Volumes/backups/code/tada-lang-refs-stash/kaggle-out/
@@ -20,72 +19,62 @@ from pathlib import Path
 os.environ["PYTHONUNBUFFERED"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
+# Prevent transformers from importing tensorflow (protobuf clash on Kaggle)
+os.environ["TRANSFORMERS_NO_TF"] = "1"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 try:
     sys.stdout.reconfigure(line_buffering=True)
     sys.stderr.reconfigure(line_buffering=True)
 except (AttributeError, ValueError):
     pass
 
-_PROGRESS = Path("/kaggle/working/progress.jsonl")
-_T0 = time.time()
-
-def _step(name, **kw):
-    rec = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-           "elapsed_s": round(time.time() - _T0, 2), "step": name, **kw}
-    _PROGRESS.parent.mkdir(parents=True, exist_ok=True)
-    with _PROGRESS.open("a") as f:
-        f.write(json.dumps(rec) + "\n")
-    print(f"[boot {rec['elapsed_s']:>6.1f}s] {name}", flush=True)
-
-_step("bootstrap.start")
-
 WORK = Path("/kaggle/working")
 REPO = WORK / "CrispASR"
 OUT  = WORK / "lang-refs"
 OUT.mkdir(exist_ok=True)
 
-# %% [code]  clone
+# %% [code]  clone CrispASR + import harness
+CRISPASR_URL = "https://github.com/CrispStrobe/CrispASR.git"
 if not REPO.exists():
-    _step("git-clone.begin")
-    subprocess.check_call([
-        "git", "clone", "--depth", "1",
-        "https://github.com/CrispStrobe/CrispASR.git", str(REPO),
-    ])
-    _step("git-clone.done")
+    subprocess.check_call(["git", "clone", "--depth", "1",
+                           CRISPASR_URL, str(REPO)])
+    sys.path.insert(0, str(REPO / "tools" / "kaggle"))
 else:
-    _step("git-pull.begin")
     subprocess.check_call(["git", "-C", str(REPO), "pull", "--ff-only"])
-    _step("git-pull.done")
+    sys.path.insert(0, str(REPO / "tools" / "kaggle"))
+
+# Fall back to bundled copy if clone/import fails
+if str(REPO / "tools" / "kaggle") not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import kaggle_harness as kh
+kh.init_progress()
+
+# %% [code]  remove tensorflow to prevent protobuf clash
+kh.step("pip-remove-tf")
+subprocess.check_call(
+    [sys.executable, "-m", "pip", "uninstall", "-y", "tensorflow", "tf-keras"],
+    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+)
 
 # %% [code]  install deps
-_step("pip-install.begin")
-# Install base deps first so we can read the torch version before
-# installing torchaudio (must match torch exactly to avoid ABI errors).
+# NOTE: do NOT install torch/torchaudio — Kaggle pre-installs them (gotcha #11)
+kh.step("pip-install")
 subprocess.check_call([
-    sys.executable, "-m", "pip", "install", "-q",
+    sys.executable, "-m", "pip", "install", "--quiet",
     "gguf", "datasets", "soundfile", "scipy",
+    "hume-tada",   # PyPI package (not git URL); pulls dac + any torchaudio upgrade
 ])
-import importlib.util as _ilu
-_torch_ver = None
-if _ilu.find_spec("torch"):
-    import torch as _t; _torch_ver = _t.__version__.split("+")[0]
-_torchaudio_pin = f"torchaudio=={_torch_ver}" if _torch_ver else "torchaudio"
-subprocess.check_call([
-    sys.executable, "-m", "pip", "install", "-q",
-    _torchaudio_pin,
-    "git+https://github.com/HumeAI/tada.git",
-])
-_step("pip-install.done")
 
 # %% [code]  generate
-_step("gen.begin")
+kh.step("gen.begin")
 result = subprocess.run(
     [sys.executable, str(REPO / "tools" / "gen_tada_lang_refs.py"),
      "--output-dir", str(OUT),
      "--skip-existing"],
     check=False,
 )
-_step("gen.done", returncode=result.returncode)
+kh.step("gen.done", returncode=result.returncode)
 
 # %% [code]  report
 files = sorted(OUT.glob("*.gguf"))
