@@ -6,6 +6,46 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## §221 2026-06-27 tada-encoder — voice reference creation ported to C++/ggml
+
+Ported the TADA encoder pipeline (Aligner + WavEncoder + LocalAttentionEncoder
++ hidden_linear + DP alignment) from Python/PyTorch to C++/ggml, enabling
+native `--make-ref` voice reference creation.
+
+**New files:**
+- `src/tada_encoder.{h,cpp}` — C++ encoder runtime (~980 lines): DAC-style
+  strided conv encoder (Snake1d, weight-norm, strides [6,5,4,4] = 480×
+  downsample), 6-layer local attention with RoPE + v2 segment mask, DP
+  text-audio alignment algorithm, post-processing (noise, gather, normalize)
+- `models/convert-tada-aligner-to-gguf.py` — converts wav2vec2-large aligner
+  (24 layers, 128K-class Llama CTC head) to GGUF; reuses `wav2vec2_load()`
+- `models/convert-tada-encoder-to-gguf.py` — converts shared WavEncoder +
+  LocalAttentionEncoder + hidden_linear to GGUF; weight-norm materialized
+- `tools/reference_backends/tada_encoder.py` — diff harness reference dump
+  with staged model loading (aligner→free→encoder) for 8 GB RAM
+
+**GGUFs** published at [cstr/tada-encoder-GGUF](https://huggingface.co/cstr/tada-encoder-GGUF):
+`tada-encoder-f16.gguf` (178 MB), `tada-aligner-en.gguf` (1.1 GB).
+
+**Diff harness** wired: `crispasr-diff tada-encoder` compares `encoder_wav_out`,
+`encoder_attn_out`, `encoder_hidden`, `encoder_token_values`. Current parity:
+cos_mean=0.94 on wav_encoder (structural correctness confirmed, F16 precision
+debugging WIP).
+
+**CLI** `--make-ref` flag added (placeholder → points to Python converter until
+C++ BPE tokenizer for Llama-3.2 is ported).
+
+**ASR roundtrip verified**: JFK 11s → `convert-tada-ref-to-gguf.py` → ref GGUF
+(26 tokens, 52 KB) → TADA-3B-ML TTS → 3.5s WAV → wav2vec2-xlsr-en ASR →
+"The torchs then passed to a new generation of americans." (input: "The torch
+has been passed to a new generation of Americans.").
+
+Key learnings in LEARNINGS.md §221: staged loading on 8 GB RAM, CIFS vs local
+disk performance, transformers 5.x compat patches, ggml conv padding for stride
+vs dilation, tensor layout for diff comparison.
+
+---
+
 ## 2026-06-22 audio — AAC/M4A/ALAC/CAF on Apple (AudioToolbox) + AIFF/W64/RF64 (free)
 
 More `crispasr_audio_load` formats, still ffmpeg-free:

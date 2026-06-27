@@ -876,6 +876,29 @@ HumeAI TADA-3B-ML (`HumeAI/tada-3b-ml`). Two GGUFs: backbone talker + codec.
 Models: `HumeAI/tada-3b-ml` (backbone Q4_K ~2.2 GB) + companion codec GGUF
 (~1 GB). Pass `--codec-model <codec.gguf>`.
 
+#### tada-encoder (voice reference creation)
+
+The encoder pipeline converts audio + transcript → aligned acoustic features
+for voice cloning. Ported to C++ in `src/tada_encoder.{h,cpp}`:
+
+- **Aligner**: wav2vec2-large (24L, 1024-d, 16 heads) fine-tuned with 128K-class
+  CTC head (Llama-3.2 tokenizer vocab). Resamples 24kHz→16kHz internally. Outputs
+  frame-level logits → DP alignment algorithm → `token_positions` + `token_masks`.
+- **WavEncoder**: DAC-style strided conv encoder. Conv1d(1→64, k=7) → 4×
+  EncoderBlock (strides [6,5,4,4], Snake1d activations, weight-normed convs,
+  3× ResidualUnit per block with dilations 1,3,9) → Snake1d → Conv1d(1024→1024).
+  Total 480× downsample: 24kHz → 50Hz.
+- **LocalAttentionEncoder**: 6-layer transformer, 1024-d, 8 heads, head_dim=128,
+  RoPE (θ=10000), GELU FFN (4096), v2 segment attention mask, post-norm. Input
+  augmented with `pos_emb(token_masks)` (Embedding(2, 1024)).
+- **hidden_linear**: Linear(1024→512).
+- **Post-processing**: zero non-token frames, add Gaussian noise (std=0.5),
+  gather at token positions, normalize by (mean=0, std=1.5).
+
+GGUFs at [cstr/tada-encoder-GGUF](https://huggingface.co/cstr/tada-encoder-GGUF):
+`tada-encoder-f16.gguf` (178 MB, shared encoder) + `tada-aligner-en.gguf`
+(1.1 GB, wav2vec2-large + CTC head, loaded by `wav2vec2_load()`).
+
 ### mini-omni2
 
 gpt-omni/mini-omni2 (`gpt-omni/mini-omni2`). Multimodal speech model

@@ -1,6 +1,6 @@
 # CrispASR — Technical learnings
 
-Distilled from months of porting eight ASR architectures into one ggml
+Distilled from months of porting ASR/TTS architectures into one ggml
 codebase. Nothing here is breaking news; everything here is something
 we'd have saved days if we'd known up front.
 
@@ -10994,3 +10994,68 @@ bytes. Python and Rust used fixed 256-byte buffers and silently lost every
 backend after `kyutai-stt`, including CosyVoice3. The C ABI returns the full
 required length even when the supplied buffer truncates, so bindings must
 retry with `required + 1` bytes instead of assuming the backend list is small.
+
+## TADA encoder port: staged model loading on constrained RAM (§221)
+
+Porting the TADA encoder pipeline (aligner + WavEncoder + LocalAttentionEncoder)
+to C++ exposed several patterns for working with >1 GB PyTorch models on 8 GB
+RAM:
+
+**Staged loading defeats OOM.** The encoder and aligner together exceed 2 GB at
+float32. Loading both simultaneously OOM-kills on 8 GB. Solution: load the
+aligner first, run it, `del aligner; gc.collect()` to free ~1.3 GB, then load
+the encoder. RSS dropped from 705 MB → 463 MB at the free boundary, confirming
+pages were reclaimed. The same principle applies to any reference-dump script
+that needs multiple large models — never hold two in memory simultaneously.
+
+**CIFS-backed HF cache is 10–50× slower than local disk.** Model loading from
+`/mnt/akademie_storage/huggingface/hub` (CIFS) took 5–10 minutes vs ~6 seconds
+from `/mnt/volume1/tmp-overflow/` (local NVMe). For iterative debugging, copy
+safetensors to local storage first:
+```bash
+cp $HF_CACHE/models--HumeAI--tada-codec/snapshots/*/encoder/model.safetensors \
+   /mnt/volume1/tmp-overflow/tada-codec-local/encoder/
+```
+
+**transformers 5.x broke `from_pretrained` for custom PreTrainedModel
+subclasses.** The `all_tied_weights_keys` attribute was removed; models that
+inherit `PreTrainedModel` crash with `AttributeError` on load. Fix: monkey-patch
+a property with both getter and setter before the first `from_pretrained` call:
+```python
+if not hasattr(transformers.PreTrainedModel, 'all_tied_weights_keys'):
+    transformers.PreTrainedModel.all_tied_weights_keys = property(
+        lambda self: getattr(self, '_all_tied_weights_keys_store', None) or
+                     getattr(self, '_tied_weights_keys', None) or {},
+        lambda self, val: setattr(self, '_all_tied_weights_keys_store', val))
+```
+This must be a property with a setter (not just a getter), because HF code
+assigns to it during `_finalize_model_loading`.
+
+**ggml Conv1d padding differs between dilated and strided convs.** The TADA
+WavEncoder has two kinds of convolutions:
+- ResidualUnit dilated convs: `pad = dilation * (K-1) / 2` (symmetric, output=input length)
+- EncoderBlock stride convs: `pad = ceil(stride/2)`, matching PyTorch's
+  `Conv1d(kernel_size=2*stride, stride=stride, padding=math.ceil(stride/2))`
+
+Using the dilation formula for stride convs gives wrong padding (e.g. stride=6:
+formula gives p=5, correct is p=3). The `wn_conv1d` helper needs a
+`pad_override` parameter for stride convs.
+
+**ggml tensor layout: (d, T) channel-first reads back as (T, d) row-major.**
+When a ggml tensor has shape `ne[0]=d, ne[1]=T`, calling
+`ggml_backend_tensor_get` returns data in ne[0]-contiguous order, which IS
+`(T, d)` row-major — each frame's d features are contiguous. This matches
+Python's `(T, d)` numpy layout directly. Do NOT transpose dump tensors before
+the diff comparison; the ggml→CPU readback already produces the right layout.
+
+**TADA aligner is wav2vec2-large with "group" CNN norm (not "layer").** Despite
+wav2vec2-large documentation saying it uses LayerNorm on all CNN layers, the
+TADA aligner's checkpoint has InstanceNorm only on layer 0 and no norm on
+layers 1–6 (and no conv bias). The converter must detect this from the tensor
+names rather than assuming the architecture.
+
+**wav2vec2 pos_conv weight-norm shape varies.** Standard wav2vec2 stores
+pos_conv `original0` (g) as `[Cout, 1, 1]` (dim=0 norm). The TADA aligner
+stores it as `[1, 1, K]` (dim=2 norm). The materialization formula
+`w = g * v / ||v||` must detect which dimension was normed by finding which
+dims of g are size 1 while v is larger.
