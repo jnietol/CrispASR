@@ -80,7 +80,7 @@ try:
 
     # Build CLI
     log(f"Building with {n_jobs} jobs...")
-    with kh.build_heartbeat():
+    with kh.build_heartbeat("dots-tts CUDA build"):
         r2 = subprocess.run(
             ["cmake", "--build", str(build_dir), "--target", "crispasr-cli", f"-j{n_jobs}"],
             capture_output=True, text=True, env=cmake_env, cwd=str(_CRISPASR_DIR), timeout=1200)
