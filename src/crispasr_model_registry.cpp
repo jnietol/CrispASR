@@ -364,6 +364,13 @@ constexpr Entry k_registry[] = {
     {"parakeet-rnnt-1.1b", "parakeet-rnnt-1.1b-q4_k.gguf",
      "https://huggingface.co/cstr/parakeet-rnnt-1.1b-GGUF/resolve/main/parakeet-rnnt-1.1b-q4_k.gguf",
      "~770 MB", nullptr, nullptr},
+    // parakeet-ctc-1.1b-ja — Japanese FastConformer-CTC (42L, 1.1B params).
+    // Fine-tuned from nvidia/parakeet-ctc-1.1b on Japanese data. Uses the
+    // GAL checkpoint (parakeet-ja-gal.nemo) — the non-GAL checkpoint has
+    // corrupt F32 weights in layers 26-28 (NaN + values >1e38).
+    {"parakeet-ctc-1.1b-ja", "parakeet-ctc-1.1b-ja-q8_0.gguf",
+     "https://huggingface.co/cstr/parakeet-ctc-1.1b-ja-GGUF/resolve/main/parakeet-ctc-1.1b-ja-q8_0.gguf",
+     "~1.2 GB", nullptr, nullptr},
     // reazonspeech-nemo-v2 — Japanese FastConformer-RNNT (619M params).
     // 80-mel input, rel_pos_local_attn (window=128+128, 1 global token),
     // 3000-token SentencePiece vocab. Pure RNNT (n_tdt_durations=0).

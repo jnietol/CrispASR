@@ -163,127 +163,119 @@ def parse_yaml_hparams(yaml_path: Path) -> dict:
     return hp
 
 
-def convert(nemo_path: Path, out_path: Path) -> None:
-    print(f"Loading: {nemo_path}")
-    with tempfile.TemporaryDirectory() as td:
+def convert(nemo_path: Path, out_path: Path, extract_dir: Path | None = None) -> None:
+    use_mmap = extract_dir is not None
+    if use_mmap:
+        print(f"Loading: {nemo_path}  (disk extract to {extract_dir}, mmap)")
+        paths = unpack_nemo(nemo_path, extract_dir)
+        sd = torch.load(str(paths["weights"]), map_location="cpu", weights_only=True, mmap=True)
+        if isinstance(sd, dict) and "state_dict" in sd:
+            sd = sd["state_dict"]
+        hp = parse_yaml_hparams(paths["config"]) if "config" in paths else {}
+    else:
+        print(f"Loading: {nemo_path}")
+        _td = tempfile.TemporaryDirectory()
+        td = _td.__enter__()
         paths = unpack_nemo(nemo_path, Path(td))
         print(f"  weights: {paths['weights']}")
-
         sd = torch.load(str(paths["weights"]), map_location="cpu", weights_only=True)
         if isinstance(sd, dict) and "state_dict" in sd:
             sd = sd["state_dict"]
-
         hp = parse_yaml_hparams(paths["config"]) if "config" in paths else {}
 
-        # Infer vocab size from the CTC head (most authoritative source).
-        ctc_w = sd["decoder.decoder_layers.0.weight"]  # (vocab+1, hidden, 1)
-        vocab_plus_blank = int(ctc_w.shape[0])
-        vocab_size = vocab_plus_blank - 1
-        hidden = int(ctc_w.shape[1])
+    # Infer vocab size from the CTC head (most authoritative source).
+    ctc_w = sd["decoder.decoder_layers.0.weight"]  # (vocab+1, hidden, 1)
+    vocab_plus_blank = int(ctc_w.shape[0])
+    vocab_size = vocab_plus_blank - 1
+    hidden = int(ctc_w.shape[1])
 
-        # Load the SentencePiece vocab.
-        spm_path = None
-        for cand in paths.get("spm_candidates", []):
-            try:
-                sp = spm.SentencePieceProcessor(model_file=str(cand))
-                if sp.get_piece_size() == vocab_size:
-                    spm_path = cand
-                    break
-            except Exception:
-                continue
-        if spm_path is None:
-            sys.exit(
-                f"could not find a SentencePiece tokenizer with {vocab_size} pieces"
-            )
-        sp = spm.SentencePieceProcessor(model_file=str(spm_path))
-        vocab = [sp.id_to_piece(i) for i in range(sp.get_piece_size())]
-        print(f"  spm:     {spm_path.name} ({len(vocab)} pieces)")
+    # Load the SentencePiece vocab.
+    spm_path = None
+    for cand in paths.get("spm_candidates", []):
+        try:
+            sp = spm.SentencePieceProcessor(model_file=str(cand))
+            if sp.get_piece_size() == vocab_size:
+                spm_path = cand
+                break
+        except Exception:
+            continue
+    if spm_path is None:
+        sys.exit(f"could not find a SentencePiece tokenizer with {vocab_size} pieces")
+    sp = spm.SentencePieceProcessor(model_file=str(spm_path))
+    vocab = [sp.id_to_piece(i) for i in range(sp.get_piece_size())]
+    print(f"  spm:     {spm_path.name} ({len(vocab)} pieces)")
 
-        # Encoder hparams from the YAML (with sane defaults for the Large variant).
-        n_layers = hp.get("n_layers", 18)
-        d_model = hp.get("d_model", hidden)
-        n_heads = hp.get("n_heads", 8)
-        head_dim = d_model // n_heads
-        ff_dim = d_model * hp.get("ff_expansion_factor", 4)
-        sub_factor = hp.get("subsampling_factor", 8)
-        sub_channels = hp.get("subsampling_conv_channels", 256)
-        conv_kernel = hp.get("conv_kernel_size", 9)
-        n_mels = hp.get("features", 80)
-        n_fft = hp.get("n_fft", 512)
-        win_length = int(hp.get("window_size", 0.025) * hp.get("sample_rate", 16000))
-        hop_length = int(hp.get("window_stride", 0.01) * hp.get("sample_rate", 16000))
+    # Encoder hparams from the YAML (with sane defaults for the Large variant).
+    n_layers = hp.get("n_layers", 18)
+    d_model = hp.get("d_model", hidden)
+    n_heads = hp.get("n_heads", 8)
+    head_dim = d_model // n_heads
+    ff_dim = d_model * hp.get("ff_expansion_factor", 4)
+    sub_factor = hp.get("subsampling_factor", 8)
+    sub_channels = hp.get("subsampling_conv_channels", 256)
+    conv_kernel = hp.get("conv_kernel_size", 9)
+    n_mels = hp.get("features", 80)
+    n_fft = hp.get("n_fft", 512)
+    win_length = int(hp.get("window_size", 0.025) * hp.get("sample_rate", 16000))
+    hop_length = int(hp.get("window_stride", 0.01) * hp.get("sample_rate", 16000))
 
-        print(
-            f"  encoder: n_layers={n_layers} d_model={d_model} heads={n_heads}"
-            f" head_dim={head_dim} ff_dim={ff_dim} mels={n_mels}"
-        )
-        print(f"  ctc head: vocab={vocab_size} (+1 blank)")
+    print(
+        f"  encoder: n_layers={n_layers} d_model={d_model} heads={n_heads}"
+        f" head_dim={head_dim} ff_dim={ff_dim} mels={n_mels}"
+    )
+    print(f"  ctc head: vocab={vocab_size} (+1 blank)")
 
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        # arch tag stays "canary-ctc" so src/canary_ctc.cpp hosts the
-        # result unchanged — the bias-carrying branch is selected at
-        # load time based on tensor presence, not on the arch tag.
-        writer = gguf.GGUFWriter(str(out_path), arch="canary-ctc", use_temp_file=True)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    writer = gguf.GGUFWriter(str(out_path), arch="canary-ctc")
 
-        writer.add_uint32("canary_ctc.sample_rate", 16000)
-        writer.add_uint32("canary_ctc.n_mels", n_mels)
-        writer.add_uint32("canary_ctc.n_fft", n_fft)
-        writer.add_uint32("canary_ctc.win_length", win_length)
-        writer.add_uint32("canary_ctc.hop_length", hop_length)
-        writer.add_uint32("canary_ctc.d_model", d_model)
-        writer.add_uint32("canary_ctc.n_layers", n_layers)
-        writer.add_uint32("canary_ctc.n_heads", n_heads)
-        writer.add_uint32("canary_ctc.head_dim", head_dim)
-        writer.add_uint32("canary_ctc.ff_dim", ff_dim)
-        writer.add_uint32("canary_ctc.subsampling_factor", sub_factor)
-        writer.add_uint32("canary_ctc.subsampling_channels", sub_channels)
-        writer.add_uint32("canary_ctc.conv_kernel", conv_kernel)
-        writer.add_uint32("canary_ctc.vocab_size", vocab_size)
-        writer.add_uint32("canary_ctc.blank_id", vocab_size)
-        writer.add_uint32("canary_ctc.frame_dur_cs", 8)
-        # NeMo FastConformer-CTC standalones are trained with
-        # xscaling=true — the runtime multiplies the pre-encoder output
-        # by sqrt(d_model) before the first block. The canary_ctc
-        # aligner is the only other consumer of this loader and was
-        # trained with xscaling=false; its GGUF omits the key and the
-        # C++ default of 0 keeps that path unchanged.
-        writer.add_uint32("canary_ctc.xscaling", 1)
+    writer.add_uint32("canary_ctc.sample_rate", 16000)
+    writer.add_uint32("canary_ctc.n_mels", n_mels)
+    writer.add_uint32("canary_ctc.n_fft", n_fft)
+    writer.add_uint32("canary_ctc.win_length", win_length)
+    writer.add_uint32("canary_ctc.hop_length", hop_length)
+    writer.add_uint32("canary_ctc.d_model", d_model)
+    writer.add_uint32("canary_ctc.n_layers", n_layers)
+    writer.add_uint32("canary_ctc.n_heads", n_heads)
+    writer.add_uint32("canary_ctc.head_dim", head_dim)
+    writer.add_uint32("canary_ctc.ff_dim", ff_dim)
+    writer.add_uint32("canary_ctc.subsampling_factor", sub_factor)
+    writer.add_uint32("canary_ctc.subsampling_channels", sub_channels)
+    writer.add_uint32("canary_ctc.conv_kernel", conv_kernel)
+    writer.add_uint32("canary_ctc.vocab_size", vocab_size)
+    writer.add_uint32("canary_ctc.blank_id", vocab_size)
+    writer.add_uint32("canary_ctc.frame_dur_cs", 8)
+    writer.add_uint32("canary_ctc.xscaling", 1)
 
-        writer.add_array("tokenizer.ggml.tokens", vocab)
+    writer.add_array("tokenizer.ggml.tokens", vocab)
 
-        n_written = 0
-        n_f16 = n_f32 = 0
-        for name in sorted(sd.keys()):
-            gguf_name = remap_name(name)
-            if gguf_name is None:
-                continue
-            t = sd[name].cpu().numpy()
-            if t.dtype == np.float64:
-                t = t.astype(np.float32)
-            if gguf_name == "ctc.weight" and t.ndim == 3 and t.shape[-1] == 1:
-                t = t.squeeze(-1)
-            if is_f32_tensor(gguf_name, t.shape):
-                t = t.astype(np.float32)
-                n_f32 += 1
-            else:
-                t = t.astype(np.float16)
-                n_f16 += 1
-            writer.add_tensor(gguf_name, t)
-            n_written += 1
-            if n_written <= 25 or n_written % 100 == 0:
-                print(f"  {gguf_name:60s}  {str(t.shape):28s}  {t.dtype}")
+    n_written = 0
+    n_f16 = n_f32 = 0
+    for name in sorted(sd.keys()):
+        gguf_name = remap_name(name)
+        if gguf_name is None:
+            continue
+        t = sd[name].cpu().numpy()
+        if t.dtype == np.float64:
+            t = t.astype(np.float32)
+        if gguf_name == "ctc.weight" and t.ndim == 3 and t.shape[-1] == 1:
+            t = t.squeeze(-1)
+        if is_f32_tensor(gguf_name, t.shape):
+            t = t.astype(np.float32)
+            n_f32 += 1
+        else:
+            t = t.astype(np.float16)
+            n_f16 += 1
+        writer.add_tensor(gguf_name, t)
+        n_written += 1
+        if n_written <= 25 or n_written % 100 == 0:
+            print(f"  {gguf_name:60s}  {str(t.shape):28s}  {t.dtype}")
 
-        # NOTE: stt_en_fc_ctc already ships `conv.depthwise_conv.bias`
-        # (renamed to `encoder.layers.*.conv.dw.bias` by remap_name), so
-        # we don't need to inject zero bias tensors here the way the
-        # canary_ctc aligner converter does. The runtime's BN folding
-        # writes the absorbed bias back into this slot at load time.
-        print(f"\n  total tensors: {n_written}  (F16: {n_f16}, F32: {n_f32})")
+    print(f"\n  total tensors: {n_written}  (F16: {n_f16}, F32: {n_f32})")
 
-        writer.write_header_to_file()
-        writer.write_kv_data_to_file()
-        writer.write_tensors_to_file()
-        writer.close()
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_tensors_to_file()
+    writer.close()
     print(f"\nDone: {out_path}  ({out_path.stat().st_size / 1e6:.1f} MB)")
 
 
@@ -293,9 +285,11 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--nemo", required=True, type=Path, help="path to the .nemo tarball")
     p.add_argument("--output", required=True, type=Path)
+    p.add_argument("--extract-dir", default=None, type=Path,
+                   help="extract .nemo to this dir and load via mmap (low memory for large models)")
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    convert(args.nemo, args.output)
+    convert(args.nemo, args.output, extract_dir=args.extract_dir)
