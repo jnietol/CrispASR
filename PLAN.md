@@ -5986,3 +5986,80 @@ threads even over-subscribed/regressed. Needs a quiet-machine interleaved A/B
 (alternating order, min-of-arm) to (a) confirm the win and (b) pick the optimal
 default/cap (E-core penalty on Apple silicon?). Same applies to whether the
 global CLI default `min(4, hw)` should rise for other compute-bound backends.
+
+
+---
+
+### §222 Higgs-Audio-v3 TTS (bosonai/higgs-tts-3-4b) — Qwen3-4B + 8-codebook discrete codec
+
+**Status:** SURVEYED. **Priority:** LOW (non-commercial license).
+**Issue:** [#198](https://github.com/CrispStrobe/CrispASR/issues/198).
+**Effort:** Medium-Large.
+
+**Architecture** (inspected from `sglang-omni/sglang_omni/models/higgs_tts/`):
+
+- **Backbone:** Qwen3-4B-Base (36L, 2560-d, 32 heads, 8 KV heads, GQA 4:1,
+  SwiGLU 9728, RoPE θ=1M, QK-norm). `body.layers.*` in checkpoint.
+- **Multi-codebook embedding:** 8 codebooks × 1026 vocab fused into one
+  `[8*1026, 2560]` weight; codes offset-indexed then summed across codebooks.
+  `tied.embedding.modality_embeddings.0.embedding.weight`.
+- **Multi-codebook head:** tied with embedding; `linear(hidden, 8*1026)` →
+  reshape to `[L, 8, 1026]` for per-codebook sampling.
+- **Delay pattern:** codebook `c` is delayed by `c` steps (BOC/EOC padding).
+  AR generates one `[8]` code vector per step; de-stagger recovers `[T, 8]`.
+- **Audio codec** (Higgs Audio V2 Tokenizer, embedded in checkpoint under
+  `tied.embedding.modality_embeddings.0.model.*`, 529 tensors):
+  - `semantic_model`: HuBERT/WavLM-style (conv feature extractor + transformer
+    encoder) — only used for encoding (voice cloning), NOT decode path.
+  - `acoustic_encoder`/`acoustic_decoder`: DAC-style (Snake1d + ConvTranspose1d
+    upsampler). Same architecture as TADA codec / `core/seanet_decoder.h`.
+  - `quantizer`: 8 RVQ codebooks (in/out projections per codebook).
+  - `fc`/`fc1`/`fc2`: linear projections between semantic and acoustic spaces.
+  - Decode path: `codes → quantizer.decode → fc2 → acoustic_decoder → 24kHz PCM`.
+- **Emotion/style control:** inline `<|category:value|>` tokens (21 emotions,
+  singing/whispering, speed, pitch, sound effects).
+- **102 languages**, 85 at Tier 1 (<5% WER).
+- **Size:** 9.3 GB BF16 → ~2.5 GB Q4_K.
+
+**Component mapping to existing CrispASR code:**
+
+| Higgs Component | CrispASR Analogue | New code |
+|---|---|---|
+| Qwen3-4B backbone | `qwen3_asr.cpp` / `qwen3_tts.cpp` | Reuse |
+| QK-norm (q_norm, k_norm) | — | ~10 lines (RMSNorm on Q,K) |
+| Fused multi-codebook embedding | — | ~30 lines |
+| Fused multi-codebook head | — | ~20 lines |
+| Delay pattern stagger/de-stagger | — | ~30 lines |
+| DAC acoustic decoder | `tada_codec.cpp`, `core/seanet_decoder.h` | Adapt |
+| RVQ quantizer decode | `core/snac.h` pattern | Adapt |
+| fc2 Linear | — | Trivial |
+
+**License:** Boson Higgs TTS 3 Research and Non-Commercial License. Production
+APIs and revenue-generating use require a separate commercial license. Not a
+total blocker but deprioritises this vs Apache/MIT backends.
+
+**URLs:**
+- HF model: https://huggingface.co/bosonai/higgs-tts-3-4b (9.3 GB single safetensors)
+- HF codec (standalone): https://huggingface.co/bosonai/higgs-audio-v2-tokenizer
+- Serving framework: https://github.com/sgl-project/sglang-omni
+- Upstream HF PR for tokenizer: https://github.com/huggingface/transformers/pull/40294
+- GitHub issue: https://github.com/CrispStrobe/CrispASR/issues/198
+
+**Source code** (`git clone https://github.com/sgl-project/sglang-omni`,
+key files under `sglang_omni/models/higgs_tts/`):
+- `modeling.py` — `HiggsFusedMultiTextEmbedding` + `HiggsFusedMultiTextHead` (58 lines)
+- `sampler.py` — delay-pattern state machine, per-row + batched CUDA-graph path
+- `audio_codec.py` — vocoder facade, loads codec from TTS checkpoint
+  (`tied.embedding.modality_embeddings.0.model.*` prefix)
+- `_vendored/higgs_audio_v2_tokenizer_hf.py` — 940-line full codec:
+  DAC encoder/decoder (Snake1d), HuBERT semantic model, RVQ quantizer,
+  semantic encoder/decoder bridges
+- `model.py` — sglang model class, backbone prefix map
+  (`tied.embedding.text_embedding.` → `backbone.model.embed_tokens.`,
+  `body.layers.` → `backbone.model.layers.`, etc.)
+- `utils.py` — `apply_delay_pattern` / `reverse_delay_pattern`, BOC/EOC
+- `weight_loader.py` — `DiscreteWeightMapper` for checkpoint key remapping
+- `hf_config.py` — `HiggsMultimodalQwen3Config`
+
+**Testing:** 9.3 GB model requires Kaggle GPU kernel (won't fit 8 GB VPS).
+
