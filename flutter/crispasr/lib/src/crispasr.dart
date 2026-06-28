@@ -2829,6 +2829,28 @@ class CrispasrSession {
     if (rc != 0 && rc != -2) throw Exception('setTopP failed (rc=$rc)');
   }
 
+  /// Top-k sampling cutoff (0 = disabled). Honoured by TADA; other
+  /// backends no-op.
+  void setTopK(int topK) {
+    if (_closed) throw StateError('CrispasrSession is closed');
+    if (!_lib.providesSymbol('crispasr_session_set_top_k')) return;
+    final fn = _lib.lookupFunction<Int32 Function(Pointer<Void>, Int32),
+        int Function(Pointer<Void>, int)>('crispasr_session_set_top_k');
+    final rc = fn(_handle, topK);
+    if (rc != 0 && rc != -2) throw Exception('setTopK failed (rc=$rc)');
+  }
+
+  /// Enable/disable sampling (false = greedy). Honoured by TADA; other
+  /// backends no-op.
+  void setDoSample(bool enable) {
+    if (_closed) throw StateError('CrispasrSession is closed');
+    if (!_lib.providesSymbol('crispasr_session_set_do_sample')) return;
+    final fn = _lib.lookupFunction<Int32 Function(Pointer<Void>, Int32),
+        int Function(Pointer<Void>, int)>('crispasr_session_set_do_sample');
+    final rc = fn(_handle, enable ? 1 : 0);
+    if (rc != 0 && rc != -2) throw Exception('setDoSample failed (rc=$rc)');
+  }
+
   /// Min-p sampling threshold (0.0..1.0). Honoured by chatterbox.
   void setMinP(double minP) {
     if (_closed) throw StateError('CrispasrSession is closed');

@@ -139,6 +139,16 @@ public:
         if (const char* e = std::getenv("TADA_REPETITION_PENALTY"); e && *e)
             cp.text_repetition_penalty = (float)atof(e);
 
+        // Remember the resolved sampler defaults so a server can override them
+        // per request and have unspecified knobs fall back here (rather than
+        // leaking a previous request's value through the shared context).
+        def_temperature_ = cp.temperature;
+        def_top_p_ = cp.text_top_p;
+        def_top_k_ = cp.text_top_k;
+        def_rep_penalty_ = cp.text_repetition_penalty;
+        def_do_sample_ = cp.text_do_sample;
+        def_num_candidates_ = cp.num_acoustic_candidates;
+
         ctx_ = tada_init_from_file(p.model.c_str(), cp);
         if (!ctx_) {
             fprintf(stderr, "crispasr[tada]: failed to load '%s'\n", p.model.c_str());
@@ -233,8 +243,19 @@ public:
     std::vector<float> synthesize(const std::string& text, const whisper_params& params) override {
         if (!ctx_)
             return {};
-        if (params.temperature > 0.0f)
-            tada_set_temperature(ctx_, params.temperature);
+        // Apply the talker sampler per request so a long-running server can tune
+        // temperature / top-p / top-k / repetition-penalty at query time without a
+        // restart (#197). The context is shared across requests, so every knob is
+        // set on every call: a request value when provided (whisper_params uses
+        // negative sentinels for "unset"), otherwise the init-time default — this
+        // keeps requests isolated instead of leaking the previous request's value.
+        tada_set_temperature(ctx_, params.temperature > 0.0f ? params.temperature : def_temperature_);
+        tada_set_top_p(ctx_, params.tts_top_p >= 0.0f ? params.tts_top_p : def_top_p_);
+        tada_set_top_k(ctx_, params.tts_top_k >= 0 ? params.tts_top_k : def_top_k_);
+        tada_set_repetition_penalty(ctx_, params.tts_repetition_penalty > 0.0f ? params.tts_repetition_penalty
+                                                                               : def_rep_penalty_);
+        tada_set_num_candidates(ctx_, params.tts_num_candidates >= 1 ? params.tts_num_candidates : def_num_candidates_);
+        tada_set_do_sample(ctx_, params.tts_do_sample >= 0 ? (params.tts_do_sample != 0) : def_do_sample_);
         if (params.seed > 0)
             tada_set_seed(ctx_, params.seed);
 
@@ -257,6 +278,13 @@ public:
 
 private:
     tada_context* ctx_ = nullptr;
+    // Resolved sampler defaults (from defaults + env), used when a request omits a knob.
+    float def_temperature_ = 0.6f;
+    float def_top_p_ = 0.9f;
+    int def_top_k_ = 0;
+    float def_rep_penalty_ = 1.1f;
+    bool def_do_sample_ = true;
+    int def_num_candidates_ = 4;
 };
 
 } // namespace

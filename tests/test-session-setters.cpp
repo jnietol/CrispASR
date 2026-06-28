@@ -31,6 +31,18 @@ TEST_CASE("session setter: set_repetition_penalty null-handle → -1", "[unit][s
     REQUIRE(crispasr_session_set_repetition_penalty(nullptr, 1.2f) == -1);
 }
 
+TEST_CASE("session setter: set_top_k null-handle → -1", "[unit][setters]") {
+    REQUIRE(crispasr_session_set_top_k(nullptr, 5) == -1);
+}
+
+TEST_CASE("session setter: set_do_sample null-handle → -1", "[unit][setters]") {
+    REQUIRE(crispasr_session_set_do_sample(nullptr, 1) == -1);
+}
+
+TEST_CASE("session setter: set_tts_num_candidates null-handle → -1", "[unit][setters]") {
+    REQUIRE(crispasr_session_set_tts_num_candidates(nullptr, 4) == -1);
+}
+
 TEST_CASE("session setter: set_cfg_weight null-handle → -1", "[unit][setters]") {
     REQUIRE(crispasr_session_set_cfg_weight(nullptr, 0.5f) == -1);
 }

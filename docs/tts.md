@@ -176,15 +176,22 @@ adds trailing noise — worst on harder or non-English text.
 
 | Env var | Default | Notes |
 |---|---|---|
-| `TADA_DO_SAMPLE` | `1` | `0` = greedy argmax (the old behaviour) |
+| `TADA_DO_SAMPLE` | `1` | `0` = greedy argmax (the old behaviour); also `set_do_sample` |
 | `TADA_TEMPERATURE` | `0.6` | also set by `--temperature` / `set_temperature` |
 | `TADA_TOP_P` | `0.9` | nucleus; also `set_top_p` |
-| `TADA_TOP_K` | `0` | `0` = disabled |
+| `TADA_TOP_K` | `0` | `0` = disabled; also `set_top_k` |
 | `TADA_REPETITION_PENALTY` | `1.1` | `1.0` = none; also `set_repetition_penalty` |
 
 Honoured by the CLI, C ABI, bindings and server. Raising
 `TADA_REPETITION_PENALTY` measurably reduces repeats; with sampling on, `--seed`
 changes the wording.
+
+On the HTTP server these are **per-request** JSON fields on `POST
+/v1/audio/speech` — `temperature`, `top_p`, `top_k`, `repetition_penalty`,
+`do_sample`, `num_candidates` — so a long-running container can be retuned at
+query time without a restart. A field that is omitted falls back to the value
+the server was started with (env / flags), so requests don't leak settings into
+each other.
 
 ### Reproducible / diverse generation (`--seed`)
 

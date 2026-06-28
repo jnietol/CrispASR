@@ -38,6 +38,8 @@ int              crispasr_session_set_frequency_penalty(CrispasrSession* s, floa
 int              crispasr_session_set_tts_steps(CrispasrSession* s, int steps);
 int              crispasr_session_set_tts_num_candidates(CrispasrSession* s, int n);
 int              crispasr_session_set_top_p(CrispasrSession* s, float top_p);
+int              crispasr_session_set_top_k(CrispasrSession* s, int top_k);
+int              crispasr_session_set_do_sample(CrispasrSession* s, int enable);
 int              crispasr_session_set_min_p(CrispasrSession* s, float min_p);
 int              crispasr_session_set_repetition_penalty(CrispasrSession* s, float r);
 int              crispasr_session_set_cfg_weight(CrispasrSession* s, float cfg_weight);
@@ -501,6 +503,28 @@ func (s *CrispasrSession) SetTopP(topP float32) error {
 	rc := C.crispasr_session_set_top_p(s.handle, C.float(topP))
 	if rc != 0 && rc != -2 {
 		return errors.New("crispasr_session_set_top_p failed")
+	}
+	return nil
+}
+
+// SetTopK sets the top-k sampling cutoff (0 = disabled). Honoured by TADA.
+func (s *CrispasrSession) SetTopK(topK int) error {
+	rc := C.crispasr_session_set_top_k(s.handle, C.int(topK))
+	if rc != 0 && rc != -2 {
+		return errors.New("crispasr_session_set_top_k failed")
+	}
+	return nil
+}
+
+// SetDoSample enables/disables sampling (false = greedy). Honoured by TADA.
+func (s *CrispasrSession) SetDoSample(enable bool) error {
+	cEnable := C.int(0)
+	if enable {
+		cEnable = C.int(1)
+	}
+	rc := C.crispasr_session_set_do_sample(s.handle, cEnable)
+	if rc != 0 && rc != -2 {
+		return errors.New("crispasr_session_set_do_sample failed")
 	}
 	return nil
 }

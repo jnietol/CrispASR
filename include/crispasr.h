@@ -591,6 +591,9 @@ CRISPASR_API int crispasr_session_set_frequency_penalty(struct crispasr_session*
 CRISPASR_API int crispasr_session_set_top_p(struct crispasr_session* s, float top_p);
 CRISPASR_API int crispasr_session_set_min_p(struct crispasr_session* s, float min_p);
 CRISPASR_API int crispasr_session_set_repetition_penalty(struct crispasr_session* s, float r);
+CRISPASR_API int crispasr_session_set_top_k(struct crispasr_session* s, int top_k);
+CRISPASR_API int crispasr_session_set_do_sample(struct crispasr_session* s, int enable);
+CRISPASR_API int crispasr_session_set_tts_num_candidates(struct crispasr_session* s, int n);
 CRISPASR_API int crispasr_session_set_cfg_weight(struct crispasr_session* s, float cfg_weight);
 CRISPASR_API int crispasr_session_set_exaggeration(struct crispasr_session* s, float exaggeration);
 CRISPASR_API int crispasr_session_set_max_speech_tokens(struct crispasr_session* s, int n);

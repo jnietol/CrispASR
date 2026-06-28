@@ -113,6 +113,12 @@ namespace CrispASR
         internal static extern int crispasr_session_set_top_p(IntPtr s, float topP);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int crispasr_session_set_top_k(IntPtr s, int topK);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int crispasr_session_set_do_sample(IntPtr s, int enable);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         internal static extern int crispasr_session_set_min_p(IntPtr s, float minP);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]

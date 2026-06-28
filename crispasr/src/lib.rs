@@ -907,6 +907,24 @@ impl Session {
         Ok(())
     }
 
+    /// Set the top-k sampling cutoff (0 = disabled). Honoured by TADA.
+    pub fn set_top_k(&self, top_k: i32) -> Result<(), String> {
+        let rc = unsafe { crispasr_sys::crispasr_session_set_top_k(self.handle, top_k) };
+        if rc != 0 && rc != -2 {
+            return Err(format!("set_top_k failed (rc={})", rc));
+        }
+        Ok(())
+    }
+
+    /// Enable/disable sampling (`false` = greedy). Honoured by TADA.
+    pub fn set_do_sample(&self, enable: bool) -> Result<(), String> {
+        let rc = unsafe { crispasr_sys::crispasr_session_set_do_sample(self.handle, enable as i32) };
+        if rc != 0 && rc != -2 {
+            return Err(format!("set_do_sample failed (rc={})", rc));
+        }
+        Ok(())
+    }
+
     /// Set the min-p sampling threshold. Honoured by chatterbox.
     pub fn set_min_p(&self, min_p: f32) -> Result<(), String> {
         let rc = unsafe { crispasr_sys::crispasr_session_set_min_p(self.handle, min_p) };

@@ -60,6 +60,8 @@ extern int                     crispasr_session_set_frequency_penalty(struct Cri
 extern int                     crispasr_session_set_tts_steps(struct CrispasrSession* s, int steps);
 extern int                     crispasr_session_set_tts_num_candidates(struct CrispasrSession* s, int n);
 extern int                     crispasr_session_set_top_p(struct CrispasrSession* s, float top_p);
+extern int                     crispasr_session_set_top_k(struct CrispasrSession* s, int top_k);
+extern int                     crispasr_session_set_do_sample(struct CrispasrSession* s, int enable);
 extern int                     crispasr_session_set_min_p(struct CrispasrSession* s, float min_p);
 extern int                     crispasr_session_set_repetition_penalty(struct CrispasrSession* s, float r);
 extern int                     crispasr_session_set_cfg_weight(struct CrispasrSession* s, float cfg_weight);
@@ -415,6 +417,20 @@ static VALUE rb_session_set_top_p(VALUE self, VALUE handle, VALUE top_p) {
     struct CrispasrSession* s = (struct CrispasrSession*)NUM2ULL(handle);
     int rc = crispasr_session_set_top_p(s, (float)NUM2DBL(top_p));
     if (rc != 0 && rc != -2) rb_raise(rb_eRuntimeError, "set_top_p failed (rc=%d)", rc);
+    return Qnil;
+}
+
+static VALUE rb_session_set_top_k(VALUE self, VALUE handle, VALUE top_k) {
+    struct CrispasrSession* s = (struct CrispasrSession*)NUM2ULL(handle);
+    int rc = crispasr_session_set_top_k(s, NUM2INT(top_k));
+    if (rc != 0 && rc != -2) rb_raise(rb_eRuntimeError, "set_top_k failed (rc=%d)", rc);
+    return Qnil;
+}
+
+static VALUE rb_session_set_do_sample(VALUE self, VALUE handle, VALUE enable) {
+    struct CrispasrSession* s = (struct CrispasrSession*)NUM2ULL(handle);
+    int rc = crispasr_session_set_do_sample(s, RTEST(enable) ? 1 : 0);
+    if (rc != 0 && rc != -2) rb_raise(rb_eRuntimeError, "set_do_sample failed (rc=%d)", rc);
     return Qnil;
 }
 
@@ -1346,6 +1362,8 @@ void init_ruby_crispasr_session(VALUE* mWhisper) {
     rb_define_singleton_method(mSession, "set_tts_steps",             rb_session_set_tts_steps,             2);
     rb_define_singleton_method(mSession, "set_tts_num_candidates",    rb_session_set_tts_num_candidates,    2);
     rb_define_singleton_method(mSession, "set_top_p",                 rb_session_set_top_p,                 2);
+    rb_define_singleton_method(mSession, "set_top_k",                 rb_session_set_top_k,                 2);
+    rb_define_singleton_method(mSession, "set_do_sample",             rb_session_set_do_sample,             2);
     rb_define_singleton_method(mSession, "set_min_p",                 rb_session_set_min_p,                 2);
     rb_define_singleton_method(mSession, "set_repetition_penalty",    rb_session_set_repetition_penalty,    2);
     rb_define_singleton_method(mSession, "set_cfg_weight",            rb_session_set_cfg_weight,            2);

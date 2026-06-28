@@ -337,6 +337,8 @@ struct whisper_params {
     float tts_min_p = -1.0f;
     int tts_top_k = -1;
     float tts_repetition_penalty = -1.0f;
+    int tts_do_sample = -1;         // tada talker sampling: -1 unset, 0 greedy, 1 sample
+    int tts_num_candidates = -1;    // tada per-token flow-matching candidates (quality/speed)
     float tts_cfg_scale = -1.0f;    // chatterbox cfg_weight, f5 cfg_strength
     int tts_num_steps = -1;         // chatterbox cfm_steps, f5 ode_steps
     float tts_noise_scale = -1.0f;  // piper VITS variance

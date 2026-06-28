@@ -221,6 +221,11 @@ curl http://localhost:8080/v1/audio/speech \
 | `temperature` | server's `--temperature` | Sampling temperature for AR TTS backends. `0` = greedy; backends apply their own default (e.g. 0.8 for qwen3-tts) when the global default of 0.0 is unchanged. |
 | `max_new_tokens` | server's `--max-new-tokens` | AR token generation cap. `<= 0` clears the override and uses the backend default. |
 | `frequency_penalty` | `0.0` | Opt-in repeated generated-token penalty for AR TTS backends. `0.0` disabled. |
+| `top_p` | backend default | Nucleus-sampling cutoff for AR TTS backends (tada, chatterbox). Applied per request; omit to keep the backend default. |
+| `top_k` | backend default | Top-k sampling cutoff (`0` = disabled). Honoured by tada. Per request. |
+| `repetition_penalty` | backend default | Talker repetition penalty (`1.0` = none). Honoured by tada, chatterbox. Per request. |
+| `do_sample` | backend default | `true`/`false` — enable/disable talker sampling (`false` = greedy). Honoured by tada. Per request. |
+| `num_candidates` | backend default | tada per-token flow-matching candidates: higher = more robust timing, lower = faster (`1` = single noise draw). Per request. |
 | `speed` | `1.0` | Tempo multiplier `0.25 .. 4.0` (OpenAI range). Applied as a post-synth linear resampler. Out-of-range returns 400 with `code=invalid_speed`. |
 | `response_format` | `"wav"` | `wav` (16-bit PCM RIFF, 24 kHz mono — default), `pcm` (OpenAI spec: 24 kHz signed 16-bit LE raw, no header), or `f32` (crispasr-specific raw float32 for downstream DSP). |
 | `consent_attestation` | empty | Required when `voice` ends in `.wav` (voice cloning). A free-text statement attesting speaker consent, e.g. `"I have the speaker's consent"`. Logged for audit. |

@@ -21,6 +21,8 @@ backend doesn't expose that knob, but the call is safe to make.
 | `set_tts_steps(n)` | `set_tts_steps` / `set_tts_steps` / `SetTTSSteps` / `setTtsSteps` | Chatterbox S3Gen CFM steps; vibevoice DPM-Solver++ steps |
 | `set_tts_num_candidates(n)` | `set_tts_num_candidates` / `set_tts_num_candidates` / `SetTTSNumCandidates` / `setTtsNumCandidates` | TADA flow-matching timing candidates ranked per token (default 4); rc=-2 for others |
 | `set_top_p(p)` | `set_top_p` / `set_top_p` / `SetTopP` / `setTopP` | Chatterbox AR T3 loop |
+| `set_top_k(k)` | `set_top_k` / `set_top_k` / `SetTopK` / `setTopK` | TADA talker sampler (0 = disabled); rc=-2 for others |
+| `set_do_sample(enable)` | `set_do_sample` / `set_do_sample` / `SetDoSample` / `setDoSample` | TADA talker: false = greedy; rc=-2 for others |
 | `set_min_p(p)` | `set_min_p` / `set_min_p` / `SetMinP` / `setMinP` | Chatterbox AR T3 loop |
 | `set_repetition_penalty(r)` | `set_repetition_penalty` / `set_repetition_penalty` / `SetRepetitionPenalty` / `setRepetitionPenalty` | Chatterbox (1.0 = no penalty) |
 | `set_cfg_weight(w)` | `set_cfg_weight` / `set_cfg_weight` / `SetCFGWeight` / `setCfgWeight` | Chatterbox (0.5 = upstream default; 0 = unconditional) |

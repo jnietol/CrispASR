@@ -285,6 +285,8 @@ CRISPASR_SESSION_API int crispasr_session_set_g2p_dict(crispasr_session* s, cons
 CRISPASR_SESSION_API int crispasr_session_set_top_p(crispasr_session* s, float top_p);
 CRISPASR_SESSION_API int crispasr_session_set_min_p(crispasr_session* s, float min_p);
 CRISPASR_SESSION_API int crispasr_session_set_repetition_penalty(crispasr_session* s, float r);
+CRISPASR_SESSION_API int crispasr_session_set_top_k(crispasr_session* s, int top_k);
+CRISPASR_SESSION_API int crispasr_session_set_do_sample(crispasr_session* s, int enable);
 CRISPASR_SESSION_API int crispasr_session_set_cfg_weight(crispasr_session* s, float cfg_weight);
 CRISPASR_SESSION_API int crispasr_session_set_exaggeration(crispasr_session* s, float exaggeration);
 CRISPASR_SESSION_API int crispasr_session_set_max_speech_tokens(crispasr_session* s, int n);

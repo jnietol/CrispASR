@@ -490,6 +490,8 @@ extern "C" {
     pub fn crispasr_session_set_tts_steps(s: *mut CrispasrSession, steps: c_int) -> c_int;
     pub fn crispasr_session_set_tts_num_candidates(s: *mut CrispasrSession, n: c_int) -> c_int;
     pub fn crispasr_session_set_top_p(s: *mut CrispasrSession, top_p: c_float) -> c_int;
+    pub fn crispasr_session_set_top_k(s: *mut CrispasrSession, top_k: c_int) -> c_int;
+    pub fn crispasr_session_set_do_sample(s: *mut CrispasrSession, enable: c_int) -> c_int;
     pub fn crispasr_session_set_min_p(s: *mut CrispasrSession, min_p: c_float) -> c_int;
     pub fn crispasr_session_set_repetition_penalty(s: *mut CrispasrSession, r: c_float) -> c_int;
     pub fn crispasr_session_set_cfg_weight(s: *mut CrispasrSession, cfg_weight: c_float) -> c_int;

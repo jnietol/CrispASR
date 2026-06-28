@@ -189,6 +189,14 @@ namespace CrispASR
         public void SetTopP(float topP)
             => Check(NativeMethods.crispasr_session_set_top_p(Handle, topP), "set_top_p");
 
+        /// <summary>Top-k sampling cutoff (0 = disabled). Honoured by TADA.</summary>
+        public void SetTopK(int topK)
+            => Check(NativeMethods.crispasr_session_set_top_k(Handle, topK), "set_top_k");
+
+        /// <summary>Enable/disable sampling (false = greedy). Honoured by TADA.</summary>
+        public void SetDoSample(bool enable)
+            => Check(NativeMethods.crispasr_session_set_do_sample(Handle, enable ? 1 : 0), "set_do_sample");
+
         /// <summary>Min-p sampling threshold.</summary>
         public void SetMinP(float minP)
             => Check(NativeMethods.crispasr_session_set_min_p(Handle, minP), "set_min_p");

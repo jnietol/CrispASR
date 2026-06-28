@@ -1578,6 +1578,10 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
             rp.tts_top_k = body["top_k"].get<int>();
         if (body.contains("repetition_penalty") && body["repetition_penalty"].is_number())
             rp.tts_repetition_penalty = body["repetition_penalty"].get<float>();
+        if (body.contains("num_candidates") && body["num_candidates"].is_number_integer())
+            rp.tts_num_candidates = body["num_candidates"].get<int>();
+        if (body.contains("do_sample") && body["do_sample"].is_boolean())
+            rp.tts_do_sample = body["do_sample"].get<bool>() ? 1 : 0;
         if (body.contains("cfg_scale") && body["cfg_scale"].is_number())
             rp.tts_cfg_scale = body["cfg_scale"].get<float>();
         if (body.contains("num_steps") && body["num_steps"].is_number_integer())

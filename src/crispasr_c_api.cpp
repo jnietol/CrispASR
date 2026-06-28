@@ -7423,6 +7423,34 @@ CA_EXPORT int crispasr_session_set_repetition_penalty(crispasr_session* s, float
     return touched > 0 ? 0 : -2;
 }
 
+// Set the top-k sampling cutoff (0 = disabled). Honoured by tada.
+CA_EXPORT int crispasr_session_set_top_k(crispasr_session* s, int top_k) {
+    if (!s)
+        return -1;
+    int touched = 0;
+#ifdef CA_HAVE_TADA
+    if (s->tada_ctx) {
+        tada_set_top_k(s->tada_ctx, top_k);
+        touched++;
+    }
+#endif
+    return touched > 0 ? 0 : -2;
+}
+
+// Enable/disable sampling (0 = greedy). Honoured by tada.
+CA_EXPORT int crispasr_session_set_do_sample(crispasr_session* s, int enable) {
+    if (!s)
+        return -1;
+    int touched = 0;
+#ifdef CA_HAVE_TADA
+    if (s->tada_ctx) {
+        tada_set_do_sample(s->tada_ctx, enable != 0);
+        touched++;
+    }
+#endif
+    return touched > 0 ? 0 : -2;
+}
+
 // Set the classifier-free-guidance weight (chatterbox). 0 disables
 // CFG; 0.5 is the upstream default; values up to 2.0 amplify the
 // conditional path.
