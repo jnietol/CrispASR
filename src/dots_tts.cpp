@@ -1049,6 +1049,11 @@ static void dots_penc_forward(dots_tts_context* ctx, const float* latent_patch, 
 
     for (uint32_t il = 0; il < pe.n_layers; il++) {
         auto& L = pe.layers[il];
+        if (!L.q_proj || !L.k_proj || !L.v_proj || !L.o_proj || !L.attn_norm || !L.ffn_norm || !L.ffn_up ||
+            !L.ffn_down) {
+            std::fprintf(stderr, "dots_tts: PatchEncoder layer %u has null weight(s)!\n", il);
+            break;
+        }
         ggml_tensor* residual = cur;
 
         cur = rms_norm(ctx0, cur, L.attn_norm, 1e-6f);
@@ -1075,9 +1080,24 @@ static void dots_penc_forward(dots_tts_context* ctx, const float* latent_patch, 
 
     cur = rms_norm(ctx0, cur, pe.final_norm, 1e-6f);
 
-    // Output projection
+    // Output projection: out_proj expects 2*hidden_size input (adjacent frames
+    // are concatenated after stride-2 downsample). Reshape (hidden, T) →
+    // (2*hidden, T/2) before projection.
     if (pe.out_proj) {
+        int out_in_dim = (int)pe.out_proj->ne[0];
+        int cur_dim = (int)cur->ne[0];
+        int cur_T = (int)cur->ne[1];
+        if (out_in_dim == 2 * cur_dim && cur_T >= 2) {
+            // Reshape: concatenate pairs of adjacent frames
+            cur = ggml_reshape_2d(ctx0, cur, cur_dim * 2, cur_T / 2);
+        }
         cur = ggml_mul_mat(ctx0, pe.out_proj, cur);
+        if (pe.out_proj->ne[1] > 0) {
+            // Check for out_proj bias
+            ggml_tensor* out_proj_b = ggml_get_tensor(ctx->ctx_w, "dots.penc.out_proj.bias");
+            if (out_proj_b)
+                cur = ggml_add(ctx0, cur, out_proj_b);
+        }
     }
 
     ggml_set_name(cur, "penc_output");
