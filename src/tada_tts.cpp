@@ -1872,6 +1872,33 @@ struct tada_context* tada_init_from_file(const char* path_model, struct tada_con
     c->backend = params.use_gpu ? ggml_backend_init_best() : c->backend_cpu;
     if (!c->backend)
         c->backend = c->backend_cpu;
+
+    // TADA's GPU compute graphs (the flow-matching FM head + the codec) are not
+    // yet numerically correct on Vulkan: the FM solver produces NaN / exploded
+    // values, which poison the autoregressive acoustic feedback so the talker
+    // never emits EOS. Generation then runs to the token cap and the resulting
+    // garbage per-token durations expand to tens of thousands of frames — one
+    // such runaway tried to allocate 113 GB and segfaulted (issue #192). This
+    // reproduces on both RADV (POLARIS10) and MoltenVK, so it is a graph bug,
+    // not a driver bug. Until the graphs are fixed, fall back to CPU on Vulkan so
+    // the user gets correct audio instead of silence / NaN / a huge allocation.
+    // Metal and CUDA are validated and unaffected. Override (for debugging the
+    // Vulkan path) with CRISPASR_TADA_ALLOW_VULKAN=1.
+    if (c->backend != c->backend_cpu) {
+        const char* bname = ggml_backend_name(c->backend);
+        const bool is_vulkan = bname && strstr(bname, "Vulkan");
+        const char* allow = std::getenv("CRISPASR_TADA_ALLOW_VULKAN");
+        if (is_vulkan && !(allow && allow[0] == '1')) {
+            fprintf(stderr,
+                    "tada: WARNING: GPU backend '%s' is not yet supported for TADA — its flow-matching "
+                    "and codec graphs miscompute on Vulkan and produce no usable audio (issue #192). "
+                    "Falling back to CPU. Use Metal or CUDA for GPU acceleration, or set "
+                    "CRISPASR_TADA_ALLOW_VULKAN=1 to force the (broken) Vulkan path.\n",
+                    bname);
+            ggml_backend_free(c->backend);
+            c->backend = c->backend_cpu;
+        }
+    }
     if (params.verbosity >= 1) {
         fprintf(stderr, "tada: backend=%s%s\n", ggml_backend_name(c->backend),
                 (c->backend == c->backend_cpu) ? " (CPU)" : " + CPU fallback");
@@ -2970,6 +2997,32 @@ float* tada_synthesize(struct tada_context* ctx, const char* text, int* out_n_sa
     int n_masks_set = 0;
     for (auto m : token_masks)
         n_masks_set += m;
+
+    // Safety guard (#192): the codec decodes every expanded frame in a single
+    // graph (~1.9 MB/frame), so frame count drives a large allocation. A talker
+    // that never emits EOS runs to the generation cap and, combined with corrupt
+    // per-token durations (e.g. a broken GPU backend producing garbage logits),
+    // expands to tens of thousands of frames — one such runaway tried to
+    // allocate 113 GB and segfaulted. A legitimate single-utterance synth never
+    // exceeds 512 acoustic tokens × ~32 frames ≈ 16 k frames, so refuse to decode
+    // anything well past that and return silence with a clear diagnostic instead
+    // of crashing the machine.
+    {
+        int max_expanded = 16384;
+        if (const char* e = getenv("TADA_MAX_EXPANDED_FRAMES"); e && e[0])
+            max_expanded = atoi(e);
+        if (max_expanded > 0 && n_expanded > max_expanded) {
+            fprintf(stderr,
+                    "tada: ERROR: expansion runaway — %d frames exceeds cap %d. This usually means "
+                    "generation never hit EOS and/or produced corrupt durations (a known symptom of an "
+                    "unvalidated GPU backend, e.g. Vulkan). Refusing codec decode to avoid a huge "
+                    "allocation; returning silence. Re-run on CPU (--no-gpu), or raise the cap with "
+                    "TADA_MAX_EXPANDED_FRAMES.\n",
+                    n_expanded, max_expanded);
+            *out_n_samples = 24000;
+            return (float*)calloc(24000, sizeof(float));
+        }
+    }
 
     if (ctx->params.verbosity >= 1) {
         fprintf(stderr, "tada: time_before values: [");
