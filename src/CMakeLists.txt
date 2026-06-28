@@ -254,6 +254,11 @@ if (CRISPASR_OPUS)
                 # Using `PkgConfig::OPUSFILE` was also populating compiler flags. So we append
                 # those separately now.
                 target_compile_options(crispasr-lib PRIVATE ${OPUSFILE_CFLAGS})
+                # The bare `-l` names above carry no search path, so on prefixes
+                # the linker doesn't scan by default (Homebrew /opt/homebrew/lib,
+                # MacPorts, custom roots) the link fails with "library 'opusfile'
+                # not found". Add pkg-config's library dirs so they resolve.
+                target_link_directories(crispasr-lib PRIVATE ${OPUSFILE_STATIC_LIBRARY_DIRS})
                 target_link_libraries(crispasr-lib PRIVATE ${OPUSFILE_STATIC_LIBRARIES})
                 set(_crispasr_opus_ok ON)
                 message(STATUS "CrispASR: .opus via system opusfile ${OPUSFILE_VERSION} (pkg-config)")
@@ -261,9 +266,13 @@ if (CRISPASR_OPUS)
         endif()
     endif()
 
-    if (NOT _crispasr_opus_ok)
-        # Static fallback. libogg + libopus ship upstream CMake; opusfile is
-        # autotools-only, so compile its (HTTP-free) core sources directly.
+    if (NOT _crispasr_opus_ok AND CRISPASR_OPUS_FETCH)
+        # Static fallback — ONLY when explicitly requested. opusfile is left
+        # unavailable (build proceeds without .opus) when it is neither found via
+        # pkg-config nor force-built via -DCRISPASR_OPUS_FETCH=ON, so a missing
+        # system opusfile never fails the build or triggers a surprise network
+        # fetch. libogg + libopus ship upstream CMake; opusfile is autotools-only,
+        # so compile its (HTTP-free) core sources directly.
         include(FetchContent)
         # Suppress Opus/Ogg test targets without clobbering the global
         # BUILD_TESTING that CTest relies on (include(CTest) runs later
