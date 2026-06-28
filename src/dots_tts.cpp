@@ -1085,8 +1085,8 @@ static void dots_penc_forward(dots_tts_context* ctx, const float* latent_patch, 
     ggml_backend_graph_compute(ctx->backend, gf);
 
     ggml_tensor* out = ggml_graph_get_tensor(gf, "penc_output");
-    int out_dim = (int)out->ne[0];
-    ggml_backend_tensor_get(out, out_embed, 0, out_dim * T * sizeof(float));
+    size_t out_bytes = ggml_nbytes(out);
+    ggml_backend_tensor_get(out, out_embed, 0, out_bytes);
 
     ggml_gallocr_free(galloc);
     ggml_free(ctx0);
@@ -1746,19 +1746,20 @@ float* dots_tts_synthesize(struct dots_tts_context* ctx, const char* text, int* 
 
         std::fprintf(stderr, "dots_tts: patch %d — penc forward (n_past=%d)...\n", patch_idx, penc_n_past);
         // PatchEncoder: encode this patch → LLM embedding for next step
-        std::vector<float> patch_embed(patch_size * llm_dim);
+        // Output has patch_size/2 frames (due to stride-2 downsample + concat)
+        int penc_out_frames = patch_size / 2;
+        if (penc_out_frames < 1)
+            penc_out_frames = 1;
+        std::vector<float> patch_embed(penc_out_frames * llm_dim);
         {
             dots_bench_stage b2("penc_forward");
             dots_penc_forward(ctx, patch_latent.data(), patch_size, penc_n_past, patch_embed.data());
             penc_n_past += patch_size;
         }
 
-        // Feed patch embedding back to LLM
-        // Take the last frame's embedding as the next LLM input
-        // (or average — need to match upstream)
+        // Feed patch embedding back to LLM — use last output frame
         std::vector<float> llm_input(llm_dim);
-        // Use last frame
-        std::memcpy(llm_input.data(), patch_embed.data() + (patch_size - 1) * llm_dim, llm_dim * sizeof(float));
+        std::memcpy(llm_input.data(), patch_embed.data() + (penc_out_frames - 1) * llm_dim, llm_dim * sizeof(float));
 
         // Check EOS (via eos_proj)
         // TODO: implement EOS detection via eos_proj MLP
