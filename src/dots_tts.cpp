@@ -277,6 +277,9 @@ struct dots_voc_resblock {
     // Each pair has a SnakeBeta activation before it (activations[0..5])
     ggml_tensor* act_alpha[6] = {};
     ggml_tensor* act_beta[6] = {};
+    // Alias-free resample filters per activation ([1,1,12] shared, broadcast).
+    ggml_tensor* act_up_filter[6] = {};
+    ggml_tensor* act_down_filter[6] = {};
     ggml_tensor* convs1_w[3] = {};
     ggml_tensor* convs1_b[3] = {};
     ggml_tensor* convs2_w[3] = {};
@@ -291,6 +294,10 @@ struct dots_vocoder {
     uint32_t n_stages = 6;
     std::vector<uint32_t> upsample_rates;  // [10, 6, 4, 2, 2, 2]
     std::vector<uint32_t> upsample_ksizes; // [20, 12, 8, 4, 4, 4]
+
+    // post_proj: Conv1d(128→128, k=1) applied BEFORE dec_mi_layer (pointwise).
+    ggml_tensor* post_proj_w = nullptr;
+    ggml_tensor* post_proj_b = nullptr;
 
     // MI layer (decoder side): Linear(128→512) → LSTM(512, 4 layers) → Linear(512→128)
     ggml_tensor* mi_in_w = nullptr; // dec_mi_layer.0
@@ -314,9 +321,11 @@ struct dots_vocoder {
     // 18 resblocks (3 per stage × 6 stages, kernel sizes cycle 3/7/11)
     dots_voc_resblock resblocks[18] = {};
 
-    // Post activation + conv
+    // Post activation + conv (post activation uses per-channel [24,1,12] filters)
     ggml_tensor* post_alpha = nullptr;
     ggml_tensor* post_beta = nullptr;
+    ggml_tensor* post_up_filter = nullptr;
+    ggml_tensor* post_down_filter = nullptr;
     ggml_tensor* post_conv_w = nullptr;
     // No post_conv_b (use_bias_at_final=false in config)
 
@@ -1398,22 +1407,32 @@ static void dots_flow_match(dots_tts_context* ctx, const float* llm_hidden, int 
 // ===========================================================================
 
 // ── Conv1d helper (channel-first: (C, T) in, (C_out, T_out) out) ────────────
-// Weight layout: (K, C_in, C_out) in ggml. Causal left-pad for dots.tts.
-static ggml_tensor* dots_conv1d(ggml_context* ctx, ggml_tensor* x, ggml_tensor* w, ggml_tensor* b, int dilation = 1) {
+// Weight layout: (K, C_in, C_out) in ggml. dots Conv1d: causal => full left-pad
+// dilation*(K-1); non-causal => symmetric pad dilation*(K-1)/2 (output T == in T).
+static ggml_tensor* dots_conv1d(ggml_context* ctx, ggml_tensor* x, ggml_tensor* w, ggml_tensor* b, int dilation = 1,
+                                bool causal = true) {
     int K = (int)w->ne[0];
-    int pad = (K - 1) * dilation; // causal: full left-pad
-    // Transpose to (T, C) for ggml_conv_1d
-    ggml_tensor* xT = ggml_cont(ctx, ggml_transpose(ctx, x)); // (T, C_in)
-    ggml_tensor* y = ggml_conv_1d(ctx, w, xT, /*stride*/ 1, pad, dilation);
     int Cout = (int)w->ne[2];
+    int T_in = (int)x->ne[1];
+    ggml_tensor* xT = ggml_cont(ctx, ggml_transpose(ctx, x)); // (T, C_in)
+    if (causal) {
+        int pad = (K - 1) * dilation; // full left-pad, then crop right
+        ggml_tensor* y = ggml_conv_1d(ctx, w, xT, /*stride*/ 1, pad, dilation);
+        int Tout = (int)y->ne[0];
+        y = ggml_reshape_2d(ctx, y, Tout, Cout);
+        if (Tout > T_in) {
+            y = ggml_view_2d(ctx, y, T_in, Cout, y->nb[1], 0); // keep first T_in
+            y = ggml_cont(ctx, y);
+        }
+        y = ggml_cont(ctx, ggml_transpose(ctx, y)); // (Cout, T_out)
+        if (b)
+            y = ggml_add(ctx, y, b);
+        return y;
+    }
+    int pad = dilation * (K - 1) / 2; // symmetric
+    ggml_tensor* y = ggml_conv_1d(ctx, w, xT, /*stride*/ 1, pad, dilation);
     int Tout = (int)y->ne[0];
     y = ggml_reshape_2d(ctx, y, Tout, Cout);
-    // Causal: trim right to keep output T == input T
-    int T_in = (int)x->ne[1];
-    if (Tout > T_in) {
-        y = ggml_view_2d(ctx, y, T_in, Cout, y->nb[1], 0);
-        y = ggml_cont(ctx, y);
-    }
     y = ggml_cont(ctx, ggml_transpose(ctx, y)); // (Cout, T_out)
     if (b)
         y = ggml_add(ctx, y, b);
@@ -1421,20 +1440,20 @@ static ggml_tensor* dots_conv1d(ggml_context* ctx, ggml_tensor* x, ggml_tensor* 
 }
 
 // ── ConvTranspose1d (upsample) ──────────────────────────────────────────────
-// Weight: (K, C_out, C_in). Stride = upsample rate. Symmetric padding.
+// Weight: (K, C_out, C_in). Stride = upsample rate. dots causal ConvTranspose1d
+// (k == 2*stride, padding 0): raw output length stride*(T+1); the causal forward
+// drops the LAST `stride` samples → keep first stride*T.
 static ggml_tensor* dots_convt1d(ggml_context* ctx, ggml_tensor* x, ggml_tensor* w, ggml_tensor* b, int stride) {
-    int K = (int)w->ne[0];
     int Cout = (int)w->ne[1];
-    int pad = (K - stride) / 2; // symmetric padding
+    int T_in = (int)x->ne[1];
 
     ggml_tensor* xT = ggml_cont(ctx, ggml_transpose(ctx, x));          // (T, Cin)
-    ggml_tensor* y = ggml_conv_transpose_1d(ctx, w, xT, stride, 0, 1); // (T_raw, Cout, 1, 1)
+    ggml_tensor* y = ggml_conv_transpose_1d(ctx, w, xT, stride, 0, 1); // (T_raw, Cout)
     int T_raw = (int)y->ne[0];
     y = ggml_reshape_2d(ctx, y, T_raw, Cout);
-    // Trim symmetric padding
-    int T_out = T_raw - 2 * pad;
-    if (pad > 0 && T_out > 0) {
-        y = ggml_view_2d(ctx, y, T_out, Cout, (size_t)T_raw * sizeof(float), (size_t)pad * sizeof(float));
+    int T_out = stride * T_in; // causal: keep first stride*T (drop last `stride`)
+    if (T_raw > T_out) {
+        y = ggml_view_2d(ctx, y, T_out, Cout, (size_t)T_raw * sizeof(float), 0); // keep first T_out
         y = ggml_cont(ctx, y);
     }
     y = ggml_cont(ctx, ggml_transpose(ctx, y)); // (Cout, T_out)
@@ -1754,6 +1773,10 @@ int dots_tts_set_vocoder_path(struct dots_tts_context* ctx, const char* path) {
     // ── Map tensors to vocoder struct ──
     auto VT = [&](const char* name) -> ggml_tensor* { return ggml_get_tensor(voc.ctx_w, name); };
 
+    // post_proj (pointwise Conv1d, applied before the MI layer)
+    voc.post_proj_w = VT("dots.voc.post_proj.weight");
+    voc.post_proj_b = VT("dots.voc.post_proj.bias");
+
     // MI layer (decoder side)
     voc.mi_in_w = VT("dots.voc.dec_mi_layer.0.weight");
     voc.mi_in_b = VT("dots.voc.dec_mi_layer.0.bias");
@@ -1788,12 +1811,17 @@ int dots_tts_set_vocoder_path(struct dots_tts_context* ctx, const char* path) {
     for (int rb = 0; rb < 18; rb++) {
         auto& R = voc.resblocks[rb];
         char buf[128];
-        // 6 activations (SnakeBeta alpha/beta pairs)
+        // 6 activations (SnakeBeta alpha/beta pairs + alias-free filters)
         for (int a = 0; a < 6; a++) {
             std::snprintf(buf, sizeof(buf), "dots.voc.decoder.resblocks.%d.activations.%d.act.alpha", rb, a);
             R.act_alpha[a] = VT(buf);
             std::snprintf(buf, sizeof(buf), "dots.voc.decoder.resblocks.%d.activations.%d.act.beta", rb, a);
             R.act_beta[a] = VT(buf);
+            std::snprintf(buf, sizeof(buf), "dots.voc.decoder.resblocks.%d.activations.%d.upsample.filter", rb, a);
+            R.act_up_filter[a] = VT(buf);
+            std::snprintf(buf, sizeof(buf), "dots.voc.decoder.resblocks.%d.activations.%d.downsample.lowpass.filter",
+                          rb, a);
+            R.act_down_filter[a] = VT(buf);
         }
         // 3 conv pairs
         for (int c = 0; c < 3; c++) {
@@ -1811,6 +1839,8 @@ int dots_tts_set_vocoder_path(struct dots_tts_context* ctx, const char* path) {
     // Post activation + conv
     voc.post_alpha = VT("dots.voc.decoder.activation_post.act.alpha");
     voc.post_beta = VT("dots.voc.decoder.activation_post.act.beta");
+    voc.post_up_filter = VT("dots.voc.decoder.activation_post.upsample.filter");
+    voc.post_down_filter = VT("dots.voc.decoder.activation_post.downsample.lowpass.filter");
     voc.post_conv_w = VT("dots.voc.decoder.conv_post.weight");
 
     ctx->has_vocoder = true;
@@ -2270,4 +2300,163 @@ extern "C" int dots_tts_dit_diff(const char* model_gguf, const char* ref_gguf, i
 
     dots_tts_free(ctx);
     return cos > 0.999 ? 0 : 1;
+}
+
+// ── Diff-harness: validate the BigVGAN vocoder front-end ────────────────────
+// Reference (dots-tts-voc) carries voc_latent_in / voc_mi_out / voc_conv_pre /
+// voc_audio. model_gguf is the VOCODER GGUF (not the core). Validates the
+// non-anti-aliased front-end (post_proj → dec_mi LSTM → conv_pre) stage-by-
+// stage; the alias-free resblock path / final audio is reported but not gated.
+extern "C" int dots_tts_vocoder_diff(const char* voc_gguf, const char* ref_gguf, int verbosity) {
+    auto* ctx = new dots_tts_context();
+    ctx->backend_cpu = ggml_backend_cpu_init();
+    ctx->backend = ctx->backend_cpu;
+    ctx->params = dots_tts_context_default_params();
+    ctx->params.verbosity = verbosity;
+    if (dots_tts_set_vocoder_path(ctx, voc_gguf) != 0) {
+        std::fprintf(stderr, "dots_voc_diff: failed to load vocoder %s\n", voc_gguf);
+        dots_tts_free(ctx);
+        return 2;
+    }
+    auto& voc = ctx->voc;
+
+    core_gguf::WeightLoad rw;
+    if (!core_gguf::load_weights(ref_gguf, ctx->backend, "ref", rw)) {
+        std::fprintf(stderr, "dots_voc_diff: failed to load reference %s\n", ref_gguf);
+        dots_tts_free(ctx);
+        return 2;
+    }
+    ggml_tensor* t_in = ggml_get_tensor(rw.ctx, "voc_latent_in");
+    ggml_tensor* t_post = ggml_get_tensor(rw.ctx, "voc_post_proj");
+    ggml_tensor* t_mi = ggml_get_tensor(rw.ctx, "voc_mi_out");
+    ggml_tensor* t_cp = ggml_get_tensor(rw.ctx, "voc_conv_pre");
+    ggml_tensor* t_audio = ggml_get_tensor(rw.ctx, "voc_audio");
+    if (!t_in || !t_mi || !t_cp) {
+        std::fprintf(stderr, "dots_voc_diff: reference missing voc_* tensors\n");
+        dots_tts_free(ctx);
+        return 2;
+    }
+    const int latent_dim = (int)t_in->ne[0];
+    const int n_frames = (int)t_in->ne[1];
+    std::vector<float> latent_in((size_t)latent_dim * n_frames);
+    ggml_backend_tensor_get(t_in, latent_in.data(), 0, latent_in.size() * sizeof(float));
+
+    auto cosmax = [](const std::vector<float>& a, const std::vector<float>& b, double& cos, double& maxabs) {
+        double dot = 0, na = 0, nb = 0;
+        maxabs = 0;
+        size_t n = std::min(a.size(), b.size());
+        for (size_t i = 0; i < n; i++) {
+            dot += (double)a[i] * b[i];
+            na += (double)a[i] * a[i];
+            nb += (double)b[i] * b[i];
+            double d = std::fabs((double)a[i] - b[i]);
+            if (d > maxabs)
+                maxabs = d;
+        }
+        cos = (na > 0 && nb > 0) ? dot / (std::sqrt(na) * std::sqrt(nb)) : 0.0;
+    };
+
+    // ── Front-end graph: post_proj → dec_mi (LSTM) → conv_pre ──
+    size_t n_tensors = 4096;
+    ggml_init_params ip = {n_tensors * ggml_tensor_overhead() + ggml_graph_overhead(), nullptr, true};
+    ggml_context* ctx0 = ggml_init(ip);
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, n_tensors, false);
+
+    ggml_tensor* x = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, latent_dim, n_frames);
+    ggml_set_name(x, "voc_in");
+    ggml_set_input(x);
+
+    // post_proj (Conv1d k=1, non-causal — k=1 so padding is moot)
+    ggml_tensor* h = dots_conv1d(ctx0, x, voc.post_proj_w, voc.post_proj_b, 1, /*causal=*/false);
+    ggml_tensor* post_only = h;
+    ggml_set_name(post_only, "post_only");
+    ggml_set_output(post_only);
+    // dec_mi_layer: Linear(128→512) → SLSTM[4-layer LSTM(512) + skip] → Linear(512→128)
+    h = ggml_mul_mat(ctx0, voc.mi_in_w, h);
+    if (voc.mi_in_b)
+        h = ggml_add(ctx0, h, voc.mi_in_b);
+    ggml_tensor* lstm_in = h; // SLSTM skip residual is the LSTM *input*
+    for (int li = 0; li < 4; li++) {
+        if (!voc.lstm_w_ih[li])
+            break;
+        h = core_lstm::lstm_unidir(ctx0, gf, h, voc.lstm_w_ih[li], voc.lstm_w_hh[li], voc.lstm_b_ih[li],
+                                   voc.lstm_b_hh[li], 512, /*reverse=*/false);
+    }
+    h = ggml_add(ctx0, h, lstm_in); // SLSTM skip: y = LSTM(x) + x
+    h = ggml_mul_mat(ctx0, voc.mi_out_w, h);
+    if (voc.mi_out_b)
+        h = ggml_add(ctx0, h, voc.mi_out_b);
+    ggml_tensor* mi_out = h;
+    ggml_set_name(mi_out, "mi_out");
+    ggml_set_output(mi_out);
+    // conv_pre (non-causal, symmetric pad 2)
+    ggml_tensor* cp = dots_conv1d(ctx0, h, voc.conv_pre_w, voc.conv_pre_b, 1, /*causal=*/false);
+    ggml_set_name(cp, "conv_pre");
+    ggml_set_output(cp);
+    ggml_build_forward_expand(gf, cp);
+
+    ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(ctx->backend));
+    ggml_gallocr_alloc_graph(galloc, gf);
+    ggml_backend_tensor_set(x, latent_in.data(), 0, latent_in.size() * sizeof(float));
+    ggml_backend_graph_compute(ctx->backend, gf);
+
+    int rc = 0;
+    if (t_post) {
+        ggml_tensor* o = ggml_graph_get_tensor(gf, "post_only");
+        std::vector<float> got((size_t)ggml_nelements(o));
+        ggml_backend_tensor_get(o, got.data(), 0, got.size() * sizeof(float));
+        std::vector<float> ref((size_t)ggml_nelements(t_post));
+        ggml_backend_tensor_get(t_post, ref.data(), 0, ref.size() * sizeof(float));
+        double cos, mx;
+        cosmax(got, ref, cos, mx);
+        std::printf("dots-tts voc post_proj:    n=%zu  cos=%.6f  max_abs=%.6f  %s\n", got.size(), cos, mx,
+                    cos > 0.999 ? "PASS" : "FAIL");
+    }
+    {
+        ggml_tensor* o = ggml_graph_get_tensor(gf, "mi_out");
+        std::vector<float> got((size_t)ggml_nelements(o));
+        ggml_backend_tensor_get(o, got.data(), 0, got.size() * sizeof(float));
+        std::vector<float> ref((size_t)ggml_nelements(t_mi));
+        ggml_backend_tensor_get(t_mi, ref.data(), 0, ref.size() * sizeof(float));
+        double cos, mx;
+        cosmax(got, ref, cos, mx);
+        std::printf("dots-tts voc post_proj+mi: n=%zu  cos=%.6f  max_abs=%.6f  %s\n", got.size(), cos, mx,
+                    cos > 0.999 ? "PASS" : "FAIL");
+        if (cos <= 0.999)
+            rc = 1;
+    }
+    {
+        ggml_tensor* o = ggml_graph_get_tensor(gf, "conv_pre");
+        std::vector<float> got((size_t)ggml_nelements(o));
+        ggml_backend_tensor_get(o, got.data(), 0, got.size() * sizeof(float));
+        std::vector<float> ref((size_t)ggml_nelements(t_cp));
+        ggml_backend_tensor_get(t_cp, ref.data(), 0, ref.size() * sizeof(float));
+        double cos, mx;
+        cosmax(got, ref, cos, mx);
+        std::printf("dots-tts voc conv_pre:     n=%zu  cos=%.6f  max_abs=%.6f  %s\n", got.size(), cos, mx,
+                    cos > 0.999 ? "PASS" : "FAIL");
+        if (cos <= 0.999)
+            rc = 1;
+    }
+    ggml_gallocr_free(galloc);
+    ggml_free(ctx0);
+
+    // ── Full decode (audio) — reported only; alias-free path still WIP ──
+    if (t_audio) {
+        int n_out = 0;
+        float* pcm = dots_vocoder_decode(ctx, latent_in.data(), n_frames, &n_out);
+        if (pcm) {
+            std::vector<float> got(pcm, pcm + n_out);
+            std::vector<float> ref((size_t)ggml_nelements(t_audio));
+            ggml_backend_tensor_get(t_audio, ref.data(), 0, ref.size() * sizeof(float));
+            double cos, mx;
+            cosmax(got, ref, cos, mx);
+            std::printf("dots-tts voc audio[full]:  got=%d ref=%zu  cos=%.6f  max_abs=%.6f  %s\n", n_out, ref.size(),
+                        cos, mx, cos > 0.99 ? "PASS" : "(WIP alias-free)");
+            std::free(pcm);
+        }
+    }
+
+    dots_tts_free(ctx);
+    return rc;
 }

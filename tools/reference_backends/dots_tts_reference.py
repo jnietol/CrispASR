@@ -55,6 +55,11 @@ DEFAULT_STAGES = [
     "fm_noise",
     "fm_latent_out",
     "fm_meta",
+    "voc_latent_in",
+    "voc_post_proj",
+    "voc_mi_out",
+    "voc_conv_pre",
+    "voc_audio",
 ]
 
 
@@ -353,6 +358,63 @@ def _dump_flowmatch(model_dir: Path, seed: int) -> Dict[str, np.ndarray]:
     }
 
 
+def _dump_vocoder(model_dir: Path, seed: int) -> Dict[str, np.ndarray]:
+    """Isolated BigVGAN vocoder reference (AudioVAE.inference_from_latents).
+
+    Loads only the vocoder, removes weight-norm (checkpoint decoder is folded),
+    runs the do_sample=False TTS path on a short seeded latent, and captures
+    intermediate stages so the non-anti-aliased parts (post_proj, dec_mi LSTM,
+    conv_pre) can be validated independently of the alias-free resampling.
+    """
+    import torch
+    from safetensors import safe_open
+    from dots_tts.modules.vocoder.bigvgan import AudioVAE
+
+    torch.set_num_threads(2)
+    torch.set_grad_enabled(False)
+
+    cj = json.loads((model_dir / "config.json").read_text())
+    vcfg = _Cfg(cj["vocoder"])
+    latent_dim = int(vcfg["latent_dim"])
+
+    vae = AudioVAE(vcfg)
+    vae.remove_weight_norm()  # checkpoint decoder weights are weight-norm-folded
+    st_path = model_dir / "vocoder.safetensors"
+    with safe_open(str(st_path), framework="pt") as f:
+        sd = {(k[len("vocoder."):] if k.startswith("vocoder.") else k): f.get_tensor(k).float()
+              for k in f.keys()}
+    missing, unexpected = vae.load_state_dict(sd, strict=False)
+    # audio_encoder is unused here; only decoder/mi/post_proj must be present.
+    crit = [m for m in missing if m.startswith(("decoder.", "dec_mi_layer.", "post_proj."))]
+    if crit:
+        print(f"[dots-ref/voc] WARNING missing critical: {crit[:6]}")
+    vae.eval().float()
+
+    g = torch.Generator().manual_seed(seed)
+    n_frames = 4
+    latent = torch.randn(1, n_frames, latent_dim, generator=g, dtype=torch.float32)
+    x_in = latent.transpose(1, 2).contiguous()  # (1, latent_dim, n_frames)
+
+    caps: Dict[str, torch.Tensor] = {}
+    vae.post_proj.register_forward_hook(lambda m, i, o: caps.__setitem__("post", o.detach()))
+    vae.dec_mi_layer.register_forward_hook(lambda m, i, o: caps.__setitem__("mi", o.detach()))
+    vae.decoder.conv_pre.register_forward_hook(lambda m, i, o: caps.__setitem__("convpre", o.detach()))
+
+    audio = vae.inference_from_latents(x_in, do_sample=False)  # (1, 1, n_samples)
+
+    print(f"[dots-ref/voc] n_frames={n_frames} audio={tuple(audio.shape)} "
+          f"missing={len(missing)} unexpected={len(unexpected)}")
+    # Dump sequence-first (T, C) to match the penc/dit/fm GGUF convention
+    # (numpy (T,C) -> ggml ne=(C,T), read directly as channel-first in C++).
+    return {
+        "voc_latent_in": _npf(x_in[0].transpose(0, 1)),   # (n_frames, latent_dim)
+        "voc_post_proj": _npf(caps["post"][0].transpose(0, 1)),    # (n_frames, latent_dim)
+        "voc_mi_out": _npf(caps["mi"][0]),                # already (n_frames, latent_dim)
+        "voc_conv_pre": _npf(caps["convpre"][0].transpose(0, 1)),  # (n_frames, initial_ch)
+        "voc_audio": _npf(audio[0, 0]),                   # (n_samples,)
+    }
+
+
 def dump(
     model_dir: "Path | str | None" = None,
     audio: np.ndarray | None = None,
@@ -382,11 +444,13 @@ def dump(
         results.update(_dump_dit(model_dir, seed))
     if any(s.startswith("fm_") for s in stages):
         results.update(_dump_flowmatch(model_dir, seed))
+    if any(s.startswith("voc_") for s in stages):
+        results.update(_dump_vocoder(model_dir, seed))
 
-    # Keep only requested stages (plus the always-present penc/dit/fm tensors).
+    # Keep only requested stages (plus the always-present penc/dit/fm/voc tensors).
     out = {k: np.ascontiguousarray(v.astype(np.float32))
            for k, v in results.items()
            if k in stages or k.startswith("penc_") or k.startswith("dit_")
-           or k.startswith("fm_")}
+           or k.startswith("fm_") or k.startswith("voc_")}
     print(f"[dots-ref] returning {len(out)} tensors: {sorted(out)}")
     return out

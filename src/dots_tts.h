@@ -88,6 +88,11 @@ int dots_tts_dit_diff(const char* model_gguf, const char* ref_gguf, int verbosit
 // fm_latent_out / fm_meta. Prints cosine/max_abs; returns 0 on PASS.
 int dots_tts_flowmatch_diff(const char* model_gguf, const char* ref_gguf, int verbosity);
 
+// Diff-harness entry: validate the BigVGAN vocoder. voc_gguf is the VOCODER
+// GGUF; ref carries voc_latent_in / voc_mi_out / voc_conv_pre / voc_audio.
+// Validates the post_proj → dec_mi LSTM → conv_pre front-end; returns 0 on PASS.
+int dots_tts_vocoder_diff(const char* voc_gguf, const char* ref_gguf, int verbosity);
+
 #ifdef __cplusplus
 }
 #endif
