@@ -524,6 +524,32 @@ stripped in the output cleanup.
   step (~0.45 ms vs ~120 ms compute) — decode is fully compute-bound on the 3B
   forward, so a step-graph cache would save noise. Real decode speedups must come
   from the matmuls (quant/threads/GPU), not graph reuse.
+### higgs-stt
+
+[`bosonai/higgs-audio-v3-stt`](https://huggingface.co/bosonai/higgs-audio-v3-stt):
+Whisper-large-v3 audio encoder → depthwise-temporal-conv projector →
+Qwen3-1.7B-Base decoder. A `<|AUDIO|>` placeholder in a ChatML prompt
+(`Transcribe the speech. Output only the spoken words in lowercase with no
+punctuation.`) is replaced by the projected audio embeddings; the LLM greedily
+decodes the transcript, then a `<think>…</think>` strip + n-gram-loop collapse
+(`ngram_loop_fix.py`) clean it up.
+
+**Chunked encoder (the load-bearing detail).** The model does *not* encode the
+clip as one padded 30 s Whisper window. It splits the waveform into
+`chunk_size_seconds` (4 s = 64000-sample) chunks — at inference `vad_cut`
+degenerates to a fixed `ceil(total / 64000)` split, last chunk = remainder —
+and encodes **each chunk independently** (chunk-local `embed_positions[:T_enc]`,
+within-chunk attention) through the Whisper tower + AvgPool + projector, then
+**concatenates** the per-chunk audio embeds. Encoding one global window
+corrupts the conditioning (every valid frame attends to ~1900 silence-pad
+frames) and derails the decoder mid-sentence. Each chunk is encoded at its true
+length — the per-chunk GlobalClipMax norm is dominated by speech, so this
+matches the reference's zero-padded+masked chunk for the valid frames, and the
+valid token count `(((L-1)/2+1 - 2)/2+1 - 1)/2+1` (conv2 s2 → avgpool s2 →
+temporal-conv s2) falls out exactly. The backend declares `CAP_INTERNAL_CHUNKING`
+so the whole clip decodes in a single AR pass (no CLI window-splitting); the
+tied `token_embd`/`output` lm_head stays F16 in every quant. Validated verbatim
+against `transcribe.py` (bf16) on jfk and a 45 s / 12-chunk clip.
 
 ### moss-audio
 

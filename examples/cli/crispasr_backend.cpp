@@ -233,6 +233,7 @@ std::vector<std::string> crispasr_list_backends() {
         "qwen3",
         "qwen3-1.7b",
         "mega-asr",
+        "higgs-stt",
         "fastconformer-ctc",
         "wav2vec2",
         "hubert",

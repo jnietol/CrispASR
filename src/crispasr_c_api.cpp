@@ -2957,6 +2957,9 @@ CA_EXPORT int crispasr_session_available_backends(char* out_csv, int out_cap) {
 #ifdef CA_HAVE_QWEN3
     list += ",qwen3";
 #endif
+#ifdef CA_HAVE_HIGGS_STT
+    list += ",higgs-stt";
+#endif
 #ifdef CA_HAVE_COHERE
     list += ",cohere";
 #endif
