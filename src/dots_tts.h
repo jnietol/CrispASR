@@ -33,12 +33,13 @@ struct dots_tts_context_params {
     int n_threads;
     int verbosity; // 0=silent, 1=normal, 2=verbose
     bool use_gpu;
-    float temperature; // sampling temperature for LLM decode (0 = greedy)
-    uint64_t seed;     // RNG seed (0 = default 42)
-    int max_patches;   // max audio patches to generate; 0 = default (256 ≈ 40s)
-    int ode_steps;     // flow-matching ODE steps; 0 = default (16)
-    float cfg_scale;   // classifier-free guidance scale; 0 = default (3.0)
-    bool flash_attn;   // flash attention for LLM/PatchEncoder
+    float temperature;   // sampling temperature for LLM decode (0 = greedy)
+    uint64_t seed;       // RNG seed (0 = default 42)
+    int max_patches;     // max audio patches to generate; 0 = default (256 ≈ 40s)
+    int ode_steps;       // flow-matching ODE steps; 0 = default (16)
+    float cfg_scale;     // classifier-free guidance scale; 0 = default (3.0)
+    float eos_threshold; // stop when eos_proj stop-prob exceeds this; 0 = default (0.8)
+    bool flash_attn;     // flash attention for LLM/PatchEncoder
 };
 
 struct dots_tts_context_params dots_tts_context_default_params(void);

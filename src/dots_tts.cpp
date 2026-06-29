@@ -689,18 +689,30 @@ static bool dots_load_core(dots_tts_context* ctx, const char* path, int verbosit
     p.eos_proj_1_w = T("dots.eos_proj.2.weight");
     p.eos_proj_1_b = T("dots.eos_proj.2.bias");
 
-    // Latent stats
+    // Latent stats. The converter stores variance under `dots.latent_stats.var`
+    // (matching IOHelper, which keeps global_var and uses std = sqrt(var) at
+    // denormalize time). Accept a legacy `.std` tensor too. Without this, std
+    // stays empty and latents are never denormalized → vocoder garbage.
     {
         ggml_tensor* lm = T("dots.latent_stats.mean");
+        ggml_tensor* lv = T("dots.latent_stats.var");
         ggml_tensor* ls = T("dots.latent_stats.std");
-        if (lm && ls) {
+        if (lm && (lv || ls)) {
             int n = (int)ggml_nelements(lm);
             ctx->latent_stats.mean.resize(n);
             ctx->latent_stats.std.resize(n);
             ggml_backend_tensor_get(lm, ctx->latent_stats.mean.data(), 0, n * sizeof(float));
-            ggml_backend_tensor_get(ls, ctx->latent_stats.std.data(), 0, n * sizeof(float));
+            if (ls) {
+                ggml_backend_tensor_get(ls, ctx->latent_stats.std.data(), 0, n * sizeof(float));
+            } else {
+                ggml_backend_tensor_get(lv, ctx->latent_stats.std.data(), 0, n * sizeof(float));
+                for (auto& v : ctx->latent_stats.std)
+                    v = std::sqrt(v);
+            }
             if (verbosity >= 2)
-                std::fprintf(stderr, "dots_tts: latent_stats loaded (%d dims)\n", n);
+                std::fprintf(stderr, "dots_tts: latent_stats loaded (%d dims, %s)\n", n, ls ? "std" : "var→std");
+        } else if (verbosity >= 1) {
+            std::fprintf(stderr, "dots_tts: WARNING no latent_stats — latents will NOT be denormalized\n");
         }
     }
 
@@ -1099,21 +1111,27 @@ static void dots_dit_forward(dots_tts_context* ctx, const float* fm_seq, int fm_
 //   4. concat the out_ds_rate tokens -> (hidden*out_ds_rate)
 //   5. out_proj (Linear + bias)                    -> (out_dim, 1)
 //
-// PATCH-0 ONLY: conv_tail and the encoder KV history are zero/empty here, so
-// the stride-2 causal conv == symmetric pad=1 conv cropped to out_ds_rate, and
-// attention is plain causal self-attention over the new tokens. Multi-patch
-// (n_past>0) needs the persisted conv_tail + per-layer KV cache — TODO.
-static void dots_penc_forward(dots_tts_context* ctx, const float* latent_patch, int n_frames, int n_past,
-                              float* out_embed) {
+// MULTI-PATCH via full causal recompute. The reference streams one patch at a
+// time with a persisted conv_tail (1 latent frame) + per-layer causal KV cache.
+// Because the PatchEncoder uses NO RoPE (position-independent attention) and the
+// stride-2 causal downsample window boundaries are identical whether streamed or
+// run over the whole sequence at once, running the full causal encoder over ALL
+// accumulated latents and grouping the encoder tokens is mathematically IDENTICAL
+// to the incremental decode_patch loop. So this takes the entire latent history
+// (in_dim, n_frames) [n_frames a multiple of patch_size] and emits one LLM
+// embedding (out_dim) per patch -> out_embeds is (n_patches, out_dim). The caller
+// (AR loop) uses only the last; the diff harness checks all. The symmetric pad=1
+// + crop reproduces the causal left_padding=1 conv exactly (window 0 = [pad,f0]).
+static void dots_penc_forward(dots_tts_context* ctx, const float* latents, int n_frames, float* out_embeds) {
     auto& pe = ctx->penc;
-    const int in_dim = (int)pe.input_dim; // 128
-    const int H = (int)pe.hidden_size;    // 1024
-    const int nh = (int)pe.n_heads;       // 16
-    const int hd = (int)pe.head_dim;      // 64
-    const int T_in = n_frames;            // patch frames (4)
-    const int T = T_in / 2;               // out_ds_rate tokens after stride-2 ds
-    if (n_past != 0 && dots_debug_enabled())
-        std::fprintf(stderr, "dots_tts: penc n_past=%d (cross-patch KV not wired)\n", n_past);
+    const int in_dim = (int)pe.input_dim;        // 128
+    const int H = (int)pe.hidden_size;           // 1024
+    const int nh = (int)pe.n_heads;              // 16
+    const int hd = (int)pe.head_dim;             // 64
+    const int T_in = n_frames;                   // all accumulated latent frames
+    const int T = T_in / 2;                      // encoder tokens after stride-2 ds
+    const int out_ds_rate = ctx->patch_size / 2; // encoder tokens grouped per LLM embed
+    const int n_groups = T / out_ds_rate;        // == n_frames / patch_size patches
 
     size_t n_tensors = pe.n_layers * 64 + 256;
     size_t ctx_size = n_tensors * ggml_tensor_overhead() + ggml_graph_overhead();
@@ -1190,12 +1208,15 @@ static void dots_penc_forward(dots_tts_context* ctx, const float* latent_patch, 
         cur = ggml_add(ctx0, residual, h);
     }
 
-    // ── 4. concat the T tokens: (H, T) -> (H*T, 1)  [token0 | token1 | ...]
+    // ── 4. group consecutive out_ds_rate tokens: (H, T) -> (H*out_ds_rate,
+    //        n_groups). Memory is [tok0(H) | tok1(H) | ...] so a reshape places
+    //        consecutive token pairs side-by-side per column (== rearrange
+    //        "(s d) h -> s (d h)", d=out_ds_rate).
     cur = ggml_cont(ctx0, cur);
-    cur = ggml_reshape_2d(ctx0, cur, H * T, 1);
+    cur = ggml_reshape_2d(ctx0, cur, H * out_ds_rate, n_groups);
 
     // ── 5. out_proj (Linear H*out_ds_rate -> out_dim) + bias
-    cur = ggml_mul_mat(ctx0, pe.out_proj, cur); // (out_dim, 1)
+    cur = ggml_mul_mat(ctx0, pe.out_proj, cur); // (out_dim, n_groups)
     if (pe.out_proj_b)
         cur = ggml_add(ctx0, cur, pe.out_proj_b);
 
@@ -1206,7 +1227,7 @@ static void dots_penc_forward(dots_tts_context* ctx, const float* latent_patch, 
     ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(ctx->backend));
     ggml_gallocr_alloc_graph(galloc, gf);
 
-    ggml_backend_tensor_set(x, latent_patch, 0, (size_t)in_dim * T_in * sizeof(float));
+    ggml_backend_tensor_set(x, latents, 0, (size_t)in_dim * T_in * sizeof(float));
 
     // Causal mask: query q attends to keys k<=q. Layout (Tk, Tq): elem(k,q).
     std::vector<float> mask_data((size_t)T * T, 0.0f);
@@ -1218,7 +1239,7 @@ static void dots_penc_forward(dots_tts_context* ctx, const float* latent_patch, 
     ggml_backend_graph_compute(ctx->backend, gf);
 
     ggml_tensor* out = ggml_graph_get_tensor(gf, "penc_output");
-    ggml_backend_tensor_get(out, out_embed, 0, ggml_nbytes(out));
+    ggml_backend_tensor_get(out, out_embeds, 0, ggml_nbytes(out));
 
     ggml_gallocr_free(galloc);
     ggml_free(ctx0);
@@ -1310,99 +1331,21 @@ static void dots_flow_match_core(dots_tts_context* ctx, const float* input_seq, 
     std::memcpy(out_latent, z.data(), n_latent * sizeof(float));
 }
 
-// Runtime wrapper: build the FM sequence from accumulated LLM hidden history +
-// previous latents, run the ODE, denormalize. Currently single-hidden-token
-// (hidden_patch_size=1) with optional prior latent history.
-static void dots_flow_match(dots_tts_context* ctx, const float* llm_hidden, int n_hidden_tokens,
-                            const float* spk_emb, // 512-d or nullptr (g_cond TODO)
-                            float* out_latent,    // (patch_size, latent_dim)
-                            const float* prev_latents, int n_prev_patches) {
-    (void)spk_emb;
-    const int dit_dim = (int)ctx->dit.hidden_size;
-    const int llm_dim = (int)ctx->llm.hidden_size;
-    const int latent_dim = ctx->latent_dim;
-    const int patch_size = ctx->patch_size;
+// EOS predictor (core.eos_proj): Linear(llm_dim→llm_dim) → SiLU → Linear(→2).
+// Returns the stop probability = softmax(logits)[1] (reference
+// _should_stop_after_current_audio: eos_proj(h).softmax(-1)[..., 1] > threshold).
+static float dots_eos_prob(dots_tts_context* ctx, const float* llm_hidden) {
     auto& p = ctx->proj;
-
-    int ode_steps = ctx->params.ode_steps > 0 ? ctx->params.ode_steps : 16;
-    float cfg_scale = ctx->params.cfg_scale > 0.0f ? ctx->params.cfg_scale : 3.0f;
-
-    // History layout (hidden_patch_size=1): per prior patch a hidden slot then
-    // patch_size latent slots; the current hidden slot precedes the noise block.
-    int hist_hidden = n_hidden_tokens;                                // current hidden token(s)
-    int fm_seq_len = n_prev_patches * (1 + patch_size) + hist_hidden; // filled history length
-    int fm_total_len = fm_seq_len + patch_size;                       // + trailing noise slots
-    int latent_start = fm_seq_len;
-
-    std::vector<float> seq_c((size_t)fm_total_len * dit_dim, 0.0f);
-    std::vector<float> seq_u((size_t)fm_total_len * dit_dim, 0.0f);
-
-    // hidden_proj(current hidden) for cond; hidden_proj(0) for uncond.
-    std::vector<float> h_proj =
-        dots_linear(ctx, p.hidden_proj_w, p.hidden_proj_b, llm_hidden, hist_hidden, llm_dim, dit_dim);
-    std::vector<float> zero_hidden((size_t)hist_hidden * llm_dim, 0.0f);
-    std::vector<float> h_null =
-        dots_linear(ctx, p.hidden_proj_w, p.hidden_proj_b, zero_hidden.data(), hist_hidden, llm_dim, dit_dim);
-    int cur_hidden_off = (fm_seq_len - hist_hidden) * dit_dim;
-    std::memcpy(seq_c.data() + cur_hidden_off, h_proj.data(), (size_t)hist_hidden * dit_dim * sizeof(float));
-    std::memcpy(seq_u.data() + cur_hidden_off, h_null.data(), (size_t)hist_hidden * dit_dim * sizeof(float));
-
-    // latent_proj(prev_latents) — identical in both branches.
-    if (n_prev_patches > 0 && prev_latents) {
-        for (int pp = 0; pp < n_prev_patches; pp++) {
-            std::vector<float> lp =
-                dots_linear(ctx, p.latent_proj_w, p.latent_proj_b, prev_latents + (size_t)pp * patch_size * latent_dim,
-                            patch_size, latent_dim, dit_dim);
-            int off = (pp * (1 + patch_size) + 1) * dit_dim;
-            std::memcpy(seq_c.data() + off, lp.data(), (size_t)patch_size * dit_dim * sizeof(float));
-            std::memcpy(seq_u.data() + off, lp.data(), (size_t)patch_size * dit_dim * sizeof(float));
-        }
-    }
-
-    // Block-causal FM attention mask + position ids (model._build_fm_*).
-    std::vector<float> mask((size_t)fm_total_len * fm_total_len, -INFINITY);
-    std::vector<int32_t> pos(fm_total_len, 0);
-    {
-        auto set_attend = [&](int q, int k) { mask[(size_t)q * fm_total_len + k] = 0.0f; };
-        int block_start = fm_seq_len - hist_hidden; // current hidden block start
-        for (int q = 0; q < block_start; q++)       // causal over prior history
-            for (int k = 0; k <= q; k++)
-                set_attend(q, k);
-        for (int q = block_start; q < fm_seq_len; q++) { // current hidden attends history + latent
-            for (int k = 0; k < fm_seq_len; k++)
-                set_attend(q, k);
-            for (int k = latent_start; k < fm_total_len; k++)
-                set_attend(q, k);
-        }
-        for (int q = latent_start; q < fm_total_len; q++) { // latent attends history + latent
-            for (int k = 0; k < fm_seq_len; k++)
-                set_attend(q, k);
-            for (int k = latent_start; k < fm_total_len; k++)
-                set_attend(q, k);
-        }
-        for (int i = 0; i < fm_seq_len; i++)
-            pos[i] = i;
-        for (int i = 0; i < patch_size; i++)
-            pos[latent_start + i] = fm_seq_len + i;
-    }
-
-    std::vector<float> noise((size_t)patch_size * latent_dim);
-    std::normal_distribution<float> normal(0.0f, 1.0f);
-    for (auto& v : noise)
-        v = normal(ctx->rng);
-
-    std::vector<float> z((size_t)patch_size * latent_dim);
-    dots_flow_match_core(ctx, seq_c.data(), seq_u.data(), fm_total_len, latent_start, mask.data(), pos.data(),
-                         noise.data(), ode_steps, cfg_scale, z.data());
-
-    // Denormalize latents using latent_stats.
-    if (!ctx->latent_stats.mean.empty() && !ctx->latent_stats.std.empty()) {
-        for (int i = 0; i < patch_size; i++)
-            for (int d = 0; d < latent_dim; d++)
-                z[i * latent_dim + d] = z[i * latent_dim + d] * ctx->latent_stats.std[d] + ctx->latent_stats.mean[d];
-    }
-
-    std::memcpy(out_latent, z.data(), (size_t)patch_size * latent_dim * sizeof(float));
+    const int llm_dim = (int)ctx->llm.hidden_size;
+    if (!p.eos_proj_0_w || !p.eos_proj_1_w)
+        return 0.0f;
+    std::vector<float> h = dots_linear(ctx, p.eos_proj_0_w, p.eos_proj_0_b, llm_hidden, 1, llm_dim, llm_dim);
+    for (auto& v : h)
+        v = v / (1.0f + std::exp(-v)); // SiLU
+    std::vector<float> logits = dots_linear(ctx, p.eos_proj_1_w, p.eos_proj_1_b, h.data(), 1, llm_dim, 2);
+    float m = std::max(logits[0], logits[1]);
+    float e0 = std::exp(logits[0] - m), e1 = std::exp(logits[1] - m);
+    return e1 / (e0 + e1);
 }
 
 // ===========================================================================
@@ -1721,6 +1664,7 @@ struct dots_tts_context_params dots_tts_context_default_params(void) {
         /*.max_patches  =*/256,
         /*.ode_steps    =*/16,
         /*.cfg_scale    =*/3.0f,
+        /*.eos_threshold=*/0.8f,
         /*.flash_attn   =*/false,
     };
 }
@@ -1962,90 +1906,177 @@ float* dots_tts_synthesize(struct dots_tts_context* ctx, const char* text, int* 
         dots_embed_tokens(ctx, token_ids.data(), n_text, text_embeds.data());
     }
 
-    // 3. Autoregressive patch generation loop
+    // 3. Autoregressive patch generation loop (reference model.py _decode /
+    //    _consume_audio_patch). The FM sequence is the growing interleave
+    //    [h0, l0(×patch), h1, l1(×patch), ...] where h_i = hidden_proj(llm_hidden)
+    //    and l_i = latent_proj(NORMALIZED latent). The penc + vocoder consume the
+    //    DENORMALIZED latents. EOS via eos_proj stops generation.
     int max_patches = ctx->params.max_patches > 0 ? ctx->params.max_patches : 256;
+    if (const char* e = std::getenv("CRISPASR_DOTS_MAX_PATCHES")) {
+        int m = std::atoi(e);
+        if (m > 0)
+            max_patches = m;
+    }
     int latent_dim = ctx->latent_dim;
     int patch_size = ctx->patch_size;
+    int dit_dim = (int)ctx->dit.hidden_size;
+    int ode_steps = ctx->params.ode_steps > 0 ? ctx->params.ode_steps : 16;
+    if (const char* e = std::getenv("CRISPASR_DOTS_ODE_STEPS")) {
+        int s = std::atoi(e);
+        if (s > 0)
+            ode_steps = s;
+    }
+    float cfg_scale = ctx->params.cfg_scale > 0.0f ? ctx->params.cfg_scale : 3.0f;
+    float eos_threshold = ctx->params.eos_threshold > 0.0f ? ctx->params.eos_threshold : 0.8f;
+    if (const char* e = std::getenv("CRISPASR_DOTS_EOS_THRESHOLD"))
+        eos_threshold = std::atof(e);
+    auto& proj = ctx->proj;
 
-    std::vector<float> all_latents; // accumulated latent patches
+    std::vector<float> all_latents; // accumulated DENORMALIZED latents (penc + vocoder)
+    std::vector<float> fm_c, fm_u;  // growing FM sequence (cond + cfg), dit_dim units
+    int fm_seq_len = 0;             // tokens currently in fm_c/fm_u
     int llm_n_past = 0;
 
-    // Prefill: run LLM on text tokens
-    std::fprintf(stderr, "dots_tts: prefill %d tokens (llm_dim=%d)...\n", n_text, llm_dim);
-    std::fflush(stderr);
+    // Append one hidden chunk: hidden_proj(h) into cond, hidden_proj(0) into cfg.
+    std::vector<float> zero_llm(llm_dim, 0.0f);
+    auto append_hidden = [&](const float* llm_hidden) {
+        std::vector<float> hp =
+            dots_linear(ctx, proj.hidden_proj_w, proj.hidden_proj_b, llm_hidden, 1, llm_dim, dit_dim);
+        std::vector<float> hn =
+            dots_linear(ctx, proj.hidden_proj_w, proj.hidden_proj_b, zero_llm.data(), 1, llm_dim, dit_dim);
+        fm_c.insert(fm_c.end(), hp.begin(), hp.end());
+        fm_u.insert(fm_u.end(), hn.begin(), hn.end());
+        fm_seq_len += 1;
+    };
+    // Append one latent chunk (NORMALIZED): latent_proj(z) into BOTH branches.
+    auto append_latent = [&](const float* z_norm) {
+        std::vector<float> lp =
+            dots_linear(ctx, proj.latent_proj_w, proj.latent_proj_b, z_norm, patch_size, latent_dim, dit_dim);
+        fm_c.insert(fm_c.end(), lp.begin(), lp.end());
+        fm_u.insert(fm_u.end(), lp.begin(), lp.end());
+        fm_seq_len += patch_size;
+    };
+
+    // Prefill: run LLM on text tokens; seed the FM sequence with the last hidden.
+    std::vector<float> cur_hidden(llm_dim);
+    if (ctx->params.verbosity >= 1)
+        std::fprintf(stderr, "dots_tts: prefill %d tokens...\n", n_text);
     {
         dots_bench_stage b("llm_prefill");
         std::vector<float> hidden(n_text * llm_dim);
         dots_llm_step(ctx, text_embeds.data(), n_text, 0, hidden.data());
         llm_n_past = n_text;
+        std::memcpy(cur_hidden.data(), hidden.data() + (size_t)(n_text - 1) * llm_dim, llm_dim * sizeof(float));
     }
-    std::fprintf(stderr, "dots_tts: prefill done, n_past=%d\n", llm_n_past);
-    std::fflush(stderr);
+    append_hidden(cur_hidden.data()); // h0
 
-    // Generate patches
-    int penc_n_past = 0;
+    int n_patches_done = 0;
     for (int patch_idx = 0; patch_idx < max_patches; patch_idx++) {
         dots_bench_stage b_patch("patch_generate");
 
-        std::fprintf(stderr, "dots_tts: patch %d — embed span token...\n", patch_idx);
-        // Add audio_gen_span token to LLM input
-        std::vector<float> span_embed(llm_dim, 0.0f);
-        if (ctx->token_audio_gen_span >= 0) {
-            int32_t span_id = ctx->token_audio_gen_span;
-            dots_embed_tokens(ctx, &span_id, 1, span_embed.data());
+        // EOS check (decide stop BEFORE decoding this patch, but still emit it).
+        float eos_p = dots_eos_prob(ctx, cur_hidden.data());
+        bool stop_after = eos_p > eos_threshold;
+
+        // Flow-matching: trailing patch_size noise slots after the current seq.
+        int latent_start = fm_seq_len;
+        int fm_total_len = fm_seq_len + patch_size;
+        std::vector<float> seq_c(fm_c);
+        std::vector<float> seq_u(fm_u);
+        seq_c.resize((size_t)fm_total_len * dit_dim, 0.0f);
+        seq_u.resize((size_t)fm_total_len * dit_dim, 0.0f);
+
+        // Block-causal FM attn mask + pos ids (model._build_fm_attn_mask/_pos_ids,
+        // hidden_patch_size=1, no history bucket padding → latent_start=fm_seq_len).
+        std::vector<float> mask((size_t)fm_total_len * fm_total_len, -INFINITY);
+        std::vector<int32_t> pos(fm_total_len, 0);
+        {
+            auto attend = [&](int q, int k) { mask[(size_t)q * fm_total_len + k] = 0.0f; };
+            int block_start = fm_seq_len - 1; // hidden_patch_size = 1
+            for (int q = 0; q < block_start; q++)
+                for (int k = 0; k <= q; k++)
+                    attend(q, k);
+            for (int q = block_start; q < fm_seq_len; q++) {
+                for (int k = 0; k < fm_seq_len; k++)
+                    attend(q, k);
+                for (int k = latent_start; k < fm_total_len; k++)
+                    attend(q, k);
+            }
+            for (int q = latent_start; q < fm_total_len; q++) {
+                for (int k = 0; k < fm_seq_len; k++)
+                    attend(q, k);
+                for (int k = latent_start; k < fm_total_len; k++)
+                    attend(q, k);
+            }
+            for (int i = 0; i < fm_seq_len; i++)
+                pos[i] = i;
+            for (int i = 0; i < patch_size; i++)
+                pos[latent_start + i] = fm_seq_len + i;
         }
 
-        std::fprintf(stderr, "dots_tts: patch %d — llm step (n_past=%d)...\n", patch_idx, llm_n_past);
-        // LLM step for the audio span token
-        std::vector<float> span_hidden(llm_dim);
+        std::vector<float> noise((size_t)patch_size * latent_dim);
+        std::normal_distribution<float> normal(0.0f, 1.0f);
+        for (auto& v : noise)
+            v = normal(ctx->rng);
+
+        std::vector<float> z_norm((size_t)patch_size * latent_dim);
+        {
+            dots_bench_stage b2("flow_match");
+            dots_flow_match_core(ctx, seq_c.data(), seq_u.data(), fm_total_len, latent_start, mask.data(), pos.data(),
+                                 noise.data(), ode_steps, cfg_scale, z_norm.data());
+        }
+
+        // Denormalize for penc + vocoder; keep z_norm for FM history.
+        std::vector<float> z_denorm(z_norm);
+        if (!ctx->latent_stats.std.empty()) {
+            for (int i = 0; i < patch_size; i++)
+                for (int d = 0; d < latent_dim; d++)
+                    z_denorm[i * latent_dim + d] =
+                        z_norm[i * latent_dim + d] * ctx->latent_stats.std[d] + ctx->latent_stats.mean[d];
+        }
+        all_latents.insert(all_latents.end(), z_denorm.begin(), z_denorm.end());
+
+        // Grow FM history with the NORMALIZED latent.
+        append_latent(z_norm.data());
+
+        // PatchEncoder over ALL accumulated denorm latents → last patch embedding.
+        int n_total = (int)(all_latents.size() / latent_dim);
+        int n_emb = n_total / patch_size;
+        std::vector<float> embeds((size_t)n_emb * llm_dim);
+        {
+            dots_bench_stage b2("penc_forward");
+            dots_penc_forward(ctx, all_latents.data(), n_total, embeds.data());
+        }
+        const float* llm_embedding = embeds.data() + (size_t)(n_emb - 1) * llm_dim;
+
+        // Feed the penc embedding into the LLM → next conditioning hidden.
         {
             dots_bench_stage b2("llm_step");
-            dots_llm_step(ctx, span_embed.data(), 1, llm_n_past, span_hidden.data());
+            dots_llm_step(ctx, llm_embedding, 1, llm_n_past, cur_hidden.data());
             llm_n_past += 1;
         }
 
-        std::fprintf(stderr, "dots_tts: patch %d — flow match...\n", patch_idx);
-        // Flow-matching: generate one latent patch
-        std::vector<float> patch_latent(patch_size * latent_dim);
-        {
-            dots_bench_stage b2("flow_match");
-            dots_flow_match(ctx, span_hidden.data(), 1, ctx->speaker_emb.empty() ? nullptr : ctx->speaker_emb.data(),
-                            patch_latent.data(), all_latents.data(), patch_idx);
+        n_patches_done++;
+        if (ctx->params.verbosity >= 1 && (patch_idx == 0 || (patch_idx + 1) % 5 == 0 || stop_after)) {
+            std::fprintf(stderr, "dots_tts: patch %d done (eos_p=%.3f%s, fm_len=%d)\n", patch_idx, eos_p,
+                         stop_after ? " STOP" : "", fm_seq_len);
+            std::fflush(stderr);
         }
 
-        // Accumulate latent
-        all_latents.insert(all_latents.end(), patch_latent.begin(), patch_latent.end());
+        if (stop_after)
+            break;
 
-        std::fprintf(stderr, "dots_tts: patch %d — penc forward (n_past=%d)...\n", patch_idx, penc_n_past);
-        // PatchEncoder: encode this patch → LLM embedding for next step
-        // Output has patch_size/2 frames (due to stride-2 downsample + concat)
-        int penc_out_frames = patch_size / 2;
-        if (penc_out_frames < 1)
-            penc_out_frames = 1;
-        std::vector<float> patch_embed(penc_out_frames * llm_dim);
-        {
-            dots_bench_stage b2("penc_forward");
-            dots_penc_forward(ctx, patch_latent.data(), patch_size, penc_n_past, patch_embed.data());
-            penc_n_past += patch_size;
-        }
-
-        // Feed patch embedding back to LLM — use last output frame
-        std::vector<float> llm_input(llm_dim);
-        std::memcpy(llm_input.data(), patch_embed.data() + (penc_out_frames - 1) * llm_dim, llm_dim * sizeof(float));
-
-        // Check EOS (via eos_proj)
-        // TODO: implement EOS detection via eos_proj MLP
-        // For now, just run all max_patches
-
-        if (ctx->params.verbosity >= 2 && (patch_idx + 1) % 10 == 0) {
-            std::fprintf(stderr, "dots_tts: generated %d/%d patches\n", patch_idx + 1, max_patches);
-        }
+        // Seed the next patch's hidden conditioning (next token is an audio span).
+        if (patch_idx + 1 < max_patches)
+            append_hidden(cur_hidden.data());
     }
 
     int n_total_frames = (int)(all_latents.size() / latent_dim);
-    if (ctx->params.verbosity >= 1) {
-        std::fprintf(stderr, "dots_tts: generated %d latent frames (%d patches)\n", n_total_frames,
-                     n_total_frames / patch_size);
+    if (ctx->params.verbosity >= 1)
+        std::fprintf(stderr, "dots_tts: generated %d patches → %d latent frames\n", n_patches_done, n_total_frames);
+    if (n_total_frames == 0) {
+        std::fprintf(stderr, "dots_tts: no latents generated\n");
+        return nullptr;
     }
 
     // 4. Vocoder decode
@@ -2134,50 +2165,67 @@ extern "C" int dots_tts_penc_diff(const char* model_gguf, const char* ref_gguf, 
         dots_tts_free(ctx);
         return 2;
     }
-    ggml_tensor* t_in = ggml_get_tensor(rw.ctx, "penc_in_patch0");
-    ggml_tensor* t_out = ggml_get_tensor(rw.ctx, "penc_out_patch0");
-    if (!t_in || !t_out) {
-        std::fprintf(stderr, "dots_penc_diff: reference missing penc_in_patch0/penc_out_patch0\n");
+    // Prefer the multi-patch reference (penc_in_all over a few patches +
+    // penc_out_patch{0,1,...}) when present; fall back to single-patch.
+    ggml_tensor* t_all = ggml_get_tensor(rw.ctx, "penc_in_all");
+    ggml_tensor* t_in = t_all ? t_all : ggml_get_tensor(rw.ctx, "penc_in_patch0");
+    if (!t_in) {
+        std::fprintf(stderr, "dots_penc_diff: reference missing penc_in_all / penc_in_patch0\n");
         dots_tts_free(ctx);
         return 2;
     }
 
     const int in_dim = (int)t_in->ne[0];   // 128
-    const int n_frames = (int)t_in->ne[1]; // 4
-    const int out_n = (int)ggml_nelements(t_out);
+    const int n_frames = (int)t_in->ne[1]; // patch_size * n_patches
+    const int n_patches = n_frames / ctx->patch_size;
 
     std::vector<float> in_data((size_t)in_dim * n_frames);
     ggml_backend_tensor_get(t_in, in_data.data(), 0, in_data.size() * sizeof(float));
-    std::vector<float> ref_out((size_t)out_n);
-    ggml_backend_tensor_get(t_out, ref_out.data(), 0, ref_out.size() * sizeof(float));
 
-    std::vector<float> got((size_t)out_n, 0.0f);
-    dots_penc_forward(ctx, in_data.data(), n_frames, /*n_past=*/0, got.data());
+    // Run the full causal recompute -> n_patches embeddings.
+    const int out_dim = (int)ctx->llm.hidden_size;
+    std::vector<float> got((size_t)out_dim * n_patches, 0.0f);
+    dots_penc_forward(ctx, in_data.data(), n_frames, got.data());
 
-    double dot = 0, na = 0, nb = 0, maxabs = 0;
-    for (int i = 0; i < out_n; i++) {
-        dot += (double)got[i] * ref_out[i];
-        na += (double)got[i] * got[i];
-        nb += (double)ref_out[i] * ref_out[i];
-        double d = std::fabs((double)got[i] - ref_out[i]);
-        if (d > maxabs)
-            maxabs = d;
-    }
-    double cos = (na > 0 && nb > 0) ? dot / (std::sqrt(na) * std::sqrt(nb)) : 0.0;
-    std::printf("dots-tts penc decode_patch[0]: in=(%d,%d) out_dim=%d  cos=%.6f  max_abs=%.6f  %s\n", in_dim, n_frames,
-                out_n, cos, maxabs, cos > 0.999 ? "PASS" : "FAIL");
-    if (verbosity >= 2) {
-        std::printf("  got[:6]:");
-        for (int i = 0; i < 6 && i < out_n; i++)
-            std::printf(" %+.4f", got[i]);
-        std::printf("\n  ref[:6]:");
-        for (int i = 0; i < 6 && i < out_n; i++)
-            std::printf(" %+.4f", ref_out[i]);
-        std::printf("\n");
+    int rc = 0;
+    for (int pp = 0; pp < n_patches; pp++) {
+        char name[32];
+        std::snprintf(name, sizeof(name), "penc_out_patch%d", pp);
+        ggml_tensor* t_out = ggml_get_tensor(rw.ctx, name);
+        if (!t_out)
+            continue;
+        const int out_n = (int)ggml_nelements(t_out);
+        std::vector<float> ref_out((size_t)out_n);
+        ggml_backend_tensor_get(t_out, ref_out.data(), 0, ref_out.size() * sizeof(float));
+        const float* g = got.data() + (size_t)pp * out_dim;
+        double dot = 0, na = 0, nb = 0, maxabs = 0;
+        for (int i = 0; i < out_n; i++) {
+            dot += (double)g[i] * ref_out[i];
+            na += (double)g[i] * g[i];
+            nb += (double)ref_out[i] * ref_out[i];
+            double d = std::fabs((double)g[i] - ref_out[i]);
+            if (d > maxabs)
+                maxabs = d;
+        }
+        double cos = (na > 0 && nb > 0) ? dot / (std::sqrt(na) * std::sqrt(nb)) : 0.0;
+        bool pass = cos > 0.999;
+        std::printf("dots-tts penc decode_patch[%d]: in=(%d,%d) out_dim=%d  cos=%.6f  max_abs=%.6f  %s\n", pp, in_dim,
+                    n_frames, out_n, cos, maxabs, pass ? "PASS" : "FAIL");
+        if (verbosity >= 2) {
+            std::printf("  got[:6]:");
+            for (int i = 0; i < 6 && i < out_n; i++)
+                std::printf(" %+.4f", g[i]);
+            std::printf("\n  ref[:6]:");
+            for (int i = 0; i < 6 && i < out_n; i++)
+                std::printf(" %+.4f", ref_out[i]);
+            std::printf("\n");
+        }
+        if (!pass)
+            rc = 1;
     }
 
     dots_tts_free(ctx);
-    return cos > 0.999 ? 0 : 1;
+    return rc;
 }
 
 // ── Diff-harness: validate the flow-matching ODE driver ─────────────────────

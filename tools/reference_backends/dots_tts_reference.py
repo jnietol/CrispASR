@@ -164,23 +164,32 @@ def _dump_patch_encoder(model_dir: Path, seed: int) -> Dict[str, np.ndarray]:
         print(f"[dots-ref/penc] WARNING unexpected: {unexpected}")
     enc.eval().float()
 
+    # Multi-patch: stream N patches through decode_patch carrying conv_tail +
+    # per-layer KV (init_decode_state) so the C++ full-recompute path can be
+    # validated against the true incremental decode for patches 0,1,2,...
+    n_patches = 3
     g = torch.Generator().manual_seed(seed)
-    latent_patch = torch.randn(1, patch_size, latent_dim, generator=g, dtype=torch.float32)
     state = enc.init_decode_state(
-        max_audio_patch_count=4, batch_size=1,
+        max_audio_patch_count=n_patches, batch_size=1,
         device=torch.device("cpu"), dtype=torch.float32,
     )
-    positions = torch.arange(enc.out_ds_rate, dtype=torch.long)  # patch 0: [0, 1]
-    embedding, _conv_tail = enc.decode_patch(
-        latent_patch, state.conv_tail, state.layer_caches, positions,
-    )
+    out: Dict[str, np.ndarray] = {}
+    all_patches = []
+    for pp in range(n_patches):
+        latent_patch = torch.randn(1, patch_size, latent_dim, generator=g, dtype=torch.float32)
+        all_patches.append(latent_patch)
+        positions = torch.arange(enc.out_ds_rate, dtype=torch.long) + state.seq_len
+        embedding, conv_tail = enc.decode_patch(
+            latent_patch, state.conv_tail, state.layer_caches, positions,
+        )
+        state.conv_tail.copy_(conv_tail)
+        state.seq_len += enc.out_ds_rate
+        out[f"penc_out_patch{pp}"] = _npf(embedding[0])        # (1, out_dim)
 
-    return {
-        "penc_in_patch0": _npf(latent_patch[0]),               # (patch_size, latent_dim)
-        "penc_positions_patch0": positions.float().numpy(),    # (out_ds_rate,)
-        "penc_conv_tail_patch0": _npf(state.conv_tail[0]),     # (latent_dim, left_pad)
-        "penc_out_patch0": _npf(embedding[0]),                 # (1, out_dim)
-    }
+    latents_all = torch.cat(all_patches, dim=1)                # (1, patch_size*n, latent_dim)
+    out["penc_in_all"] = _npf(latents_all[0])                  # (patch_size*n, latent_dim)
+    out["penc_in_patch0"] = _npf(all_patches[0][0])            # back-compat (patch_size, latent_dim)
+    return out
 
 
 def _dump_dit(model_dir: Path, seed: int) -> Dict[str, np.ndarray]:
