@@ -845,7 +845,8 @@ extern "C" float* ark_asr_prefill_logits(struct ark_asr_context* ctx, const floa
 // ===========================================================================
 // Transcribe (one <=30s window)
 // ===========================================================================
-static std::string ark_transcribe_window(ark_asr_context* ctx, const float* pcm, int n_samples, int max_new) {
+static std::string ark_transcribe_window(ark_asr_context* ctx, const float* pcm, int n_samples, int max_new,
+                                         const std::vector<int32_t>& prefix) {
     const auto& hp = ctx->hp;
     int n_mels = 0, T_mel = 0;
     float* mel = ark_asr_compute_mel(ctx, pcm, n_samples, &n_mels, &T_mel);
@@ -869,6 +870,14 @@ static std::string ark_transcribe_window(ark_asr_context* ctx, const float* pcm,
         ids.push_back(ctx->id_audio);
     ids.push_back(ctx->id_eoa);
     ids.push_back(ctx->id_assistant);
+    // Cross-chunk conditioning: seed the assistant turn with the tail of the
+    // previous chunk's transcript so the model continues in the same language
+    // (the chunked fallback otherwise re-detects language per window — a German
+    // clip's next chunk would get *translated* to English). These tokens are
+    // context only; generation continues after them and we keep just the new
+    // tokens. Empty for the first chunk / single-pass. See ark_asr_transcribe.
+    for (int32_t t : prefix)
+        ids.push_back(t);
     const int T = (int)ids.size();
 
     // audio_features [hidden, T] (zeros except audio positions) + keep_mask [T].
@@ -974,21 +983,34 @@ extern "C" char* ark_asr_transcribe(struct ark_asr_context* ctx, const float* pc
         cap_s = std::atoi(e);
     const long cap_samples = (long)cap_s * sr;
 
+    const std::vector<int32_t> no_prefix;
     std::string full;
     if (cap_s <= 0 || (long)n_samples <= cap_samples) {
-        full = ark_transcribe_window(ctx, pcm, n_samples, ark_max_new_for(n_samples));
+        full = ark_transcribe_window(ctx, pcm, n_samples, ark_max_new_for(n_samples), no_prefix);
     } else {
-        // Fallback for very long audio: internal 30 s windows (re-introduces the
-        // per-window drift, but bounds memory/time). Pass --vad for cleaner
-        // silence-bounded segments, or raise CRISPASR_ARKASR_MAX_SINGLE_PASS_S.
+        // Fallback for very long audio: internal 30 s windows, bounding memory/time.
+        // Cross-chunk language conditioning carries the previous chunk's transcript
+        // tail into the next window so the model keeps the same language instead of
+        // re-detecting (and translating) per window. Disable with
+        // CRISPASR_ARKASR_NO_CHUNK_CONTEXT=1. Pass --vad for cleaner segments, or
+        // raise CRISPASR_ARKASR_MAX_SINGLE_PASS_S to extend the single-pass window.
+        const bool ctx_carry = std::getenv("CRISPASR_ARKASR_NO_CHUNK_CONTEXT") == nullptr;
+        const int kPrefixTokens = 32; // tail length to seed (enough to fix language)
         const int win = 30 * sr;
+        std::vector<int32_t> prefix;
         for (int off = 0; off < n_samples; off += win) {
             const int len = std::min(win, n_samples - off);
-            std::string seg = ark_transcribe_window(ctx, pcm + off, len, ark_max_new_for(len));
+            std::string seg = ark_transcribe_window(ctx, pcm + off, len, ark_max_new_for(len), prefix);
             if (!seg.empty()) {
                 if (!full.empty())
                     full += " ";
                 full += seg;
+                if (ctx_carry) {
+                    // Seed the next window with the tail of this chunk's transcript.
+                    std::vector<int32_t> toks = core_bpe::tokenize_simple(ctx->token_to_id, ctx->merge_rank, seg);
+                    const int keep = std::min((int)toks.size(), kPrefixTokens);
+                    prefix.assign(toks.end() - keep, toks.end());
+                }
             }
         }
     }

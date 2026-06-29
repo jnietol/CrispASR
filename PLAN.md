@@ -6275,8 +6275,14 @@ has no positional cap, so the reference encodes the whole clip in one pass. De-A
 (default 300 s) falls back to internal chunking (drift can return there → use --vad).
 Also strip the model's leading `.` transcript-opening token in output cleanup.
 
-Open (minor): cross-chunk language conditioning for audio beyond the single-pass
-cap; CUDA validation. Both nice-to-have, not blockers.
+Cross-chunk language conditioning DONE: the >cap chunked fallback now seeds each
+window's assistant turn with the previous chunk's transcript tail (32 tokens) so
+the model continues in the same language instead of re-detecting/translating per
+window. Validated: De-Abwasch with forced 30 s chunking
+(CRISPASR_ARKASR_MAX_SINGLE_PASS_S=30) → German throughout (chunk 2 previously
+translated to English). Opt out with CRISPASR_ARKASR_NO_CHUNK_CONTEXT=1.
+
+Open (minor): CUDA validation (only Metal validated). Nice-to-have, not a blocker.
 
 Port of [AutoArk-AI/ARK-ASR-3B](https://huggingface.co/AutoArk-AI/ARK-ASR-3B):
 a 19-language ASR model = **Whisper-large-v3 encoder with partial RoPE** +
