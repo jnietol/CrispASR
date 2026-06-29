@@ -52,10 +52,21 @@ public:
     }
 
     std::vector<crispasr_segment> transcribe(const float* samples, int n_samples, int64_t t_offset_cs,
-                                             const whisper_params& /*params*/) override {
+                                             const whisper_params& params) override {
         std::vector<crispasr_segment> out;
         if (!ctx_ || !samples || n_samples <= 0)
             return out;
+        // --ask overrides the task prompt; otherwise -l <lang> injects a
+        // language hint. Empty restores the default transcription instruction.
+        if (!params.ask.empty()) {
+            higgs_stt_set_ask(ctx_, params.ask.c_str());
+        } else if (!params.language.empty() && params.language != "auto") {
+            const std::string instr = "Transcribe the speech in " + crispasr_iso_to_english_lang(params.language) +
+                                      ". Output only the spoken words in lowercase with no punctuation.";
+            higgs_stt_set_ask(ctx_, instr.c_str());
+        } else {
+            higgs_stt_set_ask(ctx_, nullptr);
+        }
         char* text = higgs_stt_transcribe(ctx_, samples, n_samples);
         crispasr_segment seg;
         seg.text = text ? text : "";

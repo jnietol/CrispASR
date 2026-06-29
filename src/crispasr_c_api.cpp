@@ -3758,7 +3758,22 @@ static crispasr_session_result* transcribe_single(crispasr_session* s, const flo
     if ((s->backend == "higgs-stt" || s->backend == "higgs_stt" || s->backend == "higgs-audio-v3-stt") &&
         s->higgs_ctx) {
         // Whole-file chunked encode + ChatML greedy decode lives in
-        // higgs_stt_transcribe() (the CLI adapter drives the same call).
+        // higgs_stt_transcribe(). `set_ask` overrides the user-turn prompt:
+        // an explicit `s->ask` (custom task) wins; otherwise a per-call /
+        // sticky language injects a "Transcribe the speech in <lang>." hint;
+        // empty restores the default. Mirrors the CLI adapter.
+        if (!s->ask.empty()) {
+            higgs_stt_set_ask(s->higgs_ctx, s->ask.c_str());
+        } else {
+            const std::string eff_lang = lang_set ? lang : s->source_language;
+            if (!eff_lang.empty() && eff_lang != "auto") {
+                const std::string instr = "Transcribe the speech in " + ca_iso_to_english_lang(eff_lang) +
+                                          ". Output only the spoken words in lowercase with no punctuation.";
+                higgs_stt_set_ask(s->higgs_ctx, instr.c_str());
+            } else {
+                higgs_stt_set_ask(s->higgs_ctx, nullptr);
+            }
+        }
         char* text = higgs_stt_transcribe(s->higgs_ctx, pcm, n_samples);
         if (!text) {
             delete r;

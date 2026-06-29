@@ -40,6 +40,12 @@ void higgs_stt_free(struct higgs_stt_context* ctx);
 // Transcribe raw 16 kHz mono PCM. Returns malloc'd UTF-8 string (caller owns).
 char* higgs_stt_transcribe(struct higgs_stt_context* ctx, const float* samples, int n_samples);
 
+// Override the ChatML transcription instruction (the user-turn text). Pass
+// nullptr/"" to restore the default ("Transcribe the speech. Output only the
+// spoken words in lowercase with no punctuation."). Used for a language hint
+// or a custom task prompt. Persists until changed.
+void higgs_stt_set_ask(struct higgs_stt_context* ctx, const char* instruction);
+
 // ---- Stage-1 helpers exposed for differential testing ----------------------
 //
 // These let a test driver feed pre-computed mel features (matching the

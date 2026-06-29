@@ -229,6 +229,11 @@ struct higgs_stt_context {
     higgs_stt_model model;
     higgs_stt_vocab vocab;
 
+    // Optional custom instruction (set via higgs_stt_set_ask). Empty = the
+    // default "Transcribe the speech. …" prompt. Used to override the task
+    // (e.g. a language hint or a Q&A prompt) without recompiling.
+    std::string ask;
+
     ggml_backend_t backend = nullptr;
     ggml_backend_t backend_cpu = nullptr;
     ggml_backend_sched_t sched = nullptr;
@@ -1562,6 +1567,15 @@ extern "C" float* higgs_stt_encode_audio(higgs_stt_context* ctx, const float* sa
     return audio;
 }
 
+// Override the transcription instruction (the ChatML user-turn text). Pass
+// nullptr or "" to restore the default. Used to inject a language hint
+// ("Transcribe the speech in German. …") or a custom task prompt.
+extern "C" void higgs_stt_set_ask(higgs_stt_context* ctx, const char* instruction) {
+    if (!ctx)
+        return;
+    ctx->ask = (instruction && *instruction) ? instruction : "";
+}
+
 extern "C" char* higgs_stt_transcribe(higgs_stt_context* ctx, const float* samples, int n_samples) {
     if (!ctx || !samples || n_samples <= 0)
         return strdup("");
@@ -1589,7 +1603,9 @@ extern "C" char* higgs_stt_transcribe(higgs_stt_context* ctx, const float* sampl
     auto append = [&](const std::vector<int32_t>& v) { ids.insert(ids.end(), v.begin(), v.end()); };
     ids.push_back((int32_t)hp.im_start_token_id);
     append(tok("user\n"));
-    append(tok("Transcribe the speech. Output only the spoken words in lowercase with no punctuation."));
+    append(tok(ctx->ask.empty()
+                   ? "Transcribe the speech. Output only the spoken words in lowercase with no punctuation."
+                   : ctx->ask.c_str()));
     ids.push_back((int32_t)hp.audio_start_token_id); // <|audio_bos|>
     for (int i = 0; i < N_enc; i++)
         ids.push_back((int32_t)hp.audio_pad_token_id); // <|AUDIO|>
