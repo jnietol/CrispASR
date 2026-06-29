@@ -42,6 +42,24 @@ after two hand-wavy mechanisms wasted effort. (4) `grep` the actual op list +
 `supports_op` before claiming "no kernel"; check `GGML_SCHED_DEBUG=2` before
 claiming "cross-backend copy".
 
+## Precomputed attention masks in a GGUF are dead weight if the runtime rebuilds them (§192)
+
+The `tada-codec-fixed-f16.gguf` was **1.0 GB**, and **805 MB of it (76%)** was six
+`codec.attn.blk.*.self_attn._precomputed_mask` tensors — `(8192, 8192)` F16
+block-attention masks, one per layer. The C++ codec never binds them: it rebuilds
+`attn_mask` from `token_masks` per decode (`tada_codec.cpp build_decode_graph`).
+So they were loaded into RAM (and shipped/downloaded) for nothing. Dropping them
+(converter skip + a one-shot strip of the existing file) gives a **250 MB** codec
+with **byte-identical** output (`cmp` clean, ASR verbatim). Lessons: (1) when a
+"quantize it" footprint ask comes in, first **inventory the tensors by size** —
+the biggest line items may be non-weight tables you can delete outright, which
+beats any quant (and here the conv weights couldn't quantize anyway: DAC conv
+kernels store `kernel_size=7/3/1` as ne[0], below the Q8_0/Q4_K min block size of
+32/256). (2) A precomputed mask/positional table is only worth storing if the
+runtime actually reads it — grep the loader's bind step before trusting a fat
+GGUF. (3) Quantization shrinks *weights* only; activations stay f32, so it does
+nothing for the compute-buffer growth on long inputs.
+
 ## MoltenVK `mul_mm`/`mul_mat_vec` downconvert src0 to f16 regardless of stored dtype (§192)
 
 Storing FM weights as F32 instead of F16 on MoltenVK changed the matmul output by

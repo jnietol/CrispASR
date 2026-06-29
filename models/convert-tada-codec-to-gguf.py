@@ -216,6 +216,16 @@ def main():
             n_skipped += 1
             continue
 
+        # Skip the per-layer precomputed block-attention masks: 6 × (8192, 8192)
+        # F16 = ~805 MB (76% of the codec!) of dead weight. The runtime never
+        # binds them — it rebuilds attn_mask from token_masks per decode (see
+        # tada_codec.cpp build_decode_graph). Dropping them shrinks the codec
+        # GGUF ~1055 → ~250 MB with byte-identical output. (rope_freqs IS used —
+        # don't skip it.)
+        if hf_name.endswith("_precomputed_mask"):
+            n_skipped += 1
+            continue
+
         gn = map_tensor_name(hf_name)
         if gn is None:
             n_skipped += 1
