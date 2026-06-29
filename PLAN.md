@@ -6189,19 +6189,29 @@ key files under `sglang_omni/models/higgs_tts/`):
 ## §ARK — ARK-ASR-3B support (⚠️ EXPERIMENTAL / WIP; branch feat/arkasr-3b)
 
 **STATUS 2026-06-29**: ⚠️ **experimental / WIP** — wired through CLI, session C
-ABI, model registry, and docs, but with known rough edges (CPU-only, slow decode,
-experimental language steering). Core ASR is VALIDATED: jfk.wav → verbatim English;
-De-Abwasch 79 s → verbatim German. CLI: `crispasr -m ark-asr-3b-q8_0.gguf
---backend ark-asr -f audio.wav`. Backend defaults to **CPU** (GPU/Metal sched
-path emits no tokens — gated behind `CRISPASR_ARKASR_GPU=1`).
+ABI, model registry, and docs; shipped to main + GGUF published
+(cstr/ark-asr-3b-GGUF). Core ASR VALIDATED on **both GPU and CPU**: jfk.wav →
+verbatim English; De-Abwasch 79 s → verbatim German. CLI: `crispasr -m
+ark-asr-3b-q8_0.gguf --backend ark-asr -f audio.wav`. **GPU is now the default**
+(Metal-validated; force CPU with `CRISPASR_ARKASR_CPU=1`).
 
 Done: session ABI (crispasr_c_api.cpp), `-l` language-instruction injection
-(§9b, experimental — model not instruction-trained, default stays promptless),
-model registry entry, live test, docs marked exp/WIP.
-Open follow-ups: (a) step-graph cache for decode perf (per-step graph rebuild is
-slow on long audio); (b) GPU/sched fix; (c) publish GGUF repo (cstr/ark-asr-3b-GGUF).
-Diff harness is built (running it is optional — the verbatim roundtrip is the
-stronger gate).
+(§9b, experimental), model registry entry, live test, docs, GGUF publish.
+
+Both perf follow-ups settled by measurement (gated `CRISPASR_ARKASR_TIMING=1`):
+- **(a) step-graph cache = DUD** — per-step build+alloc is 0.3–0.5% of each step
+  (~0.45 ms vs ~120 ms compute); decode is fully compute-bound on the 3B forward.
+  The "rebuild is slow" note was a misdiagnosis. Don't build the cache.
+- **(b) GPU "no tokens" no longer reproduces** — GPU is verbatim on M1 Metal,
+  ~5.6× faster prefill, ~neutral per-token decode (bandwidth/dispatch-bound on
+  unified memory), ~1.7× overall. Flipped to default. CUDA unvalidated.
+
+Remaining genuine rough edge: **language drift** on long audio — a 30 s chunk can
+be *translated* to English rather than transcribed; identical on CPU and GPU and
+not fully fixed by the `-l` instruction (model not instruction-trained). A real
+fix needs cross-chunk language conditioning (carry prior-chunk language/context
+into each chunk's decode), not a stronger prompt. Diff harness is built (optional;
+the verbatim roundtrip is the stronger gate).
 
 Port of [AutoArk-AI/ARK-ASR-3B](https://huggingface.co/AutoArk-AI/ARK-ASR-3B):
 a 19-language ASR model = **Whisper-large-v3 encoder with partial RoPE** +

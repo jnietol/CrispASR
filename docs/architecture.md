@@ -180,7 +180,7 @@ regression test against `samples/jfk.wav`:
 | omniasr | wav2vec2 enc + CTC / LLM | ✔ | ✔ | CTC: — / LLM: ✔ | CPU | gguf_loader, kv_self_attn, swiglu |
 | gemma4-e2b | Conformer enc + Gemma4 LLM | ✔ | ✔ | ✔ | CUDA / Metal | gguf_loader, kv_self_attn, swiglu |
 | mimo-asr | wav2vec2 enc + Qwen2 LM | ✔ | ✔ | ✔ | CUDA / Metal | gguf_loader, kv_self_attn, swiglu |
-| ark-asr ⚠️*exp/WIP* | Whisper enc (partial RoPE) + Qwen2.5-3B LM | ✔ | — | CPU only | CPU (GPU emits no tokens) | mel, ffn, gguf_loader, kv_self_attn, swiglu, bpe |
+| ark-asr ⚠️*exp/WIP* | Whisper enc (partial RoPE) + Qwen2.5-3B LM | ✔ | — | CPU + GPU | GPU default (Metal-validated; `CRISPASR_ARKASR_CPU=1` forces CPU) | mel, ffn, gguf_loader, kv_self_attn, swiglu, bpe |
 | vibevoice | σ-VAE + Qwen2 (ASR) / TTS LM (synth) | ✔ | ✔ | ✔ | CUDA / Metal | gguf_loader |
 | kokoro | StyleTTS2 BERT + ProsodyPredictor + iSTFTNet | ✔ | — | — | CPU | gguf_loader, fft, ffn |
 | qwen3-tts | Qwen3 talker + 12 Hz codec + code-predictor | ✔ | ✔ | ✔ | CUDA / Metal | gguf_loader, kv_self_attn, swiglu |
@@ -473,8 +473,8 @@ PATH/mimo-tokenizer-q4_k.gguf` if you keep the tokenizer elsewhere.
 
 ### ark-asr
 
-> ⚠️ **Experimental / WIP.** Validated verbatim on English + German (Q8_0, CPU),
-> but rough edges remain (see below). Single self-contained GGUF.
+> ⚠️ **Experimental / WIP.** Validated verbatim on English + German (Q8_0, on
+> both GPU and CPU), but rough edges remain (see below). Single self-contained GGUF.
 
 [`AutoArk-AI/ARK-ASR-3B`](https://huggingface.co/AutoArk-AI/ARK-ASR-3B) — 19-language
 ASR = **Whisper-large-v3 encoder with partial interleaved RoPE** (rot_dim 32 of
@@ -488,15 +488,27 @@ recipe (128-bin, n_fft 400, hop 160). Convert with
 `models/convert-arkasr-to-gguf.py` (`--outtype f16|q8_0`).
 
 **Known limitations (WIP):**
-- **CPU only.** The GPU/`ggml_backend_sched` path emits no tokens (the
-  cross-backend audio-injection / KV graph hits the same weight-less-first-op
-  copy class as mimo-asr PLAN #115). Defaults to CPU; opt into the unvalidated
-  GPU path with `CRISPASR_ARKASR_GPU=1`.
 - **Language steering is experimental.** ARK is promptless, so language can drift
-  per 30 s chunk on long audio. Passing `-l <lang>` injects a best-effort
-  "Transcribe the audio in <Language>." instruction (the model was not trained on
-  instructions); the default (no `-l`) is the validated promptless path.
-- **Decode is slow** (per-step graph rebuild; no step-graph cache yet).
+  per 30 s chunk on long audio (e.g. one chunk transcribed but the next
+  *translated* to English). Passing `-l <lang>` injects a best-effort
+  "Transcribe the audio in <Language>." instruction, but the model was not trained
+  on instructions, so it does not fully prevent the drift (observed identically on
+  CPU and GPU). The default (no `-l`) is the validated promptless path. A robust
+  fix needs cross-chunk language conditioning, not a prompt.
+- **GPU per-token decode is not faster on Apple unified memory.** GPU is the
+  default and is verbatim-correct on Metal — prefill is ~5.6× faster, but the
+  single-token decode steps are bandwidth/dispatch-bound and roughly neutral
+  vs CPU (net ~1.7× overall on jfk). Force CPU with `CRISPASR_ARKASR_CPU=1`.
+  Discrete GPUs (CUDA) are not yet validated.
+- **GPU history:** an earlier port build emitted no tokens on GPU (suspected
+  weight-less-first-op cross-backend sched copy, mimo-asr PLAN #115 class); the
+  current flash-attn + KV path no longer reproduces it. Re-check with
+  `GGML_SCHED_DEBUG=2` if a regression resurfaces.
+- **No decode speedup from a step-graph cache.** Measured (gated
+  `CRISPASR_ARKASR_TIMING=1`): per-step graph build+alloc is only 0.3–0.5% of each
+  step (~0.45 ms vs ~120 ms compute) — decode is fully compute-bound on the 3B
+  forward, so a step-graph cache would save noise. Real decode speedups must come
+  from the matmuls (quant/threads/GPU), not graph reuse.
 
 ### moss-audio
 
