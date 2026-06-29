@@ -300,6 +300,11 @@ struct granite_speech_context {
     // CUDA-graph-capture path (granite_run_bucket_decode). Set by the backend
     // before the decode loop; 0 disables (legacy per-step rebuild path).
     int dec_bucket_len = 0;
+    // Argmax-fused variant of cached_dec_gf: appends a ggml_argmax node so the
+    // greedy loop D2Hs only a single int32 token id instead of the full ~100k
+    // vocab logits + a host argmax scan (the megapar in-graph-argmax trick).
+    // Built lazily by granite_greedy_decode_step; nullptr until first used.
+    ggml_cgraph* cached_argmax_gf = nullptr;
 
     // §176s: cached encoder graph — reused when (T, with_rpe) matches.
     ggml_cgraph* cached_enc_gf = nullptr;
@@ -2485,6 +2490,164 @@ static float* granite_run_bucket_decode(granite_speech_context* ctx, const float
     float* result = (float*)malloc((size_t)vocab * sizeof(float));
     ggml_backend_tensor_get(logits_t, result, 0, (size_t)vocab * sizeof(float));
     return result;
+}
+
+// Build (or reuse) the argmax-fused bucketed decode graph. Same as
+// granite_build_bucket_decode but appends ggml_argmax over the vocab logits,
+// so a greedy step returns a single int32 token id (4-byte D2H) instead of the
+// full ~100k-float vocab (400 KB D2H + host argmax scan). Tie-break is strict >
+// (lowest index wins), identical to core_greedy_decode::argmax and to ggml's
+// CUDA argmax kernel — so greedy token selection is bit-identical to the host
+// path. logits tensor is still named "logits" (kept as a graph output) so a
+// caller that needs the full vocab (sampling / best-of-N) can read it back.
+static ggml_cgraph* granite_build_argmax_decode(granite_speech_context* ctx, int bucket_len) {
+    if (ctx->cached_argmax_gf && ctx->cached_dec_bucket == bucket_len)
+        return ctx->cached_argmax_gf;
+
+    // Build on top of the base bucket graph's arena; argmax adds one node.
+    ggml_context* ctx0 = ctx->cached_dec_ctx;
+    if (!ctx0 || !ctx->cached_dec_gf || ctx->cached_dec_bucket != bucket_len) {
+        // Ensure the base graph exists first (it owns the arena).
+        granite_build_bucket_decode(ctx, bucket_len);
+        ctx0 = ctx->cached_dec_ctx;
+    }
+
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 16384, false);
+    // Re-resolve the logits input the base builder would produce, then append
+    // argmax. We rebuild the forward here (cheap: graph build is host-side) to
+    // keep the argmax graph self-contained in its own cgraph (ggml's CUDA
+    // graph capture keys on cgraph->nodes[0], so the argmax variant needs its
+    // own cgraph to capture independently from the logits variant).
+    const auto& m = ctx->model;
+    const auto& hp = m.hparams;
+    const int d = (int)hp.llm_d_model;
+    const int n_layers = (int)hp.llm_n_layers;
+
+    ggml_tensor* embeds = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, d, 1);
+    ggml_set_name(embeds, "inputs_embeds");
+    ggml_set_input(embeds);
+    ggml_tensor* positions = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, 1);
+    ggml_set_name(positions, "positions");
+    ggml_set_input(positions);
+    ggml_tensor* causal_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, bucket_len, 1);
+    ggml_set_name(causal_mask, "causal_mask");
+    ggml_set_input(causal_mask);
+
+    core_granite_llm::Hparams llm_hp = {};
+    llm_hp.n_layers = n_layers;
+    llm_hp.d_model = d;
+    llm_hp.n_heads = (int)hp.llm_n_heads;
+    llm_hp.n_kv_heads = (int)hp.llm_n_kv_heads;
+    llm_hp.head_dim = (int)hp.llm_head_dim;
+    llm_hp.rms_eps = hp.llm_rms_eps;
+    llm_hp.rope_theta = hp.llm_rope_theta;
+    llm_hp.embedding_multiplier = hp.embedding_multiplier;
+    llm_hp.attention_multiplier = hp.attention_multiplier;
+    llm_hp.residual_multiplier = hp.residual_multiplier;
+
+    std::vector<core_granite_llm::LayerWeights> blocks(n_layers);
+    for (int il = 0; il < n_layers; il++) {
+        const auto& b = m.llm.blocks[il];
+        blocks[il] = {b.attn_norm_w, b.attn_q_w,   b.attn_k_w, b.attn_v_w,  b.attn_out_w,
+                      b.ffn_norm_w,  b.ffn_gate_w, b.ffn_up_w, b.ffn_down_w};
+    }
+    ggml_tensor* cur = core_granite_llm::build_decoder(ctx0, gf, embeds, positions, causal_mask, ctx->kv_k, ctx->kv_v,
+                                                       /*n_past=*/0, blocks, m.llm.output_norm_w, llm_hp,
+                                                       /*is_causal=*/true, /*fixed_kv_len=*/bucket_len,
+                                                       /*kv_indices=*/positions);
+    cur = ggml_mul_mat(ctx0, m.llm.output_w, cur);
+    cur = ggml_scale(ctx0, cur, 1.0f / hp.logits_scaling);
+    ggml_set_name(cur, "logits");
+
+    ggml_tensor* am = ggml_argmax(ctx0, cur);
+    ggml_set_name(am, "argmax");
+    ggml_build_forward_expand(gf, am);
+
+    ctx->cached_argmax_gf = gf;
+    return gf;
+}
+
+// One argmax-fused greedy decode step. embeds the token via the separate embed
+// graph (capture-safe for F16; for Q4_K the kquant get_rows is in the embed
+// graph, not this one, so the decode graph still captures), runs the 40-layer
+// forward + argmax, and returns the chosen token id. *out_logit (optional)
+// receives that token's logit value (read back from the kept "logits" tensor at
+// the argmax offset) so callers wanting a probability can compute it.
+// Returns -1 on failure.
+static int granite_greedy_decode_step(granite_speech_context* ctx, const float* input_embed, int n_past,
+                                      int bucket_len, float* out_logit) {
+    ggml_cgraph* gf = granite_build_argmax_decode(ctx, bucket_len);
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf))
+        return -1;
+
+    const auto& hp = ctx->model.hparams;
+    const int d = (int)hp.llm_d_model;
+    int32_t pos = n_past;
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "positions"), &pos, 0, sizeof(int32_t));
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "inputs_embeds"), input_embed, 0, (size_t)d * sizeof(float));
+
+    ctx->dec_mask_buf.assign((size_t)bucket_len * sizeof(ggml_fp16_t), 0);
+    ggml_fp16_t* pmask = (ggml_fp16_t*)ctx->dec_mask_buf.data();
+    ggml_fp16_t zero = ggml_fp32_to_fp16(0.0f);
+    ggml_fp16_t neg_inf = ggml_fp32_to_fp16(-INFINITY);
+    for (int k = 0; k < bucket_len; k++)
+        pmask[k] = (k <= n_past) ? zero : neg_inf;
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "causal_mask"), pmask, 0, ctx->dec_mask_buf.size());
+
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS)
+        return -1;
+
+    int32_t token = -1;
+    ggml_backend_tensor_get(ggml_graph_get_tensor(gf, "argmax"), &token, 0, sizeof(int32_t));
+
+    if (out_logit) {
+        // Read back the chosen token's logit for optional probability scoring.
+        float lv = 0.0f;
+        ggml_backend_tensor_get(ggml_graph_get_tensor(gf, "logits"), &lv, (size_t)token * sizeof(float),
+                                sizeof(float));
+        *out_logit = lv;
+    }
+    return (int)token;
+}
+
+extern "C" int32_t* granite_speech_greedy_decode(struct granite_speech_context* ctx, int32_t first_token,
+                                                 int initial_n_past, int max_new_tokens, int eos_id, int* out_n) {
+    if (!ctx || ctx->dec_bucket_len <= 0 || max_new_tokens <= 0) {
+        if (out_n)
+            *out_n = 0;
+        return nullptr;
+    }
+    const int bucket = ctx->dec_bucket_len;
+
+    std::vector<int32_t> tokens;
+    tokens.reserve((size_t)max_new_tokens);
+    tokens.push_back(first_token);
+
+    int n_past = initial_n_past;
+    while ((int)tokens.size() < max_new_tokens && tokens.back() != eos_id) {
+        int32_t last = tokens.back();
+        float* emb = granite_speech_embed_tokens(ctx, &last, 1);
+        if (!emb)
+            break;
+        int nx = granite_greedy_decode_step(ctx, emb, n_past, bucket, /*out_logit*/ nullptr);
+        std::free(emb);
+        if (nx < 0)
+            break;
+        n_past++;
+        tokens.push_back((int32_t)nx);
+    }
+
+    int32_t* out = (int32_t*)malloc(tokens.size() * sizeof(int32_t));
+    if (!out) {
+        if (out_n)
+            *out_n = 0;
+        return nullptr;
+    }
+    memcpy(out, tokens.data(), tokens.size() * sizeof(int32_t));
+    if (out_n)
+        *out_n = (int)tokens.size();
+    return out;
 }
 
 extern "C" float* granite_speech_embed_tokens(struct granite_speech_context* ctx, const int32_t* input_ids,

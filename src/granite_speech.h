@@ -76,6 +76,17 @@ float* granite_speech_run_llm_kv(struct granite_speech_context* ctx, const float
 // rebuild path). Requires the KV cache initialised to >= bucket_len.
 void granite_speech_set_decode_bucket(struct granite_speech_context* ctx, int bucket_len);
 
+// Argmax-fused greedy decode over the bucketed capture-friendly graph. Given
+// the first token + its n_past, runs the decode loop returning the generated
+// token ids (including first_token, stopping at eos_id or max_new_tokens).
+// Each step uses an in-graph ggml_argmax so only a 4-byte token id is copied
+// D2H (vs ~400 KB vocab + host argmax scan). Greedy/temperature-0 only; uses
+// the same strict-> tie-break as core_greedy_decode::argmax, so token
+// selection is bit-identical to the shared greedy loop. Returns malloc'd
+// int32 array of length *out_n (caller frees); NULL on failure.
+int32_t* granite_speech_greedy_decode(struct granite_speech_context* ctx, int32_t first_token, int initial_n_past,
+                                      int max_new_tokens, int eos_id, int* out_n);
+
 // Embed token IDs. Returns malloc'd (n_tokens, d_model) F32.
 float* granite_speech_embed_tokens(struct granite_speech_context* ctx, const int32_t* input_ids, int n_tokens);
 

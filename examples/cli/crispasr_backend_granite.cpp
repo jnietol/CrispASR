@@ -423,6 +423,29 @@ public:
             next_p = core_greedy_decode::softmax_of(logits, vocab, next, logits[next]);
             free(logits);
 
+            // Fast path: greedy + single-run (the common transcript case) uses
+            // the argmax-fused decode graph — one 4-byte D2H/token vs the
+            // shared loop's ~400 KB vocab D2H + host argmax scan. Token
+            // selection is bit-identical (same strict-> tie-break). Sampling
+            // and best-of-N fall through to the shared loop (they need full
+            // logits + per-token probs).
+            const bool fast_greedy = (n_runs == 1) && (dec_cfg.temperature == 0.0f) && use_bucket;
+            if (fast_greedy) {
+                int n_out = 0;
+                int32_t* ids = granite_speech_greedy_decode(ctx_, /*first_token=*/next, /*initial_n_past=*/total_prompt,
+                                                            /*max_new_tokens=*/max_new, eos_tok, &n_out);
+                if (ids && n_out > 0) {
+                    core_greedy_decode::Result r;
+                    r.tokens.assign(ids, ids + n_out);
+                    r.probs.assign(n_out, 1.0f);  // probs unused when n_runs == 1
+                    free(ids);
+                    best_score = 1.0;
+                    best_dec = std::move(r);
+                    continue;  // skip the shared loop this run
+                }
+                free(ids);  // NULL on failure -> fall through to shared loop
+            }
+
             auto dec = core_greedy_decode::run_with_probs(ctx_,
                                                           /*first_token=*/next,
                                                           /*first_prob=*/next_p,
