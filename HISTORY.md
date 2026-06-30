@@ -32,10 +32,23 @@ backends, `CRISPASR_GRANITE_DEC_GALLOCR=0` opts out; CUDA/HIP and CPU-split keep
 the sched. Byte-identical, ctest 9/9. Measured (M1, Q4_K,
 `CRISPASR_GRANITE_DEC_PROFILE=1`): the win is modest on a quiet box (sched alloc
 ~3 ms/step → ~0.02 ms) but large under memory pressure (alloc balloons to
-68-236 ms); the dominant ~100 ms/step is Metal per-op dispatch, which only
-indirect command buffers would fix — see [[LEARNINGS]] §210. The bucketed
-shape-stable graph is the ICB prerequisite; ICB itself is unimplemented in
-ggml-metal and is the open follow-up.
+68-236 ms). The dominant ~100 ms/step was assumed to be Metal per-op dispatch
+that indirect command buffers (the Metal analog of CUDA-graph capture) would fix.
+
+**ICB follow-up → measured DUD.** Before building the (large, invasive) ICB
+refactor, added `CRISPASR_METAL_PROFILE` to `ggml_metal_graph_compute` to split
+each step into host encode+commit vs GPU execute+sync. Result (granite-4.1-2b
+Q4_K, jfk, 27 decode steps): host encode = **1.2 ms (1.8 %)**, GPU = **64 ms
+(98 %)**, total 66 ms (cross-checks dec-profile's 70 ms). So the "dispatch floor"
+is **GPU-side** (weight-bandwidth-bound Q4_K GEMVs reading ~1.5 GB/token), not
+host launch — ICB's ceiling is ~1.2 ms ≈ 1.8 % even if free, and it has a hard
+blocker (every op binds args via `setBytes`, which `MTLIndirectComputeCommand`
+can't do). CUDA graphs win 9-13× here because the RTX 5090 is *CPU-launch-bound*;
+M1 is *GPU-bound* — opposite regime, same trick, opposite verdict. Decided by
+measuring the host/GPU ratio, not by assuming. Full write-up + table in
+[[LEARNINGS]] §210; `CRISPASR_METAL_PROFILE` kept as the reusable host-vs-GPU
+probe. ICB is closed, not open. Real M1-decode levers are GPU-side (quant
+bandwidth, kernel fusion).
 
 ## #208 2026-06-30 Parakeet session API: bounded long-audio + repeated-call collapse fixed
 

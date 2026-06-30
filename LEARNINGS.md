@@ -64,16 +64,64 @@ work — but **measuring it taught the real lesson twice over**:
    graph** — exactly the launch-bound cost CUDA capture eliminates and that
    gallocr does **not** touch. `CRISPASR_METAL_N_CB` (1/2/4) made no difference,
    and disabling concurrency/fusion only made it slower (they already help).
-   The only structural Metal fix for the dispatch floor is **indirect command
-   buffers** (`MTLIndirectCommandBuffer` — encode the fixed-shape step once,
-   replay) which **ggml-metal does not have** today; the bucketed shape-stable
-   graph is the prerequisite, so the groundwork is laid but the work is a real
-   ggml-metal feature, not a knob. Note the contrast with the chatterbox-CFM
+   The natural hypothesis was that **indirect command buffers**
+   (`MTLIndirectCommandBuffer` — encode the fixed-shape step once, replay, the
+   Metal analog of CUDA-graph capture) would remove this floor. **It would not —
+   see the measured DUD below.** Note the contrast with the chatterbox-CFM
    gallocr **DUD** ([[HISTORY]]): there alloc was ~0.3% of a compute-heavy UNet
    step → no win; here per-token compute is small so alloc is a *large* fraction
    under load → gallocr helps. Same trick, opposite verdict — decided by the
    compute/alloc ratio, which you can only know by measuring (#1). See
    [[HISTORY]] §210.
+
+### ICB graph replay on Metal is a measured DUD — the M1 decode is GPU-bound, not host-launch-bound (§210 follow-up)
+
+Before committing to the (large, invasive) ICB refactor of vendored ggml-metal,
+I ran the §210 lesson on itself: **measure the part the change touches before
+building it.** ICB's entire value is collapsing the *host-side* per-step re-encode
+(280→1446 `setComputePipelineState`/`setBytes`/`setBuffer`/`dispatchThreadgroups`
+objc calls) into one `executeCommandsInBuffer` replay. So the only number that
+matters is: *what fraction of the step is host encode?*
+
+Added `CRISPASR_METAL_PROFILE` to `ggml_metal_graph_compute`
+(`ggml-metal-context.m`): it splits each graph_compute into **encode_us** (all
+ops encoded + all command buffers committed — the host work ICB removes) vs
+**gpu_us** (a forced `waitUntilCompleted` after commit — GPU execute + submit/sync,
+which ICB cannot touch). granite-4.1-2b-q4_k, jfk.wav, Metal, gallocr path,
+27 decode steps (cold step 0 dropped):
+
+| part | median | share | what ICB does to it |
+|---|---|---|---|
+| **host encode+commit** | **1.19 ms** | **1.8 %** | collapses to ~one encode |
+| **GPU execute + sync** | **64 ms** | **98 %** | unchanged (same kernels, same bandwidth) |
+| total/step | 66.3 ms | — | cross-checks the dec-profile compute (70 ms) |
+
+**Verdict: ICB ceiling is ~1.2 ms of ~66 ms ≈ 1.8 %, even if it were free and
+removed 100 % of host encode.** Not worth a multi-thousand-line refactor of
+vendored upstream Metal code (and it has a hard blocker anyway — every op binds
+its args via `[encoder setBytes:atIndex:0]`, which `MTLIndirectComputeCommand`
+does **not** support; ICB can only `setKernelBuffer`, so each op's arg struct
+would need a GPU-resident buffer slot — see `ggml-metal-device.m:548`).
+
+**Why the §210 "dispatch-bound" framing was half-right.** The ~100 ms *is* spent
+mostly outside alloc, but it is **GPU-side**, not host-side dispatch. The 1446-node
+graph's cost is per-layer Q4_K GEMVs reading ~1.5 GB of weights once per token —
+**weight-bandwidth-bound on the M1 GPU** (~64 ms ≈ 1.5 GB at a fraction of the
+~68 GB/s base-M1 bandwidth, as single-token GEMV achieves). Host encode of all
+1446 ops is only 1.2 ms and already overlaps GPU via `n_cb`. The encode time is
+*rock-stable* across steps (1.0–2.0 ms) while gpu_us carries all the background-load
+variance (55–107 ms) — further proof the bottleneck is the GPU, not the CPU encode.
+
+**Why CUDA graphs win 9–13× on the same model but ICB wouldn't.** Opposite regime.
+On an RTX 5090 the GPU finishes each tiny single-token kernel faster than the CPU
+can launch the next → **CPU-launch-bound**, so capturing the launch sequence is a
+huge win. On M1 the GPU is the bottleneck and CPU encode is 1.8 % → **GPU-bound**,
+so the Metal analog (ICB) has nothing to remove. Same graph, same trick, opposite
+verdict — decided by the host-encode/GPU-compute ratio, which (again) you only
+know by measuring. The real M1-decode levers are GPU-side: lower-bandwidth quant,
+or fusing the many small GEMV/elementwise ops into fewer larger kernels — **not**
+ICB. `CRISPASR_METAL_PROFILE` is kept (env-gated, off by default) as the reusable
+probe for any future "is this Metal graph host- or GPU-bound?" question.
 
 ## A "garbled GPU output" bug can live entirely downstream — A/B the GPUs before localizing (§192)
 
