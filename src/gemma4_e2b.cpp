@@ -1158,6 +1158,18 @@ static ggml_cgraph* g4e_build_graph_llm_kv(gemma4_e2b_context* ctx, int n_past, 
                                              kv_v_for_layer->nb[2], (size_t)donor_il * kv_v_for_layer->nb[3]));
 
             if (kvp.gqa_mode != core_attn::GQA_NATIVE && grp_e > 1) {
+                // Vulkan has no f16→f16 REPEAT; cast the F16 cache reads to F32
+                // before the head-expansion so it lowers to a supported F32
+                // REPEAT (issue #200/#192). This inline donor-layer path bypasses
+                // core_attn::kv_self_attn, so it needs its own guard; the helper
+                // handles every other call. No-op on Metal/CPU.
+                if (Kfull->type == GGML_TYPE_F16 && kv_k_for_layer->buffer) {
+                    const char* bn = ggml_backend_buft_name(ggml_backend_buffer_get_type(kv_k_for_layer->buffer));
+                    if (bn && std::strstr(bn, "Vulkan") != nullptr) {
+                        Kfull = ggml_cast(ctx0, Kfull, GGML_TYPE_F32);
+                        Vfull = ggml_cast(ctx0, Vfull, GGML_TYPE_F32);
+                    }
+                }
                 ggml_tensor* K4 = ggml_reshape_4d(ctx0, Kfull, hd_e, Lk, 1, n_kv_e);
                 ggml_tensor* V4 = ggml_reshape_4d(ctx0, Vfull, hd_e, Lk, 1, n_kv_e);
                 K4 = ggml_repeat_4d(ctx0, K4, hd_e, Lk, grp_e, n_kv_e);
