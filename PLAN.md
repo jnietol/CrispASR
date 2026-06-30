@@ -224,6 +224,46 @@ signal. (3) Re-run each config twice for determinism before forming a hypothesis
 
 ---
 
+## Cross-platform (Linux/x86 CPU) validation + audit tooling (OPEN)
+
+Everything shipped in the moss-transcribe / higgs-stt / ark-asr work this cycle
+was validated on **M1 / Metal only**. Given the long history of Metal-masked
+bugs and CPU↔GPU divergence (sched cross-backend traps, the q8_0-on-CPU scare,
+§206/§133/§176b), the missing leg of the test matrix is **x86 CPU-only Linux**.
+
+**Linux CPU-parity validation node (assign to the 8 GB CPU-only Ubuntu VPS):**
+- [ ] Cold build with `-DGGML_METAL=OFF` + ccache; `ctest -L unit` green.
+- [ ] ASR roundtrip on `samples/jfk.wav` **on CPU/x86** for the three q4_k models
+  touched this cycle — `moss-transcribe`, `higgs-stt`, `ark-asr` — confirm each is
+  verbatim (real cross-platform gate; ark's beam was only seen on M1 CPU).
+- [ ] `higgs-stt -bs 2` and `ark-asr -bs 2` on Linux — confirm beam works off-Metal.
+- [ ] **Build + link `bindings/go` on actual Linux** — the one thing the M1 can't
+  truly verify: the CI-enforced `#cgo linux` LDFLAGS (incl. the new
+  `-lmoss_transcribe`) and the macOS Metal/BLAS-leak gotcha
+  (docs/contributing.md "Go bindings: cgo LDFLAGS sync"). A green Ubuntu Go link is
+  the proof.
+- Memory fit: q4_k models are 2.3–3.3 GB, one heavy proc at a time → fine on 8 GB.
+  **Do NOT** run PyTorch reference dumps there (8 GB is tighter than the 16 GB M1
+  that already OOM'd on the 2.4B) — references stay a Kaggle / bigger-box job.
+- If useful, promote to a standing post-push Linux smoke (Routine/cron).
+- Handover prompt staged at `handover-prompts/` (gitignored) + scp'd to the VPS.
+
+**Multilingual + beam-quality spot-checks (LOW, either machine):**
+- [ ] moss-transcribe is a zh/en model; only English (jfk) validated. Run one German
+  + one Chinese clip (de fixtures already local under audio_samples/).
+- [ ] Beam *helps* check: higgs/ark beam-2 == greedy on the easy JFK clip (proves no
+  regression); run `-bs 4` on a noisy/accented clip to see if WER actually improves
+  or beam is just cost.
+
+**Audit tooling (LOW, reusable):**
+- [ ] Generalize the manual wiring cross-check into `tools/check-backend-wiring.py`:
+  for every backend, verify presence across factory / c_api `available_backends` /
+  registry / Go LDFLAGS / feature-matrix / cli.md-beam / streaming / test /
+  reference-dumper, and print a pass/gap matrix (standalone dumpers like bark/melotts
+  are an accepted pattern — don't flag them). CI-friendly; no models/GPU.
+
+---
+
 ## Recent-backend audit — wiring gaps + easy wins (last 10 backends) — CLOSED
 
 Audit of the 10 most recently added backends (moss-transcribe, higgs-stt,
