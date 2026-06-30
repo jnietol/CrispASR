@@ -10,6 +10,39 @@ If a lesson is still "live" (affects current work), it's linked from
 
 ---
 
+## Parakeet single-pass DROPS whole sections of long audio — chunk-and-merge, and pick the reference clip carefully (#208b)
+
+Parakeet's TDT decoder loses track once the input runs past ~30 s: a single
+full-length pass on a 296 s clip emitted **338** words where the audio holds
+~620 (it silently skips whole sentences/sections, not a few words at the edges).
+Three traps while diagnosing this:
+1. **It is not a quantization problem.** The F16 model dropped *more* (255) than
+   Q4_K (338). Don't reach for "the quant is lossy" — A/B a higher-precision
+   build before blaming the quant.
+2. **whisper is not automatically ground truth.** whisper-large-v3-turbo also
+   dropped a section here, and its word count (501) looked authoritative — but
+   the clip genuinely *repeats* a passage (a sloppy FLEURS concat) and whisper
+   emitted it once. Transcribing the two time windows *independently* (short
+   single-pass, fully reliable) proved the audio says it twice → parakeet's
+   "duplicate" was correct and whisper was the one losing words. When two ASR
+   models disagree ~40-68 % on a clip, suspect the *clip* (adversarial / repeated
+   / concatenated content), and verify with short-window crops before trusting
+   either as a reference.
+3. **WER vs another model is the wrong yardstick for "did *my* pipeline lose
+   words".** It's dominated by model disagreement. Use a clip with *exact*
+   ground truth instead: concatenating jfk.wav ×12 (132 s, known 264-word
+   transcript) gave a precise, model-agnostic measure — the merge scored 264/264
+   even with an identical sentence every 11 s (time-based splice, so repeated
+   text doesn't confuse it).
+
+Fix pattern (`parakeet_session_chunked_merge`): short **overlapping** windows
+(20 s / 8 s overlap), splice at the overlap midpoint **continuing from the last
+committed word's end** (continuing by `t0 >= mid` instead drops the one word that
+straddles the midpoint — measured as a ~3.7 % loss vs single-pass on clean
+German; `t1 > cont` fixed it to 99.6 %), then an adjacent-dedup pass for
+jitter-doubled seam words. Net: ≥99 % retention on clean audio AND recovery of
+the sections a single pass drops on long/adversarial audio.
+
 ## A cached cgraph is NOT re-entrant with ggml_backend_sched — the 2nd reuse silently corrupts (#208)
 
 §176s cached the built Parakeet encoder graph (`cached_enc_gf`) and reused it

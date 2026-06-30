@@ -50,6 +50,37 @@ measuring the host/GPU ratio, not by assuming. Full write-up + table in
 probe. ICB is closed, not open. Real M1-decode levers are GPU-side (quant
 bandwidth, kernel fusion).
 
+## #208b 2026-06-30 Parakeet long-audio: overlapping-window merge (supersedes silence-split)
+
+Follow-up to #208 (below). Validating "lose no words" on >2-min en/de/ja exposed
+that **parakeet single-pass silently DROPS whole sections of long audio** — the
+TDT decoder loses track past ~30 s, so a single full-length pass on a 296 s clip
+emitted only 338 words where the audio has ~620. This is **not** a quantization
+artifact: the F16 model is *worse* (255 words) than Q4_K (338). It is also not
+unique to parakeet — whisper-large-v3-turbo dropped a section too (it lost one of
+two genuinely-repeated FLEURS passages; verified by transcribing the two time
+windows independently — the audio really says it twice, so parakeet was *right*
+and whisper was the one losing words). The original #208 silence-split path
+inherited the drop (its pieces ran up to the 300 s cap).
+
+Fix: replaced `parakeet_session_longform` (silence-cut + hard-t0 commit) with
+`parakeet_session_chunked_merge` — transcribe in short **overlapping** windows
+(default 20 s, 8 s overlap; the decoder is reliable at that length), splice
+consecutive windows at the overlap midpoint *continuing from the last committed
+word's end* (no boundary drop), then an adjacent-dedup pass removes any
+jitter-doubled seam word. Non-JA long audio uses it; JA stays on the streamed
+encoder; audio ≤ one window is a single exact pass. Knobs:
+`CRISPASR_PARAKEET_CHUNK_SECONDS` / `_CHUNK_OVERLAP`;
+`CRISPASR_PARAKEET_STREAM_THRESHOLD` now forces one exact pass up to N s
+(escape hatch for NeMo-exact bit-repro on known-clean audio).
+
+Validated (Q4_K v3, M1/Metal): **jfk×12 (132 s, exact ground truth = 264 words):
+264/264, byte-exact, no drop/dup even with identical sentences every 11 s**;
+German 296 s: **99.6 % word retention** vs reliable single-pass (D=2); English
+296 s: 653 vs single-pass 338 (recovers the dropped + genuinely-repeated
+sections); Japanese 240 s: 346 vs 320. 746/746 unit tests green. See
+[[LEARNINGS]].
+
 ## #208 2026-06-30 Parakeet session API: bounded long-audio + repeated-call collapse fixed
 
 Reporter: the session/Rust `Session::transcribe` always ran Parakeet through the

@@ -382,18 +382,17 @@ impl Session {
     }
 
     /// Chunked-encode transcribe (issue #208). Forces the Parakeet backend
-    /// through its bounded long-form path (NeMo-exact single-pass +
-    /// silence-split for non-JA models, overlapping streamed encoder for the
+    /// through its bounded long-form path (overlapping short-window
+    /// transcribe-and-merge for non-JA models, streamed encoder for the
     /// JA-only model) regardless of audio length, so long files transcribe
-    /// in bounded time instead of one O(T²) full-length FastConformer encode
-    /// (which on the Metal backend grinds for minutes and looks like a hang
-    /// to the caller).
+    /// in bounded time AND recover the sections a single full-length pass
+    /// drops (the decoder loses track past ~30 s; a single pass on a 5-min
+    /// clip can omit half the words).
     ///
-    /// `chunk_seconds <= 0` keeps the per-model defaults; otherwise it caps
-    /// the non-JA single-pass pieces / sizes the JA streamed window.
-    /// `overlap_seconds < 0` uses the default. For non-Parakeet backends the
-    /// chunk parameters are inert and this is equivalent to
-    /// [`Self::transcribe`].
+    /// `chunk_seconds <= 0` keeps the per-model defaults; otherwise it sets
+    /// the non-JA window length / the JA streamed window. `overlap_seconds
+    /// < 0` uses the default. For non-Parakeet backends the chunk parameters
+    /// are inert and this is equivalent to [`Self::transcribe`].
     pub fn transcribe_chunked(
         &self,
         pcm: &[f32],

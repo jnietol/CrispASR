@@ -1480,8 +1480,8 @@ struct crispasr_session {
     // Issue #208: explicit chunked-encode override for the Parakeet backend.
     // crispasr_session_transcribe_chunked[_lang] sets these for the duration
     // of a single call (restored by a scope guard) to force the bounded
-    // long-form path (single-pass + silence-split for non-JA, streamed for
-    // JA) with caller-chosen window sizes, bypassing the length-based
+    // long-form path (overlapping-window merge for non-JA, streamed encoder
+    // for JA) with caller-chosen window sizes, bypassing the length-based
     // auto-selection in transcribe_single. -1 = unset. chunk == 0 (when
     // forced) means "keep the per-model defaults".
     int parakeet_force_chunk_seconds = -1;
@@ -3454,99 +3454,143 @@ CA_EXPORT crispasr_session_result* crispasr_session_transcribe_lang(crispasr_ses
 // session path bounds the FastConformer encode on long audio instead of
 // building one O(T^2) full-length graph.
 
-// Find a silence cut near `target` within [target - window, target] by
-// locating the lowest-RMS 100 ms frame. Keeps chunk boundaries off mid-word
-// so single-pass pieces concatenate cleanly with no overlap/merge.
-static int parakeet_find_silence_cut(const float* s, int n, int target, int window, int sr) {
-    const int lo = std::max(1, target - window);
-    const int hi = std::min(n - 1, target);
-    if (hi <= lo)
-        return std::min(std::max(target, 1), n);
-    const int win = std::max(1, sr / 10); // 100 ms
-    double best = 1e30;
-    int best_pos = target;
-    for (int c = lo; c <= hi; c += win / 2) {
-        const int a = std::max(0, c - win / 2);
-        const int b = std::min(n, c + win / 2);
-        double e = 0.0;
-        for (int i = a; i < b; i++)
-            e += (double)s[i] * (double)s[i];
-        e /= std::max(1, b - a);
-        if (e < best) {
-            best = e;
-            best_pos = c;
+// Normalize a word for boundary-dedup comparison: lowercase + drop ASCII
+// punctuation. Non-ASCII bytes (JA / accented text) are kept verbatim.
+static std::string parakeet_norm_word(const char* s) {
+    std::string o;
+    for (const char* p = s; *p; ++p) {
+        unsigned char c = (unsigned char)*p;
+        if (c < 0x80) {
+            if (std::isalnum(c))
+                o += (char)std::tolower(c);
+        } else {
+            o += (char)c;
         }
     }
-    return best_pos;
+    return o;
 }
 
-// Split `samples` at silence into pieces no longer than `cap_samples`,
-// transcribe each with the NeMo-exact single full-attention pass (with ±2 s
-// acoustic context, committing only the [pos,end) core by word timestamp),
-// and append one session segment per piece to `out`. Cuts fall in silence so
-// adjacent pieces share the cut with no overlap, gap, or duplicate words.
-static void parakeet_session_longform(parakeet_context* ctx, const float* samples, int n_samples, int cap_samples,
-                                      std::vector<crispasr_session_seg>& out) {
+// Long-audio transcription that loses no words and adds no duplicates.
+//
+// Parakeet's bidirectional FastConformer encoder + TDT decoder silently
+// DROP whole sections when fed more than ~30 s in one pass — the decoder
+// loses track across topic / silence changes (reproducible even at 60 s on
+// content that shifts topic). A single full-length pass therefore omits
+// large spans of speech. We instead transcribe the audio in short
+// OVERLAPPING windows, each well within the reliable range, and merge them:
+//
+//   * window i covers [pos, pos+chunk]; the next starts `overlap` before the
+//     previous window's end, so every instant is covered and every seam
+//     region by two windows.
+//   * consecutive windows are spliced at the MIDPOINT of their overlap, so
+//     each boundary word comes from the window that saw it with the most
+//     surrounding context — no section is dropped at a seam.
+//   * a final adjacent-duplicate pass removes the at-most-one word that
+//     timestamp jitter can double at a splice (genuine immediate repeats,
+//     which are >~0.3 s apart, are kept).
+//
+// Result: one merged segment whose word set is the union of all windows
+// (nothing dropped) with no boundary duplication.
+static void parakeet_session_chunked_merge(parakeet_context* ctx, const float* samples, int n_samples,
+                                           int chunk_samples, int overlap_samples,
+                                           std::vector<crispasr_session_seg>& out) {
     const int SR = 16000;
-    const int search = 5 * SR; // search last 5 s of each window for silence
-    const int ctx_pad = 2 * SR;
-    int pos = 0;
-    while (pos < n_samples) {
-        int end;
-        if (n_samples - pos <= cap_samples) {
-            end = n_samples;
-        } else {
-            end = parakeet_find_silence_cut(samples, n_samples, pos + cap_samples, search, SR);
-            if (end <= pos)
-                end = std::min(n_samples, pos + cap_samples); // safety: never stall
-        }
-        const int ext_s = std::max(0, pos - ctx_pad);
-        const int ext_e = std::min(n_samples, end + ctx_pad);
-        const int64_t ext_t0 = (int64_t)((double)ext_s / SR * 100.0);
-        const int64_t left_cs = (pos == 0) ? INT64_MIN : (int64_t)((double)pos / SR * 100.0);
-        const int64_t right_cs = (end == n_samples) ? INT64_MAX : (int64_t)((double)end / SR * 100.0);
+    if (chunk_samples < SR)
+        chunk_samples = SR; // 1 s floor
+    if (overlap_samples < 0)
+        overlap_samples = 0;
+    if (overlap_samples >= chunk_samples)
+        overlap_samples = chunk_samples / 3;
+    const int stride = std::max(SR / 2, chunk_samples - overlap_samples);
 
-        parakeet_result* r = parakeet_transcribe_ex(ctx, samples + ext_s, ext_e - ext_s, ext_t0);
+    struct MWord {
+        std::string text;
+        int64_t t0, t1;
+        float p;
+    };
+    std::vector<MWord> merged;
+    int64_t prev_end_cs = -1;
+
+    for (int pos = 0; pos < n_samples; pos += stride) {
+        const int end = std::min(n_samples, pos + chunk_samples);
+        const int64_t pos_cs = (int64_t)((double)pos / SR * 100.0);
+        parakeet_result* r = parakeet_transcribe_ex(ctx, samples + pos, end - pos, pos_cs);
         if (r) {
-            crispasr_session_seg seg;
-            std::string text;
-            for (int i = 0; i < r->n_words; ++i) {
-                const auto& w = r->words[i];
-                if (w.t0 >= left_cs && w.t0 < right_cs) {
-                    if (!text.empty())
-                        text += ' ';
-                    text += w.text;
-                    crispasr_session_seg::word sw;
-                    sw.text = w.text;
-                    sw.t0 = w.t0;
-                    sw.t1 = w.t1;
-                    sw.p = w.p > 0.0f ? w.p : 1.0f;
-                    seg.words.push_back(std::move(sw));
+            if (merged.empty()) {
+                for (int i = 0; i < r->n_words; ++i)
+                    merged.push_back({r->words[i].text, r->words[i].t0, r->words[i].t1,
+                                      r->words[i].p > 0.0f ? r->words[i].p : 1.0f});
+            } else {
+                // Splice at the midpoint of the overlap [pos_cs, prev_end_cs]:
+                // drop merged's tail past the midpoint (the new window saw it
+                // with more right-context), then CONTINUE from the end of the
+                // last word still committed — take new words that end after it
+                // (t1 > cont). Continuing by the committed word's end, rather
+                // than a strict `t0 >= mid` cut, avoids dropping the one word
+                // that can straddle the midpoint. Any resulting near-duplicate
+                // is removed by the adjacent-dedup pass below.
+                const int64_t mid_cs = (pos_cs + prev_end_cs) / 2;
+                while (!merged.empty() && merged.back().t0 >= mid_cs)
+                    merged.pop_back();
+                const int64_t cont_cs = merged.empty() ? mid_cs : merged.back().t1;
+                for (int i = 0; i < r->n_words; ++i) {
+                    if (r->words[i].t1 > cont_cs)
+                        merged.push_back({r->words[i].text, r->words[i].t0, r->words[i].t1,
+                                          r->words[i].p > 0.0f ? r->words[i].p : 1.0f});
                 }
             }
-            seg.text = std::move(text);
-            if (!seg.words.empty()) {
-                seg.t0 = seg.words.front().t0;
-                seg.t1 = seg.words.back().t1;
-            }
+            prev_end_cs = (int64_t)((double)end / SR * 100.0);
             parakeet_result_free(r);
-            if (!seg.text.empty() || !seg.words.empty())
-                out.push_back(std::move(seg));
         }
-        pos = end;
+        if (end >= n_samples)
+            break;
     }
+
+    // Adjacent-duplicate removal (jitter safety at splices).
+    std::vector<MWord> dedup;
+    dedup.reserve(merged.size());
+    for (auto& w : merged) {
+        if (!dedup.empty()) {
+            const auto& prev = dedup.back();
+            if (llabs(w.t0 - prev.t0) < 30 &&
+                parakeet_norm_word(prev.text.c_str()) == parakeet_norm_word(w.text.c_str()))
+                continue;
+        }
+        dedup.push_back(std::move(w));
+    }
+    if (dedup.empty())
+        return;
+
+    crispasr_session_seg seg;
+    std::string text;
+    seg.words.reserve(dedup.size());
+    for (auto& w : dedup) {
+        if (!text.empty())
+            text += ' ';
+        text += w.text;
+        crispasr_session_seg::word sw;
+        sw.text = w.text;
+        sw.t0 = w.t0;
+        sw.t1 = w.t1;
+        sw.p = w.p;
+        seg.words.push_back(std::move(sw));
+    }
+    seg.text = std::move(text);
+    seg.t0 = dedup.front().t0;
+    seg.t1 = dedup.back().t1;
+    out.push_back(std::move(seg));
 }
 #endif
 
 // Issue #208: explicit chunked-encode transcribe for batch callers.
 //
-// Forces the Parakeet backend through the bounded long-form path (NeMo-exact
-// single-pass + silence-split for non-JA models, overlapping streamed encoder
-// for the JA-only model) regardless of audio length, so long files
-// transcribe in bounded time instead of building one O(T^2) full-length
-// FastConformer graph. `chunk_seconds <= 0` keeps the per-model defaults;
-// otherwise it caps the non-JA single-pass pieces / sizes the JA streamed
-// window. `overlap_seconds < 0` uses the default.
+// Forces the Parakeet backend through the bounded long-form path (overlapping
+// short-window transcribe-and-merge for non-JA models, streamed encoder for
+// the JA-only model) regardless of audio length, so long files transcribe in
+// bounded time AND recover the sections a single full-length pass drops.
+// `chunk_seconds <= 0` keeps the per-model defaults; otherwise it sets the
+// non-JA window length / the JA streamed window. `overlap_seconds < 0` uses
+// the default.
 //
 // For every NON-Parakeet backend the chunk parameters are inert and this is
 // exactly equivalent to crispasr_session_transcribe_lang — callers can use
@@ -3760,73 +3804,82 @@ static crispasr_session_result* transcribe_single(crispasr_session* s, const flo
     }
 #ifdef CA_HAVE_PARAKEET
     if (s->backend == "parakeet" && s->parakeet_ctx) {
-        // Issue #208: the session path used to always call
-        // parakeet_transcribe_ex, which routes the WHOLE buffer through one
-        // full-length FastConformer encode. The encoder's relative-position
-        // self-attention is O(T^2) in T_enc, so long audio builds one
-        // enormous graph that on Metal grinds for minutes inside a single
-        // ggml_backend_sched_graph_compute — indistinguishable from a hang to
-        // the host. Bound the encode the same way the CLI adapter does
-        // (examples/cli/crispasr_backend_parakeet.cpp), so every session
-        // caller (Rust/Go/server/Dart bindings) gets bounded long-audio
-        // transcription:
+        // Issue #208: the session path used to call parakeet_transcribe_ex,
+        // routing the WHOLE buffer through one full-length FastConformer
+        // encode. Two problems on long audio: (1) the encoder's
+        // relative-position self-attention is O(T^2) in T_enc, so the single
+        // graph grinds for minutes on Metal (looks like a hang); (2) far worse
+        // for accuracy, the TDT decoder silently DROPS whole sections of
+        // speech once the input exceeds ~30 s — it loses track across topic /
+        // silence changes (reproducible even at 60 s), so a single pass omits
+        // large spans of words.
         //
-        //   * non-JA (multilingual / v3 / English, vocab >= 4000): the single
-        //     full-attention pass is byte-for-byte NeMo-exact, so keep it for
-        //     audio up to a memory-safe cap, then silence-split into <=cap
-        //     single-pass pieces and concatenate (transcribe_streamed/_chunked
-        //     COLLAPSE to all-blank on the v3 model — see issue #89 notes — so
-        //     they must NOT be used here).
-        //   * JA-only (vocab < 4000): single-pass degenerates on long audio
-        //     (#89), so use the overlapping streamed encoder instead.
-        //
-        // Short audio (<= cap) stays on the exact single-pass path →
-        // byte-identical to the previous behaviour. Env knobs mirror the CLI
-        // adapter so behaviour is consistent across entry points.
+        // Fix: transcribe long audio in short OVERLAPPING windows that stay in
+        // the model's reliable range and merge them
+        // (parakeet_session_chunked_merge) — every section is covered, seams
+        // are spliced at the overlap midpoint, and a dedup pass removes any
+        // jitter-doubled boundary word. JA-only models (single-pass collapses
+        // on long audio, #89) use the overlapping streamed encoder instead.
+        // Audio up to one window is a single exact pass (unchanged).
         const int SR = 16000;
         // JA-model detection matches the CLI adapter (is_ja_model_).
         const bool is_ja = parakeet_n_vocab(s->parakeet_ctx) <= 4096;
-        int cap_s = 300;        // single-pass memory-safe cap (s); 0 disables single-pass
+        int chunk_s = 20;       // non-JA overlapping-window length (s)
+        int overlap_s = 8;      // window overlap (s)
         int stream_chunk_s = 0; // JA streamed window (s); 0 = library per-model default
         int stream_overlap_s = 2;
-        if (const char* e = getenv("CRISPASR_PARAKEET_STREAM_THRESHOLD"))
-            cap_s = std::max(0, atoi(e));
+        int single_pass_max_s = 0; // escape hatch: force one exact pass up to N s (0 = off)
+        if (const char* e = getenv("CRISPASR_PARAKEET_CHUNK_SECONDS"))
+            chunk_s = std::max(4, atoi(e));
+        if (const char* e = getenv("CRISPASR_PARAKEET_CHUNK_OVERLAP"))
+            overlap_s = std::max(0, atoi(e));
         if (const char* e = getenv("CRISPASR_PARAKEET_STREAM_CHUNK"))
             stream_chunk_s = std::max(2, atoi(e));
         if (const char* e = getenv("CRISPASR_PARAKEET_STREAM_OVERLAP"))
             stream_overlap_s = std::max(0, atoi(e));
+        if (const char* e = getenv("CRISPASR_PARAKEET_STREAM_THRESHOLD"))
+            single_pass_max_s = std::max(0, atoi(e));
 
         // Explicit per-call chunked request (issue #208 option 1, via
-        // crispasr_session_transcribe_chunked[_lang]) forces the bounded
-        // long-form path regardless of length and lets the caller size the
-        // window: chunk_seconds caps the non-JA single-pass pieces and sets
-        // the JA streamed window; 0 keeps the per-model defaults.
+        // crispasr_session_transcribe_chunked[_lang]) forces the bounded path
+        // regardless of length and sizes the window (chunk_seconds → window
+        // length / JA streamed window; overlap_seconds → window overlap).
         const bool force_chunked = s->parakeet_force_chunk_seconds >= 0;
         if (force_chunked) {
             if (s->parakeet_force_chunk_seconds > 0) {
-                cap_s = s->parakeet_force_chunk_seconds;
+                chunk_s = std::max(4, s->parakeet_force_chunk_seconds);
                 stream_chunk_s = s->parakeet_force_chunk_seconds;
             }
-            if (s->parakeet_force_overlap_seconds >= 0)
+            if (s->parakeet_force_overlap_seconds >= 0) {
+                overlap_s = s->parakeet_force_overlap_seconds;
                 stream_overlap_s = s->parakeet_force_overlap_seconds;
+            }
         }
 
-        const bool bounded = force_chunked || (cap_s > 0 && (int64_t)n_samples > (int64_t)cap_s * SR);
+        // A single exact pass is used only for audio that fits in one window
+        // (or up to the explicit single_pass_max_s escape hatch). Anything
+        // longer is chunked, since the decoder drops sections past ~one window.
+        const int64_t chunk_samp = (int64_t)chunk_s * SR;
+        bool use_single_pass;
+        if (force_chunked)
+            use_single_pass = false;
+        else if (single_pass_max_s > 0)
+            use_single_pass = (int64_t)n_samples <= (int64_t)single_pass_max_s * SR;
+        else
+            use_single_pass = (int64_t)n_samples <= chunk_samp;
 
-        // non-JA long-form: NeMo-exact single-pass + silence-split. Produces
-        // one session segment per piece (no merge needed; cuts fall in
-        // silence so there are no boundary duplicates).
-        if (bounded && !is_ja) {
-            const int cap_samples = (cap_s > 0 ? cap_s : 300) * SR;
-            parakeet_session_longform(s->parakeet_ctx, pcm, n_samples, cap_samples, r->segments);
+        // non-JA long audio → overlapping-window merge (no dropped sections,
+        // no boundary duplicates). Emits one merged segment.
+        if (!use_single_pass && !is_ja) {
+            parakeet_session_chunked_merge(s->parakeet_ctx, pcm, n_samples, chunk_s * SR, overlap_s * SR, r->segments);
             return r;
         }
 
-        // JA long-form → streamed; everything else (short audio) → the exact
-        // single full-attention pass. Both yield one parakeet_result.
-        parakeet_result* pr = (bounded && is_ja) ? parakeet_transcribe_streamed(s->parakeet_ctx, pcm, n_samples, 0,
-                                                                                stream_chunk_s, stream_overlap_s)
-                                                 : parakeet_transcribe_ex(s->parakeet_ctx, pcm, n_samples, 0);
+        // JA long audio → streamed; short audio → the exact single pass.
+        parakeet_result* pr =
+            (!use_single_pass && is_ja)
+                ? parakeet_transcribe_streamed(s->parakeet_ctx, pcm, n_samples, 0, stream_chunk_s, stream_overlap_s)
+                : parakeet_transcribe_ex(s->parakeet_ctx, pcm, n_samples, 0);
         if (!pr) {
             delete r;
             return nullptr;
