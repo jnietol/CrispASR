@@ -6,6 +6,35 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## #205 2026-06-30 `--max-len` for text-only backends + granite-plus timestamp-mode derail
+
+Reporter: `--max-len` had no effect on granite / qwen3 (worked on whisper/cohere).
+Root cause: `crispasr_make_disp_segments` could only split when a segment carried
+word-level timings; granite/qwen3 (and granite-plus in plain mode) return
+text-only segments, so `--max-len` (and `-osrt`/`-ovtt`/`--split-on-punct`) were
+no-ops. Fix: when a segment has text but no usable words and `max_len > 0`, split
+the TEXT itself — greedy word-packing to ≤ max_len bytes (over-long tokens /
+space-less scripts broken at UTF-8 codepoint boundaries), timestamps interpolated
+by cumulative char length; composes with `--split-on-punct`
+(`examples/cli/crispasr_output.cpp`).
+
+Second issue (granite **plus**): the model's word-timestamp instruction
+("After each word add a timestamp tag … hello [T:45]") derails the decoder into a
+repetition loop ("thank you thank you …") — garbage for every output that
+triggered it (srt/vtt/--max-len and even --output-wts / json-full). Plain
+transcription is perfect. Since the new text-splitter no longer needs the model's
+timestamps for subtitles, timestamp mode is now **off by default** (opt back in
+with `CRISPASR_GRANITE_WORD_TS=1`); all granite outputs use the clean plain
+transcript with interpolated subtitle timing. This also fixes the reporter's
+"words concatenated without spaces" (that came from the word-join path now
+avoided).
+
+Validated (M1/Metal, jfk.wav): non-plus granite & qwen3 `--max-len 30/25` → clean
+≤N-char SRT lines (were unsplit); plus `-osrt --max-len` and `--output-json-full`
+→ correct text (were "thank you" loops); parakeet `--max-len` still word-timed (no
+regression); 746/746 unit tests (updated the test that pinned the old
+no-split-without-words behaviour).
+
 ## §210 2026-06-30 Granite CUDA-graph bucketed decode (PR #207) + Metal raw-gallocr allocate-once
 
 External PR #207 (sims1253) brought **CUDA-graph capture** to granite-speech's

@@ -117,14 +117,30 @@ TEST_CASE("make_disp_segments: max_len splits when words present", "[unit][max-l
     REQUIRE(disp[0].text.size() <= 10);
 }
 
-TEST_CASE("make_disp_segments: no split without words even with max_len", "[unit][max-len]") {
-    // Without word data, max_len can't split — verify the segment passes through whole.
+TEST_CASE("make_disp_segments: splits text by max_len without words (#205)", "[unit][max-len]") {
+    // #205: text-only segments (granite/qwen3 non-plus, plus model in plain
+    // mode) carry no word timings, but --max-len must still split the text on
+    // word boundaries and interpolate timestamps.
     std::vector<crispasr_segment> segs;
     segs.push_back(make_seg("The quick brown fox jumps over the lazy dog", 0, 100));
 
     auto disp = crispasr_make_disp_segments(segs, 10);
-    REQUIRE(disp.size() == 1);
-    REQUIRE(disp[0].text == "The quick brown fox jumps over the lazy dog");
+    REQUIRE(disp.size() >= 2);
+    // Every piece is at most max_len bytes and on word boundaries.
+    std::string joined;
+    for (const auto& d : disp) {
+        REQUIRE(d.text.size() <= 10);
+        REQUIRE(!d.text.empty());
+        if (!joined.empty())
+            joined += " ";
+        joined += d.text;
+    }
+    REQUIRE(joined == "The quick brown fox jumps over the lazy dog");
+    // Timestamps stay within the segment and advance monotonically.
+    REQUIRE(disp.front().t0 == 0);
+    REQUIRE(disp.back().t1 == 100);
+    for (size_t i = 1; i < disp.size(); ++i)
+        REQUIRE(disp[i].t0 >= disp[i - 1].t0);
 }
 
 TEST_CASE("make_disp_segments: max_len=0 does not split", "[unit][max-len]") {

@@ -203,8 +203,18 @@ public:
             // timestamps via mode-specific instruction strings.
             const bool is_plus = granite_speech_is_plus(ctx_);
             const bool want_saa = is_plus && params.diarize;
-            const bool want_ts = is_plus && (params.output_wts || params.output_jsn_full || params.max_len > 0 ||
-                                             params.output_srt || params.output_vtt || params.split_on_punct);
+            // #205: the plus model's word-timestamp instruction derails the
+            // decoder into a repetition loop ("thank you thank you ...") and
+            // returns garbage for EVERY output mode that used to request it
+            // (srt/vtt/--max-len/--split-on-punct and even --output-wts /
+            // json-full). It is therefore OFF by default — all outputs use a
+            // clean plain-text transcription, with subtitle line-splitting and
+            // per-word timings interpolated downstream
+            // (crispasr_make_disp_segments). Set CRISPASR_GRANITE_WORD_TS=1 to
+            // re-enable the model's native timestamp mode (for explicit
+            // per-word-timestamp outputs, once the model/prompt is fixed).
+            const bool want_ts = is_plus && (params.output_wts || params.output_jsn_full) &&
+                                 getenv("CRISPASR_GRANITE_WORD_TS") != nullptr;
 
             std::string user_content;
             if (want_saa && want_ts) {
@@ -287,8 +297,11 @@ public:
 
         const bool is_plus = granite_speech_is_plus(ctx_);
         const bool want_saa = is_plus && params.diarize;
-        const bool want_ts = is_plus && (params.output_wts || params.output_jsn_full || params.max_len > 0 ||
-                                         params.output_srt || params.output_vtt || params.split_on_punct);
+        // #205: the plus timestamp mode derails the decoder, so it is off by
+        // default (opt in with CRISPASR_GRANITE_WORD_TS=1). See the comment at
+        // the prompt-construction site.
+        const bool want_ts =
+            is_plus && (params.output_wts || params.output_jsn_full) && getenv("CRISPASR_GRANITE_WORD_TS") != nullptr;
         const int max_new = params.max_new_tokens > 0 ? params.max_new_tokens : (want_ts ? 4096 : 200);
 
         // ---- Beam search path ----
@@ -600,8 +613,11 @@ public:
         // output can be structured — fall back to the batch transcribe() base path.
         const bool is_plus = granite_speech_is_plus(ctx_);
         const bool want_saa = is_plus && params.diarize;
-        const bool want_ts = is_plus && (params.output_wts || params.output_jsn_full || params.max_len > 0 ||
-                                         params.output_srt || params.output_vtt || params.split_on_punct);
+        // #205: the plus timestamp mode derails the decoder, so it is off by
+        // default (opt in with CRISPASR_GRANITE_WORD_TS=1). See the comment at
+        // the prompt-construction site.
+        const bool want_ts =
+            is_plus && (params.output_wts || params.output_jsn_full) && getenv("CRISPASR_GRANITE_WORD_TS") != nullptr;
         if (params.beam_size > 1 || want_saa || want_ts) {
             CrispasrBackend::transcribe_streaming(samples, n_samples, t_offset_cs, params, on_text);
             return;

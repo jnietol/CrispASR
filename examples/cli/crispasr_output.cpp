@@ -266,6 +266,87 @@ static bool words_carry_sentence_ends(const std::vector<crispasr_word>& words) {
     return false;
 }
 
+// Split `text` on ASCII whitespace into tokens (no empty tokens).
+static std::vector<std::string> split_ws_words(const std::string& s) {
+    std::vector<std::string> w;
+    std::string cur;
+    for (char c : s) {
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            if (!cur.empty()) {
+                w.push_back(cur);
+                cur.clear();
+            }
+        } else {
+            cur += c;
+        }
+    }
+    if (!cur.empty())
+        w.push_back(cur);
+    return w;
+}
+
+// Append `tok` to `out`, broken at UTF-8 codepoint boundaries into pieces of
+// at most `max_len` bytes. Used for a single token longer than max_len and for
+// space-less scripts (CJK), where word packing can't break the text.
+static void split_long_token(const std::string& tok, int max_len, std::vector<std::string>& out) {
+    std::string cur;
+    for (size_t i = 0; i < tok.size();) {
+        size_t cp = 1;
+        unsigned char b = (unsigned char)tok[i];
+        if (b >= 0xF0)
+            cp = 4;
+        else if (b >= 0xE0)
+            cp = 3;
+        else if (b >= 0xC0)
+            cp = 2;
+        if (i + cp > tok.size())
+            cp = tok.size() - i;
+        if (!cur.empty() && (int)(cur.size() + cp) > max_len) {
+            out.push_back(cur);
+            cur.clear();
+        }
+        cur.append(tok, i, cp);
+        i += cp;
+    }
+    if (!cur.empty())
+        out.push_back(cur);
+}
+
+// Greedily pack `text` into lines of at most `max_len` bytes on whitespace word
+// boundaries (over-long tokens are split at codepoint boundaries). For text-only
+// backends that carry no word timings this is how --max-len is honoured (#205).
+static std::vector<std::string> pack_text_to_maxlen(const std::string& text, int max_len) {
+    std::vector<std::string> out;
+    auto words = split_ws_words(text);
+    if (words.empty()) {
+        if (!text.empty())
+            split_long_token(text, max_len, out);
+        return out;
+    }
+    std::string cur;
+    for (const auto& w : words) {
+        if ((int)w.size() > max_len) {
+            if (!cur.empty()) {
+                out.push_back(cur);
+                cur.clear();
+            }
+            split_long_token(w, max_len, out);
+            continue;
+        }
+        const size_t sep = cur.empty() ? 0 : 1;
+        if (!cur.empty() && (int)(cur.size() + sep + w.size()) > max_len) {
+            out.push_back(cur);
+            cur.clear();
+        }
+        if (!cur.empty())
+            cur += ' ';
+        cur += w;
+    }
+    if (!cur.empty())
+        out.push_back(cur);
+    return out;
+}
+
 std::vector<crispasr_disp_segment> crispasr_make_disp_segments(const std::vector<crispasr_segment>& segments,
                                                                int max_len, bool split_on_punct) {
     std::vector<crispasr_disp_segment> out;
@@ -279,9 +360,13 @@ std::vector<crispasr_disp_segment> crispasr_make_disp_segments(const std::vector
         const bool punct_in_text = split_on_punct && count_sentence_ends(seg.text) >= 2;
         const bool words_unhelpful = punct_in_text && !words_carry_sentence_ends(seg.words);
         if (seg.words.empty() || words_unhelpful || (max_len == 0 && !split_on_punct)) {
-            if (!seg.text.empty()) {
-                // If split_on_punct is enabled, split the text at sentence boundaries
-                // and interpolate timestamps proportionally.
+            if (seg.text.empty())
+                continue;
+
+            // No usable word timings. When max_len <= 0, keep the historical
+            // behaviour (split_on_punct splits sentences with frac-accurate
+            // timing; otherwise emit the whole text as one segment).
+            if (max_len <= 0) {
                 if (split_on_punct) {
                     auto sentences = split_text_at_punct(seg.text);
                     if (sentences.size() <= 1) {
@@ -299,6 +384,49 @@ std::vector<crispasr_disp_segment> crispasr_make_disp_segments(const std::vector
                 } else {
                     out.push_back({seg.t0, seg.t1, seg.text, seg.speaker});
                 }
+                continue;
+            }
+
+            // max_len > 0 but no word timings (#205: granite/qwen3 non-plus
+            // return text-only segments — --max-len used to be a no-op). Split
+            // the TEXT instead: optionally at sentence boundaries first, then
+            // pack to <= max_len bytes (max_len == 1 → one line per word), and
+            // interpolate timestamps by cumulative character length.
+            std::vector<std::string> sentences;
+            if (split_on_punct) {
+                for (const auto& sf : split_text_at_punct(seg.text))
+                    sentences.push_back(sf.first);
+            }
+            if (sentences.empty())
+                sentences.push_back(seg.text);
+
+            std::vector<std::string> pieces;
+            for (const auto& sent : sentences) {
+                if (max_len == 1) {
+                    for (const auto& wd : split_ws_words(sent))
+                        pieces.push_back(wd);
+                } else {
+                    for (auto& chunk : pack_text_to_maxlen(sent, max_len))
+                        pieces.push_back(std::move(chunk));
+                }
+            }
+            if (pieces.empty()) {
+                out.push_back({seg.t0, seg.t1, seg.text, seg.speaker});
+                continue;
+            }
+
+            const int64_t duration = seg.t1 - seg.t0;
+            size_t total = 0;
+            for (const auto& p : pieces)
+                total += p.size();
+            if (total == 0)
+                total = 1;
+            size_t acc = 0;
+            for (auto& p : pieces) {
+                int64_t s_t0 = seg.t0 + (int64_t)((double)acc / (double)total * (double)duration);
+                acc += p.size();
+                int64_t s_t1 = seg.t0 + (int64_t)((double)acc / (double)total * (double)duration);
+                out.push_back({s_t0, s_t1, std::move(p), seg.speaker});
             }
             continue;
         }
