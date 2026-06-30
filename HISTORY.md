@@ -6,6 +6,29 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## #205d 2026-06-30 Granite: keyword biasing (KWB) + incremental decoding (prefix_text)
+
+Wires up the last two granite-speech capabilities from the model card.
+
+- **Keyword List Biasing (KWB).** `--hotwords a,b,c` now appends ` Keywords: a,b,c`
+  to the ASR-family instruction (model card's KWB prompt), biasing recognition
+  toward those terms. Applies to plain / language / timestamp / SAA modes; skipped
+  for translation and fully-custom `--ask` prompts.
+- **Incremental decoding.** New `--prefix-text TEXT` seeds the start of the
+  assistant turn so the model continues from a previously-decoded transcript
+  instead of re-decoding it (model card's `prefix_text` field); the output is the
+  continuation only. Threaded into both chat templates.
+
+Both are applied in `transcribe()` and the streaming override — which also brings
+the streaming path's prompt builder up to the #205c template (system turn +
+`is_plus → control-token`); it had drifted to a system-less user-only prefix.
+
+Validated (M1/Metal, jfk.wav): `--prefix-text "And so, my fellow Americans, ask
+not what your country"` → continuation "can do for you, ask what you can do for
+your country."; `--hotwords … --max-len 30` composes with timestamps; plain /
+timestamps unregressed; 747/747 unit tests. (Keyword-biasing quality gain needs
+audio with rare terms to show; the wiring matches the model card.)
+
 ## #205c 2026-06-30 Granite-plus: byte-exact chat template (system turn) + combined SAA/timestamps
 
 Finishing #205b properly, by comparing against `transformers.apply_chat_template`

@@ -435,6 +435,8 @@ static bool whisper_params_parse_arg_backend_vad(int argc, char** argv, int& i, 
         } else {
             fprintf(stderr, "warning: cannot open hotwords file '%s'\n", path.c_str());
         }
+    } else if (arg == "--prefix-text") {
+        params.prefix_text = ARGV_NEXT;
     } else if (arg == "--hotwords-boost") {
         params.hotwords_boost = std::stof(ARGV_NEXT);
     } else if (arg == "--warmup") {
@@ -814,6 +816,14 @@ static void whisper_print_usage(int /*argc*/, char** argv, const whisper_params&
             params.split_on_punct ? "true" : "false");
     fprintf(stderr, "  -ml N,     --max-len N            [%-7d] maximum segment length in characters\n",
             params.max_len);
+    fprintf(stderr,
+            "             --hotwords LIST       [%-7s] comma-separated keyword list to bias recognition "
+            "(granite: KWB prompt)\n",
+            params.hotwords.empty() ? "" : params.hotwords.c_str());
+    fprintf(stderr,
+            "             --prefix-text TEXT    [%-7s] granite incremental decoding: seed the transcript so "
+            "the model continues from it\n",
+            params.prefix_text.empty() ? "" : "set");
     fprintf(stderr, "  -sow,      --split-on-word        [%-7s] split on word rather than on token\n",
             params.split_on_word ? "true" : "false");
     fprintf(stderr, "  -bo N,     --best-of N            [%-7d] number of best candidates to keep\n", params.best_of);

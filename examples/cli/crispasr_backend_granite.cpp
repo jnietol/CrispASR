@@ -175,6 +175,16 @@ public:
         }
         // Empty user_content ⇒ default plain ASR; each template supplies its own.
 
+        // #205: keyword/biasing list (KWB). Appending the keywords to an
+        // ASR-family instruction biases recognition toward them (model card:
+        // "... Keywords: ..."). Skip for translation and fully-custom (--ask)
+        // prompts, which are not ASR.
+        if (!params.hotwords.empty() && params.ask.empty() && !params.translate) {
+            if (user_content.empty())
+                user_content = "can you transcribe the speech into a written format?";
+            user_content += " Keywords: " + params.hotwords;
+        }
+
         // Chat-template selection.
         //
         // granite-4.0-1b was trained with a simple "USER: …\n ASSISTANT:"
@@ -210,7 +220,11 @@ public:
             const std::string instr = user_content.empty()
                                           ? std::string("can you transcribe the speech into a written format?")
                                           : user_content;
-            const std::string suffix_str = instr + "<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>";
+            // #205: incremental decoding — params.prefix_text seeds the start of
+            // the assistant turn so the model continues from it (output is the
+            // continuation only). Model card: the SAA `prefix_text` field.
+            const std::string suffix_str =
+                instr + "<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>" + params.prefix_text;
             int n = 0;
             int32_t* a = granite_speech_tokenize(ctx_, prefix_str.c_str(), &n);
             if (a && n > 0) {
@@ -227,8 +241,12 @@ public:
         } else {
             // granite-4.0/4.1-1b prompt: "USER: …\n ASSISTANT:"
             prefix_ids.assign(kPrefix4, kPrefix4 + kNumPrefix4);
-            if (!user_content.empty()) {
-                const std::string instr = user_content + "\n ASSISTANT:";
+            if (!user_content.empty() || !params.prefix_text.empty()) {
+                const std::string base = user_content.empty()
+                                             ? std::string("can you transcribe the speech into a written format?")
+                                             : user_content;
+                // prefix_text (#205) seeds the assistant turn for incremental decoding.
+                const std::string instr = base + "\n ASSISTANT:" + params.prefix_text;
                 int n = 0;
                 int32_t* a = granite_speech_tokenize(ctx_, instr.c_str(), &n);
                 if (a && n > 0) {
@@ -638,14 +656,39 @@ public:
         if (eos_tok < 0)
             eos_tok = kLegacyEos4;
 
-        const bool use_v3_template = (audio_tok < 50000);
+        // Streaming reaches here only for plain ASR (SAA / TS / beam fall back
+        // to the batch path above), so build the ASR-family instruction —
+        // language / translate / --ask, plus KWB and incremental decoding —
+        // exactly as transcribe() does, including the full control-token chat
+        // template with system turn (#205).
+        auto iso_to_eng = [](const std::string& c) -> std::string { return crispasr_iso_to_english_lang(c); };
+        std::string user_content;
+        if (!params.ask.empty()) {
+            user_content = params.ask;
+        } else if (params.translate) {
+            const std::string tgt =
+                params.target_lang.empty() ? std::string("English") : iso_to_eng(params.target_lang);
+            user_content = "can you translate the speech to " + tgt + "?";
+        } else if (!params.language.empty() && params.language != "auto") {
+            user_content = "can you transcribe the speech into " + iso_to_eng(params.language) + "?";
+        }
+        if (!params.hotwords.empty() && params.ask.empty() && !params.translate) {
+            if (user_content.empty())
+                user_content = "can you transcribe the speech into a written format?";
+            user_content += " Keywords: " + params.hotwords;
+        }
+
+        const bool use_v3_template = (audio_tok < 50000) || is_plus;
         std::vector<int32_t> prefix_ids, suffix_ids;
         if (use_v3_template) {
-            const std::string prefix_str = "<|start_of_role|>user<|end_of_role|>";
-            std::string suffix_str = "can you transcribe the speech into a written format?"
-                                     "<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>";
-            if (!params.ask.empty())
-                suffix_str = params.ask + "<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>";
+            const std::string prefix_str = "<|start_of_role|>system<|end_of_role|>You are a helpful assistant. Please "
+                                           "ensure responses are professional, accurate, and safe.<|end_of_text|>\n"
+                                           "<|start_of_role|>user<|end_of_role|>";
+            const std::string instr = user_content.empty()
+                                          ? std::string("can you transcribe the speech into a written format?")
+                                          : user_content;
+            const std::string suffix_str =
+                instr + "<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>" + params.prefix_text;
             int n = 0;
             int32_t* a = granite_speech_tokenize(ctx_, prefix_str.c_str(), &n);
             if (a && n > 0) {
@@ -661,8 +704,11 @@ public:
                 free(a);
         } else {
             prefix_ids.assign(kPrefix4, kPrefix4 + kNumPrefix4);
-            if (!params.ask.empty()) {
-                const std::string instr = params.ask + "\n ASSISTANT:";
+            if (!user_content.empty() || !params.prefix_text.empty()) {
+                const std::string base = user_content.empty()
+                                             ? std::string("can you transcribe the speech into a written format?")
+                                             : user_content;
+                const std::string instr = base + "\n ASSISTANT:" + params.prefix_text;
                 int n = 0;
                 int32_t* a = granite_speech_tokenize(ctx_, instr.c_str(), &n);
                 if (a && n > 0) {

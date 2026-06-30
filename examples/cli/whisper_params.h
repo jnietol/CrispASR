@@ -150,6 +150,10 @@ struct whisper_params {
     std::string parakeet_decoder; // "tdt" (default), "ctc" — selects parakeet decode head
     std::string hotwords;         // comma-separated hotword list (PLAN #98)
     float hotwords_boost = 2.0f;  // per-token log-prob boost for hotword prefix matches
+    // #205: granite-speech incremental decoding — seed the assistant turn with a
+    // previously-decoded transcript so the model continues from it instead of
+    // re-decoding (model-card `prefix_text`). Output is the continuation only.
+    std::string prefix_text;
     std::string lid_backend;
     std::string lid_model;
     // Post-ASR text LID: when set, after transcription completes, run
