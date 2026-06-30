@@ -2164,7 +2164,7 @@ int crispasr_mf_decode(const char* path, int want_channels, float** out_buf, int
 // to decode AAC/M4A/MP4 audio without ffmpeg. The OS provides hardware-
 // accelerated AAC decode for free. Gated on __ANDROID__ and the absence of
 // fdk-aac (if fdk-aac is linked, prefer it for consistency across platforms).
-#if defined(__ANDROID__)
+#if defined(CRISPASR_HAVE_MEDIA_NDK)
 #include <media/NdkMediaCodec.h>
 #include <media/NdkMediaExtractor.h>
 #include <media/NdkMediaFormat.h>
@@ -2331,7 +2331,7 @@ int crispasr_ndk_decode(const char* path, int want_channels, float** out_buf, in
     return 0;
 }
 } // namespace
-#endif // __ANDROID__
+#endif // CRISPASR_HAVE_MEDIA_NDK
 
 /// Decode an audio file into float32 mono PCM at 16 kHz. Supports WAV / MP3 /
 /// FLAC / AIFF / W64 / RF64 (miniaudio), OGG Vorbis (stb_vorbis), .opus
@@ -2448,7 +2448,7 @@ CA_EXPORT int crispasr_audio_load(const char* path, float** out_pcm, int* out_sa
             }
         }
 #endif
-#if defined(__ANDROID__)
+#if defined(CRISPASR_HAVE_MEDIA_NDK)
         // Android NDK MediaCodec fallback for AAC/M4A
         {
             float* ndk_buf = nullptr;
@@ -2623,7 +2623,7 @@ CA_EXPORT int crispasr_audio_load_stereo(const char* path, float** out_left, flo
         if (split_fallback(crispasr_m4a_decode) == 0)
             return 0;
 #endif
-#if defined(__ANDROID__)
+#if defined(CRISPASR_HAVE_MEDIA_NDK)
         if (split_fallback(crispasr_ndk_decode) == 0)
             return 0;
 #endif

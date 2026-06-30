@@ -115,6 +115,7 @@ if (CMAKE_SYSTEM_NAME MATCHES "Linux")
     option(CRISPASR_FFMPEG "crispasr: support building and linking with ffmpeg libs (avcodec, swresample, ...)" OFF)
 endif()
 
+option(CRISPASR_MEDIA_NDK              "crispasr: enable Android Media NDK (auto-detected)" ON)
 option(CRISPASR_COREML                "crispasr: enable Core ML framework"  OFF)
 option(CRISPASR_COREML_ALLOW_FALLBACK "crispasr: allow non-CoreML fallback" OFF)
 option(CRISPASR_OPENVINO              "crispasr: support for OpenVINO"      OFF)

@@ -493,10 +493,19 @@ if (WIN32)
     target_link_libraries(crispasr-lib PUBLIC winhttp mfplat mfreadwrite mfuuid ole32)
 endif()
 
-if (ANDROID)
+if (ANDROID AND CRISPASR_MEDIA_NDK)
     # mediandk: AMediaExtractor/AMediaCodec NDK API used by crispasr_audio.cpp
     # for hardware-accelerated AAC/MP3 decode (API 21+).
-    target_link_libraries(crispasr-lib PUBLIC mediandk)
+    # Not available on Termux — auto-detect the library before linking.
+    include(CheckLibraryExists)
+    check_library_exists(mediandk AMediaExtractor_new "" HAVE_MEDIANDK)
+    if (HAVE_MEDIANDK)
+        target_link_libraries(crispasr-lib PUBLIC mediandk)
+        target_compile_definitions(crispasr-lib PUBLIC CRISPASR_HAVE_MEDIA_NDK)
+        message(STATUS "Android Media NDK: enabled (libmediandk found)")
+    else()
+        message(STATUS "Android Media NDK: disabled (libmediandk not found — Termux?)")
+    endif()
 endif()
 
 if (CRISPASR_COREML)
