@@ -207,22 +207,30 @@ public:
             const std::string& v = p.tts_voice;
             bool is_wav = v.size() >= 4 && (v.substr(v.size() - 4) == ".wav" || v.substr(v.size() - 4) == ".WAV");
             if (is_wav) {
-                fprintf(stderr, "crispasr[tada]: --voice with a .wav file is not yet supported directly.\n"
-                                "  Convert your audio to a reference GGUF first:\n"
-                                "    python models/convert-tada-ref-to-gguf.py \\\n"
-                                "      --audio your_voice.wav \\\n"
-                                "      --transcript \"Exact words spoken in the audio.\" \\\n"
-                                "      --output tada-ref-custom.gguf\n"
-                                "  For non-English audio add: --language fr  (ar/ch/de/es/fr/it/ja/pl/pt)\n"
-                                "  Then: --voice tada-ref-custom.gguf\n");
+                // Direct .wav cloning isn't wired into the synth path yet; the
+                // voice reference must be a tada-ref.gguf. Build one from the
+                // .wav with the built-in make-ref pipeline (no Python needed):
+                fprintf(stderr,
+                        "crispasr[tada]: --voice with a .wav is not supported directly at synth time.\n"
+                        "  Build a reference GGUF from it once with the CLI --make-ref pipeline:\n"
+                        "    crispasr -m <tada-model.gguf> --make-ref \\\n"
+                        "      --voice %s --ref-text \"Exact words spoken in the audio.\" \\\n"
+                        "      --make-ref-output tada-ref-custom.gguf\n"
+                        "    (needs tada-encoder-*.gguf + tada-aligner-*.gguf next to the model,\n"
+                        "     or pass --make-ref-encoder/--make-ref-aligner)\n"
+                        "  Then synthesize with: --voice tada-ref-custom.gguf\n",
+                        v.c_str());
+                return false; // explicit voice couldn't be honored — fail loudly, don't use default
             } else {
                 prompt_path = crispasr_resolve_model_cli(p.tts_voice, p.backend, p.no_prints, p.cache_dir,
                                                          p.auto_download, p.model_quant);
-                if (prompt_path.empty() && !p.no_prints)
+                if (prompt_path.empty()) {
                     fprintf(stderr,
-                            "crispasr[tada]: --voice '%s' not found. "
-                            "Pass the path to a tada-ref.gguf file.\n",
+                            "crispasr[tada]: --voice '%s' could not be resolved. Pass the path to a "
+                            "tada-ref.gguf (or build one from a .wav with --make-ref).\n",
                             p.tts_voice.c_str());
+                    return false; // explicit voice couldn't be honored — fail loudly, don't use default
+                }
             }
         } else if (const char* env = getenv("TADA_PROMPT_CACHE"); env && *env) {
             prompt_path = env;

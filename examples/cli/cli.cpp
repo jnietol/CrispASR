@@ -2119,7 +2119,8 @@ int main(int argc, char** argv) {
         return crispasr_run_backend(params);
     }
 
-    if (params.fname_inp.empty() && !params.stream && params.tts_text.empty() && params.text_input.empty()) {
+    if (params.fname_inp.empty() && !params.stream && params.tts_text.empty() && params.text_input.empty() &&
+        !params.make_ref) {
         fprintf(stderr, "error: no input files specified\n");
         whisper_print_usage(argc, argv, params);
         return 2;
