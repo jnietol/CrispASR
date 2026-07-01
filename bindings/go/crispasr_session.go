@@ -90,8 +90,12 @@ typedef struct crispasr_session_result crispasr_session_result;
 crispasr_session_result* crispasr_session_transcribe(CrispasrSession* s, const float* pcm, int n_samples);
 crispasr_session_result* crispasr_session_transcribe_lang(CrispasrSession* s, const float* pcm, int n_samples,
                                                           const char* language);
+crispasr_session_result* crispasr_session_transcribe_chunked_lang(CrispasrSession* s, const float* pcm, int n_samples,
+                                                                  int chunk_seconds, int overlap_seconds,
+                                                                  const char* language);
 crispasr_session_result* crispasr_session_transcribe_vad(CrispasrSession* s, const float* pcm, int n_samples,
                                                          int sample_rate, const char* vad_model_path, void* opts);
+int          crispasr_get_progress(void);
 int          crispasr_session_result_n_segments(crispasr_session_result* r);
 const char*  crispasr_session_result_segment_text(crispasr_session_result* r, int i);
 long long    crispasr_session_result_segment_t0(crispasr_session_result* r, int i);
@@ -1054,6 +1058,41 @@ func (s *CrispasrSession) TranscribeLang(pcm []float32, lang string) (*Transcrib
 	}
 	defer C.crispasr_session_result_free(r)
 	return extractResult(r), nil
+}
+
+// TranscribeChunked runs chunked-encode ASR (issue #208): it forces the
+// Parakeet backend through its bounded overlapping-window long-form path so
+// long audio transcribes in bounded time without dropping sections. Inert
+// (== TranscribeLang) on non-Parakeet backends. chunkSeconds <= 0 keeps the
+// per-model default window; overlapSeconds < 0 keeps the default overlap.
+// Poll GetProgress() (0..100) from another goroutine to render progress.
+func (s *CrispasrSession) TranscribeChunked(pcm []float32, chunkSeconds, overlapSeconds int, lang string) (*TranscribeResult, error) {
+	if s.handle == nil {
+		return nil, errors.New("session is closed")
+	}
+	pcmPtr := (*C.float)(nil)
+	if len(pcm) > 0 {
+		pcmPtr = (*C.float)(unsafe.Pointer(&pcm[0]))
+	}
+	var clang *C.char
+	if lang != "" {
+		clang = C.CString(lang)
+		defer C.free(unsafe.Pointer(clang))
+	}
+	r := C.crispasr_session_transcribe_chunked_lang(s.handle, pcmPtr, C.int(len(pcm)),
+		C.int(chunkSeconds), C.int(overlapSeconds), clang)
+	if r == nil {
+		return nil, errors.New("chunked transcription failed")
+	}
+	defer C.crispasr_session_result_free(r)
+	return extractResult(r), nil
+}
+
+// GetProgress polls long-form (chunked) transcription progress: 0..100, or -1
+// when idle. Updated in lockstep with TranscribeChunked windows (issue #208),
+// so a UI goroutine can render a progress bar without a callback.
+func GetProgress() int {
+	return int(C.crispasr_get_progress())
 }
 
 // TranscribeVAD transcribes with VAD segmentation.

@@ -109,6 +109,12 @@ extern int64_t      crispasr_session_result_word_t0(struct crispasr_session_resu
 extern int64_t      crispasr_session_result_word_t1(struct crispasr_session_result* r, int i_seg, int i_word);
 extern float        crispasr_session_result_word_p(struct crispasr_session_result* r, int i_seg, int i_word);
 extern void         crispasr_session_result_free(struct crispasr_session_result* r);
+// issue #208: chunked-encode transcribe + long-form progress poll.
+extern struct crispasr_session_result* crispasr_session_transcribe_chunked_lang(struct CrispasrSession* s,
+                                                                                const float* pcm, int n_samples,
+                                                                                int chunk_seconds, int overlap_seconds,
+                                                                                const char* language);
+extern int          crispasr_get_progress(void);
 
 // --- Punctuation (PLAN #59) ---
 extern void*        crispasr_punc_init(const char* model_path);
@@ -697,6 +703,58 @@ static VALUE rb_session_transcribe(VALUE self, VALUE handle, VALUE pcm_arr) {
     }
     crispasr_session_result_free(r);
     return segments;
+}
+
+// CrispASR::Session.transcribe_chunked(handle, pcm, chunk_seconds, overlap_seconds, language)
+// issue #208: chunked-encode transcribe. Forces the Parakeet backend through its
+// bounded overlapping-window long-form path (inert on other backends). chunk<=0
+// keeps the per-model default window; overlap<0 keeps the default. Poll
+// CrispASR::Session.get_progress (0..100) to render a progress bar.
+static VALUE rb_session_transcribe_chunked(VALUE self, VALUE handle, VALUE pcm_arr, VALUE chunk_s, VALUE overlap_s,
+                                           VALUE language) {
+    struct CrispasrSession* s = (struct CrispasrSession*)NUM2ULL(handle);
+    long n = RARRAY_LEN(pcm_arr);
+    float* pcm = (float*)malloc(sizeof(float) * (size_t)n);
+    for (long i = 0; i < n; i++)
+        pcm[i] = (float)NUM2DBL(rb_ary_entry(pcm_arr, i));
+
+    const char* lang = NIL_P(language) ? NULL : StringValueCStr(language);
+    struct crispasr_session_result* r =
+        crispasr_session_transcribe_chunked_lang(s, pcm, (int)n, NUM2INT(chunk_s), NUM2INT(overlap_s), lang);
+    free(pcm);
+    if (!r) rb_raise(rb_eRuntimeError, "chunked transcription failed");
+
+    int n_segs = crispasr_session_result_n_segments(r);
+    VALUE segments = rb_ary_new_capa(n_segs);
+    for (int i = 0; i < n_segs; i++) {
+        VALUE seg = rb_hash_new();
+        const char* text = crispasr_session_result_segment_text(r, i);
+        rb_hash_aset(seg, ID2SYM(rb_intern("text")), rb_utf8_str_new_cstr(text ? text : ""));
+        rb_hash_aset(seg, ID2SYM(rb_intern("t0")), LL2NUM(crispasr_session_result_segment_t0(r, i)));
+        rb_hash_aset(seg, ID2SYM(rb_intern("t1")), LL2NUM(crispasr_session_result_segment_t1(r, i)));
+
+        int n_words = crispasr_session_result_n_words(r, i);
+        VALUE words = rb_ary_new_capa(n_words);
+        for (int j = 0; j < n_words; j++) {
+            VALUE w = rb_hash_new();
+            const char* wt = crispasr_session_result_word_text(r, i, j);
+            rb_hash_aset(w, ID2SYM(rb_intern("text")), rb_utf8_str_new_cstr(wt ? wt : ""));
+            rb_hash_aset(w, ID2SYM(rb_intern("t0")), LL2NUM(crispasr_session_result_word_t0(r, i, j)));
+            rb_hash_aset(w, ID2SYM(rb_intern("t1")), LL2NUM(crispasr_session_result_word_t1(r, i, j)));
+            rb_hash_aset(w, ID2SYM(rb_intern("p")), DBL2NUM((double)crispasr_session_result_word_p(r, i, j)));
+            rb_ary_push(words, w);
+        }
+        rb_hash_aset(seg, ID2SYM(rb_intern("words")), words);
+        rb_ary_push(segments, seg);
+    }
+    crispasr_session_result_free(r);
+    return segments;
+}
+
+// CrispASR::Session.get_progress -> Integer (0..100, or -1 idle). issue #208:
+// long-form progress, updated in lockstep with transcribe_chunked windows.
+static VALUE rb_session_get_progress(VALUE self) {
+    return INT2NUM(crispasr_get_progress());
 }
 
 // CrispASR::Session.vad_segments(vad_model_path, pcm, sample_rate, threshold, min_speech_ms, min_silence_ms, n_threads)
@@ -1356,6 +1414,8 @@ void init_ruby_crispasr_session(VALUE* mWhisper) {
     rb_define_singleton_method(mSession, "is_voice_design",      rb_session_is_voice_design,  1);
     rb_define_singleton_method(mSession, "synthesize",           rb_session_synthesize,       2);
     rb_define_singleton_method(mSession, "transcribe",           rb_session_transcribe,       2);
+    rb_define_singleton_method(mSession, "transcribe_chunked",   rb_session_transcribe_chunked, 5);
+    rb_define_singleton_method(mSession, "get_progress",         rb_session_get_progress,     0);
     rb_define_singleton_method(mSession, "vad_segments",         rb_session_vad_segments,    -1);
     rb_define_singleton_method(mSession, "align_words",          rb_session_align_words,      4);
     rb_define_singleton_method(mSession, "clear_phoneme_cache",  rb_session_clear_phoneme_cache, 1);

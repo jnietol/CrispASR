@@ -91,6 +91,9 @@ public final class CrispasrSession implements AutoCloseable {
         // --- ASR transcription (PLAN #59) ---
         Pointer crispasr_session_transcribe(Pointer session, float[] pcm, int nSamples);
         Pointer crispasr_session_transcribe_lang(Pointer session, float[] pcm, int nSamples, String language);
+        Pointer crispasr_session_transcribe_chunked_lang(Pointer session, float[] pcm, int nSamples,
+                                                         int chunkSeconds, int overlapSeconds, String language);
+        int     crispasr_get_progress();
         Pointer crispasr_session_transcribe_vad(Pointer session, float[] pcm, int nSamples,
                                                  int sampleRate, String vadModelPath, Pointer opts);
         int          crispasr_session_result_n_segments(Pointer result);
@@ -798,6 +801,30 @@ public final class CrispasrSession implements AutoCloseable {
         Pointer r = Lib.INSTANCE.crispasr_session_transcribe_lang(handle, pcm, pcm.length, lang);
         if (r == null) throw new RuntimeException("transcription failed");
         try { return extractSegments(r); } finally { Lib.INSTANCE.crispasr_session_result_free(r); }
+    }
+
+    /**
+     * Chunked-encode transcribe (issue #208): forces the Parakeet backend
+     * through its bounded overlapping-window long-form path so long audio
+     * transcribes in bounded time without dropping sections. Inert
+     * (== {@link #transcribeLang}) on non-Parakeet backends. {@code chunkSeconds
+     * <= 0} keeps the per-model default window; {@code overlapSeconds < 0} keeps
+     * the default overlap. Poll {@link #getProgress()} (0..100) to render a
+     * progress bar.
+     */
+    public Segment[] transcribeChunked(float[] pcm, int chunkSeconds, int overlapSeconds, String lang) {
+        Pointer r = Lib.INSTANCE.crispasr_session_transcribe_chunked_lang(handle, pcm, pcm.length,
+                chunkSeconds, overlapSeconds, lang);
+        if (r == null) throw new RuntimeException("chunked transcription failed");
+        try { return extractSegments(r); } finally { Lib.INSTANCE.crispasr_session_result_free(r); }
+    }
+
+    /**
+     * Poll long-form (chunked) transcription progress: 0..100, or -1 when idle.
+     * Updated in lockstep with {@link #transcribeChunked} windows (issue #208).
+     */
+    public static int getProgress() {
+        return Lib.INSTANCE.crispasr_get_progress();
     }
 
     /** Transcribe with VAD segmentation. */

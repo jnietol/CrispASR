@@ -2154,6 +2154,58 @@ class CrispasrSession {
     }
   }
 
+  /// Chunked-encode transcribe (issue #208).
+  ///
+  /// Forces the Parakeet backend through its bounded overlapping-window
+  /// long-form path regardless of length, so long files transcribe in bounded
+  /// time and don't drop sections. Inert (== [transcribe]) on non-Parakeet
+  /// backends. [chunkSeconds] <= 0 keeps the per-model default window;
+  /// [overlapSeconds] < 0 keeps the default overlap.
+  ///
+  /// Poll [getTranscriptionProgress] (0..100) from a UI isolate/timer to render
+  /// a progress bar — it now tracks the chunked windows. Falls back to
+  /// [transcribe] if the loaded libcrispasr predates the chunked entry point.
+  List<SessionSegment> transcribeChunked(
+    Float32List pcm, {
+    int chunkSeconds = 0,
+    int overlapSeconds = -1,
+    String? language,
+  }) {
+    if (_closed) throw StateError('CrispasrSession is closed');
+    if (pcm.isEmpty) return const [];
+    if (!_lib.providesSymbol('crispasr_session_transcribe_chunked_lang')) {
+      return transcribe(pcm, language: language); // old dylib
+    }
+
+    final samples = calloc<Float>(pcm.length);
+    for (var i = 0; i < pcm.length; i++) {
+      samples[i] = pcm[i];
+    }
+    final langPtr = (language != null && language.isNotEmpty) ? language.toNativeUtf8() : nullptr;
+
+    final fn = _lib.lookupFunction<
+        Pointer<Void> Function(Pointer<Void>, Pointer<Float>, Int32, Int32, Int32, Pointer<Utf8>),
+        Pointer<Void> Function(Pointer<Void>, Pointer<Float>, int, int, int, Pointer<Utf8>)>(
+      'crispasr_session_transcribe_chunked_lang',
+    );
+    final res = fn(_handle, samples, pcm.length, chunkSeconds, overlapSeconds, langPtr);
+    calloc.free(samples);
+    if (langPtr != nullptr) calloc.free(langPtr);
+    if (res == nullptr) {
+      throw Exception('crispasr_session_transcribe_chunked returned null');
+    }
+
+    try {
+      return _readSegments(res);
+    } finally {
+      final freeFn =
+          _lib.lookupFunction<Void Function(Pointer<Void>), void Function(Pointer<Void>)>(
+        'crispasr_session_result_free',
+      );
+      freeFn(res);
+    }
+  }
+
   /// Transcribe with Silero VAD segmentation + crispasr-style stitching.
   ///
   /// Runs VAD on [pcm], merges short / overlong speech slices into usable
@@ -4360,9 +4412,10 @@ class CrispasrWatermark {
 // ---------------------------------------------------------------------------
 
 /// Poll the global transcription progress (0–100). Returns -1 when no
-/// transcription is active. The C layer updates this via an atomic int
-/// from the whisper_progress_callback — no function pointers needed on
-/// the Dart side.
+/// transcription is active. The C layer updates this via an atomic int —
+/// fed by the whisper progress callback and, since issue #208, by the
+/// Parakeet chunked long-form windows ([CrispasrSession.transcribeChunked]) —
+/// so no function pointers are needed on the Dart side.
 int getTranscriptionProgress({String? libPath}) {
   final lib = DynamicLibrary.open(libPath ?? CrispASR.defaultLibName());
   if (!lib.providesSymbol('crispasr_get_progress')) return -1;

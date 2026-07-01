@@ -58,6 +58,12 @@ struct whisper_params {
     bool punctuation = true;  // session punctuation gate
     uint64_t seed = 0;        // sampling seed (paired with temperature)
     float temperature = 0.0f; // 0 = greedy / backend default
+    // issue #208: chunked-encode long-form path. chunk_seconds >= 0 forces the
+    // bounded overlapping-window Parakeet path (inert on other backends);
+    // chunk_seconds == 0 keeps the per-model default window, overlap < 0 the
+    // default overlap. -1 = don't force (plain transcribe).
+    int chunk_seconds = -1;
+    int overlap_seconds = -1;
 
     std::vector<std::string> fname_inp = {};
     std::vector<std::string> fname_out = {};
@@ -608,7 +614,13 @@ static int run_session(whisper_params& params, whisper_result& result) {
 
     const char* lang =
         (params.language.empty() || params.language == "auto") ? nullptr : params.language.c_str();
-    crispasr_session_result* r = crispasr_session_transcribe_lang(s, pcmf32.data(), (int)pcmf32.size(), lang);
+    // issue #208: chunk_seconds >= 0 forces the bounded chunked long-form path
+    // (poll crispasr_get_progress() for a progress bar); otherwise plain.
+    crispasr_session_result* r =
+        params.chunk_seconds >= 0
+            ? crispasr_session_transcribe_chunked_lang(s, pcmf32.data(), (int)pcmf32.size(), params.chunk_seconds,
+                                                       params.overlap_seconds, lang)
+            : crispasr_session_transcribe_lang(s, pcmf32.data(), (int)pcmf32.size(), lang);
     if (!r) {
         crispasr_session_close(s);
         return 5;
@@ -691,6 +703,8 @@ Napi::Value transcribeSession(const Napi::CallbackInfo& info) {
     getB("comma_in_time", params.comma_in_time);
     getI("beam_size", params.beam_size);
     getI("n_threads", params.n_threads);
+    getI("chunk_seconds", params.chunk_seconds);   // issue #208: >=0 forces chunked long-form
+    getI("overlap_seconds", params.overlap_seconds);
     if (o.Has("temperature") && o.Get("temperature").IsNumber())
         params.temperature = o.Get("temperature").As<Napi::Number>().FloatValue();
     std::string fname_inp;

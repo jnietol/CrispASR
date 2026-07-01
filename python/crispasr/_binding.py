@@ -10,7 +10,7 @@ import platform
 import wave
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Callable, List, Optional, Union
 
 import numpy as np
 
@@ -1044,9 +1044,14 @@ class Session:
                 print(f"[{seg.start:.1f}-{seg.end:.1f}s] {seg.text}")
     """
 
+    # Progress callback signature: void(int processed, int total, void* ud).
+    # Held on the instance while a chunked call runs so it isn't GC'd.
+    _PROGRESS_CB_TYPE = ctypes.CFUNCTYPE(None, ctypes.c_int, ctypes.c_int, ctypes.c_void_p)
+
     def __init__(self, model_path: str, lib_path: Optional[str] = None,
                  n_threads: int = 4, backend: Optional[str] = None):
         self._lib = ctypes.CDLL(lib_path or _find_lib())
+        self._progress_cb_holder = None
         self._setup_session_signatures()
 
         path_bytes = model_path.encode("utf-8")
@@ -1103,6 +1108,26 @@ class Session:
                 ctypes.c_char_p,
             ]
             lib.crispasr_session_transcribe_lang.restype = ctypes.c_void_p
+        # 0.10.3+ (issue #208): chunked-encode transcribe — forces the
+        # Parakeet backend through its bounded overlapping-window long-form
+        # path (inert on other backends). hasattr-guarded for old dylibs.
+        if hasattr(lib, "crispasr_session_transcribe_chunked_lang"):
+            lib.crispasr_session_transcribe_chunked_lang.argtypes = [
+                ctypes.c_void_p, ctypes.POINTER(ctypes.c_float), ctypes.c_int,
+                ctypes.c_int, ctypes.c_int, ctypes.c_char_p,
+            ]
+            lib.crispasr_session_transcribe_chunked_lang.restype = ctypes.c_void_p
+        # 0.10.3+ (issue #208): long-form progress. crispasr_get_progress()
+        # polls 0..100 (-1 idle) and now tracks chunked windows; the callback
+        # setter fires cb(processed, total, ud) once per finished window.
+        if hasattr(lib, "crispasr_get_progress"):
+            lib.crispasr_get_progress.argtypes = []
+            lib.crispasr_get_progress.restype = ctypes.c_int
+        if hasattr(lib, "crispasr_session_set_progress_callback"):
+            lib.crispasr_session_set_progress_callback.argtypes = [
+                ctypes.c_void_p, Session._PROGRESS_CB_TYPE, ctypes.c_void_p,
+            ]
+            lib.crispasr_session_set_progress_callback.restype = None
         # 0.4.3+: VAD-driven session transcribe. hasattr-guarded so a
         # binding loaded against an older dylib still works for non-VAD
         # calls.
@@ -1265,6 +1290,95 @@ class Session:
             return out
         finally:
             self._lib.crispasr_session_result_free(res)
+
+    def transcribe_chunked(
+        self, pcm: np.ndarray,
+        chunk_seconds: int = 0, overlap_seconds: int = -1,
+        *,
+        sample_rate: int = 16000,
+        language: Optional[str] = None,
+        progress: Optional[Callable[[int, int], None]] = None,
+    ) -> List[SessionSegment]:
+        """Chunked-encode transcribe (issue #208).
+
+        Forces the Parakeet backend through its bounded overlapping-window
+        long-form path regardless of length, so long files transcribe in
+        bounded time and don't drop sections. ``chunk_seconds <= 0`` keeps the
+        per-model default window; ``overlap_seconds < 0`` keeps the default
+        overlap. Inert (== :meth:`transcribe`) on non-Parakeet backends.
+
+        ``progress(processed_samples, total_samples)`` — if given — fires once
+        per finished window on the calling thread. You can also poll
+        :meth:`get_progress` (0..100) from another thread.
+        """
+        if not hasattr(self._lib, "crispasr_session_transcribe_chunked_lang"):
+            return self.transcribe(pcm, sample_rate, language=language)  # old dylib
+        if sample_rate != 16000:
+            ratio = 16000 / sample_rate
+            new_len = int(len(pcm) * ratio)
+            indices = np.linspace(0, len(pcm) - 1, new_len)
+            pcm = np.interp(indices, np.arange(len(pcm)), pcm).astype(np.float32)
+        pcm = np.asarray(pcm, dtype=np.float32)
+        samples_ptr = pcm.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        lang_c = language.encode("utf-8") if language else None
+
+        registered = False
+        if progress is not None and hasattr(self._lib, "crispasr_session_set_progress_callback"):
+            def _trampoline(processed, total, _ud):
+                try:
+                    progress(processed, total)
+                except Exception as e:  # never let a Python exception cross the FFI boundary
+                    import sys
+                    sys.stderr.write(f"crispasr progress callback raised: {e}\n")
+            self._progress_cb_holder = Session._PROGRESS_CB_TYPE(_trampoline)
+            self._lib.crispasr_session_set_progress_callback(self._handle, self._progress_cb_holder, None)
+            registered = True
+
+        try:
+            res = self._lib.crispasr_session_transcribe_chunked_lang(
+                self._handle, samples_ptr, len(pcm), int(chunk_seconds), int(overlap_seconds), lang_c)
+        finally:
+            if registered:
+                self._lib.crispasr_session_set_progress_callback(self._handle, None, None)
+                self._progress_cb_holder = None
+        if not res:
+            raise RuntimeError(f"crispasr_session_transcribe_chunked failed for backend {self.backend!r}")
+
+        try:
+            n_seg = self._lib.crispasr_session_result_n_segments(res)
+            out: List[SessionSegment] = []
+            has_word_p = hasattr(self._lib, "crispasr_session_result_word_p")
+            for i in range(n_seg):
+                t = self._lib.crispasr_session_result_segment_text(res, i)
+                text = t.decode("utf-8") if t else ""
+                t0 = self._lib.crispasr_session_result_segment_t0(res, i) / 100.0
+                t1 = self._lib.crispasr_session_result_segment_t1(res, i) / 100.0
+                wn = self._lib.crispasr_session_result_n_words(res, i)
+                words: List[SessionWord] = []
+                for j in range(wn):
+                    wt = self._lib.crispasr_session_result_word_text(res, i, j)
+                    raw_p = self._lib.crispasr_session_result_word_p(res, i, j) if has_word_p else 1.0
+                    words.append(SessionWord(
+                        text=wt.decode("utf-8") if wt else "",
+                        start=self._lib.crispasr_session_result_word_t0(res, i, j) / 100.0,
+                        end=self._lib.crispasr_session_result_word_t1(res, i, j) / 100.0,
+                        confidence=1.0 if raw_p < 0 else raw_p,
+                    ))
+                out.append(SessionSegment(text=text.strip(), start=t0, end=t1, words=words))
+            return out
+        finally:
+            self._lib.crispasr_session_result_free(res)
+
+    def get_progress(self) -> int:
+        """Poll long-form transcription progress: 0..100, or -1 when idle.
+
+        Updated in lockstep with :meth:`transcribe_chunked` windows (issue
+        #208), so a UI thread can render a progress bar without a callback.
+        Returns -1 if the loaded libcrispasr predates the poll API.
+        """
+        if not hasattr(self._lib, "crispasr_get_progress"):
+            return -1
+        return int(self._lib.crispasr_get_progress())
 
     def transcribe_vad(
         self,

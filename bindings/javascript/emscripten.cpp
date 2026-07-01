@@ -88,6 +88,10 @@ struct crispasr_session_result;
 struct crispasr_session_result* crispasr_session_transcribe(CrispasrSession* s, const float* pcm, int n_samples);
 struct crispasr_session_result* crispasr_session_transcribe_lang(CrispasrSession* s, const float* pcm, int n_samples,
                                                                   const char* language);
+struct crispasr_session_result* crispasr_session_transcribe_chunked_lang(CrispasrSession* s, const float* pcm,
+                                                                         int n_samples, int chunk_seconds,
+                                                                         int overlap_seconds, const char* language);
+int crispasr_get_progress(void);
 struct crispasr_session_result* crispasr_session_transcribe_vad(CrispasrSession* s, const float* pcm, int n_samples,
                                                                  int sample_rate, const char* vad_model_path, void* opts);
 struct crispasr_session_result* crispasr_session_transcribe_vad_lang(CrispasrSession* s, const float* pcm, int n_samples,
@@ -418,6 +422,48 @@ EMSCRIPTEN_BINDINGS(whisper) {
             crispasr_session_result_free(r);
             return out;
         }));
+
+    // asrTranscribeChunked(audio, lang, chunkSeconds, overlapSeconds) — issue
+    // #208 chunked-encode long-form path (bounded windows on Parakeet; inert on
+    // other backends). chunkSeconds<=0 keeps the per-model default window;
+    // overlapSeconds<0 keeps the default. Poll asrGetProgress() for a bar.
+    emscripten::function(
+        "asrTranscribeChunked",
+        emscripten::optional_override(
+            [](const emscripten::val& audio, const std::string& lang, int chunkSeconds,
+               int overlapSeconds) -> emscripten::val {
+                emscripten::val out = emscripten::val::array();
+                if (!g_asr_session)
+                    return out;
+                const int n = audio["length"].as<int>();
+                std::vector<float> pcmf32(n);
+                emscripten::val heap = emscripten::val::module_property("HEAPU8");
+                emscripten::val memory = heap["buffer"];
+                emscripten::val view =
+                    audio["constructor"].new_(memory, reinterpret_cast<uintptr_t>(pcmf32.data()), n);
+                view.call<void>("set", audio);
+
+                crispasr_session_result* r = crispasr_session_transcribe_chunked_lang(
+                    g_asr_session, pcmf32.data(), n, chunkSeconds, overlapSeconds,
+                    lang.empty() ? nullptr : lang.c_str());
+                if (!r)
+                    return out;
+                const int ns = crispasr_session_result_n_segments(r);
+                for (int i = 0; i < ns; i++) {
+                    emscripten::val seg = emscripten::val::object();
+                    seg.set("t0", (double)crispasr_session_result_segment_t0(r, i));
+                    seg.set("t1", (double)crispasr_session_result_segment_t1(r, i));
+                    const char* text = crispasr_session_result_segment_text(r, i);
+                    seg.set("text", std::string(text ? text : ""));
+                    out.call<void>("push", seg);
+                }
+                crispasr_session_result_free(r);
+                return out;
+            }));
+
+    // asrGetProgress() -> 0..100 (or -1 idle). Long-form progress poll, updated
+    // in lockstep with asrTranscribeChunked windows (issue #208).
+    emscripten::function("asrGetProgress", emscripten::optional_override([]() { return crispasr_get_progress(); }));
 
     // -------------------------------------------------------------------
     // TTS surface (kokoro / vibevoice / qwen3-tts) + kokoro per-language
