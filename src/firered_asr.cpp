@@ -17,6 +17,7 @@
 #include "firered_asr.h"
 
 #include "core/gguf_loader.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
@@ -306,7 +307,7 @@ extern "C" struct firered_asr_context* firered_asr_init_from_file(const char* pa
     // (70ms/step vs 587ms with F32 dequant or 2600ms with per-call CUDA graphs).
     // The encoder uses ggml_backend_sched which auto-copies CPU weights to GPU.
     ctx->backend_cpu = ggml_backend_cpu_init();
-    ctx->backend = params.use_gpu ? ggml_backend_init_best() : ctx->backend_cpu;
+    ctx->backend = params.use_gpu ? crispasr_init_gpu_backend() : ctx->backend_cpu;
     if (!ctx->backend || ggml_backend_is_cpu(ctx->backend))
         ctx->backend = ctx->backend_cpu;
     if (params.verbosity >= 1)

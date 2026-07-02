@@ -14,6 +14,7 @@
 
 #include "titanet.h"
 #include "core/gguf_loader.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 #include "ggml-backend.h"
 #include "ggml.h"
 #include "gguf.h"
@@ -381,7 +382,7 @@ extern "C" struct titanet_context* titanet_init(const char* model_path, int n_th
             c.n_blocks);
 
     // Phase 2: load weights
-    ctx->backend = ggml_backend_init_best();
+    ctx->backend = crispasr_init_gpu_backend();
     if (!ctx->backend) {
         delete ctx;
         return nullptr;

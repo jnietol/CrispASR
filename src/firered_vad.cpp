@@ -5,6 +5,7 @@
 
 #include "firered_vad.h"
 #include "core/gguf_loader.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "gguf.h"
@@ -339,7 +340,7 @@ extern "C" struct firered_vad_context* firered_vad_init(const char* model_path) 
     gguf_free(gctx);
 
     // Load weights
-    ggml_backend_t backend = ggml_backend_init_best();
+    ggml_backend_t backend = crispasr_init_gpu_backend();
     if (!backend) {
         delete ctx;
         return nullptr;

@@ -17,6 +17,8 @@
 #include "ggml-cpu.h"
 #include "gguf.h"
 
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
+
 #include "core/fastconformer.h"
 #include "core/gguf_loader.h"
 #include "core/mel.h"
@@ -584,7 +586,7 @@ lfm2_audio_context* lfm2_audio_init_from_file(const char* path_model, lfm2_audio
     }
     ctx->use_gpu = params.use_gpu;
     // Initialize backend: GPU if available and requested, else CPU
-    ctx->backend = params.use_gpu ? ggml_backend_init_best() : ggml_backend_cpu_init();
+    ctx->backend = params.use_gpu ? crispasr_init_gpu_backend() : ggml_backend_cpu_init();
     if (!ctx->backend)
         ctx->backend = ggml_backend_cpu_init();
     ctx->backend_cpu = ggml_backend_cpu_init();

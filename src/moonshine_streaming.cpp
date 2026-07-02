@@ -14,6 +14,7 @@
 #include "moonshine_streaming.h"
 #include "core/beam_decode.h"
 #include "core/gguf_loader.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 #include "moonshine-tokenizer.h"
 
 #include "ggml.h"
@@ -287,7 +288,7 @@ extern "C" struct moonshine_streaming_context* moonshine_streaming_init_from_fil
     }
     ggml_backend_cpu_set_n_threads(ctx->backend_cpu, ctx->n_threads);
 
-    ctx->backend = params.use_gpu ? ggml_backend_init_best() : ctx->backend_cpu;
+    ctx->backend = params.use_gpu ? crispasr_init_gpu_backend() : ctx->backend_cpu;
     if (!ctx->backend)
         ctx->backend = ctx->backend_cpu;
     ctx->use_gpu = (ctx->backend != ctx->backend_cpu);

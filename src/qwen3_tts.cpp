@@ -72,6 +72,7 @@
 #include "core/ffn.h"
 #include "core/gguf_loader.h"
 #include "core/mel.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
@@ -5480,7 +5481,7 @@ extern "C" struct qwen3_tts_context* qwen3_tts_init_codec_only(const char* codec
         return nullptr;
     }
     ggml_backend_cpu_set_n_threads(c->backend_cpu, c->n_threads);
-    c->backend = params.use_gpu ? ggml_backend_init_best() : c->backend_cpu;
+    c->backend = params.use_gpu ? crispasr_init_gpu_backend() : c->backend_cpu;
     if (!c->backend) {
         c->backend = c->backend_cpu;
     }
@@ -5618,7 +5619,7 @@ extern "C" struct qwen3_tts_context* qwen3_tts_init_from_file(const char* path_m
         return nullptr;
     }
     ggml_backend_cpu_set_n_threads(c->backend_cpu, c->n_threads);
-    c->backend = params.use_gpu ? ggml_backend_init_best() : c->backend_cpu;
+    c->backend = params.use_gpu ? crispasr_init_gpu_backend() : c->backend_cpu;
     if (!c->backend) {
         c->backend = c->backend_cpu;
     }

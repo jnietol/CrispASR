@@ -25,6 +25,7 @@
 #include "core/fft.h"
 #include "core/gguf_loader.h"
 #include "core/mel.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
@@ -2300,7 +2301,7 @@ extern "C" struct indextts_context* indextts_init_from_file(const char* path_mod
         delete c;
         return nullptr;
     }
-    c->backend = params.use_gpu ? ggml_backend_init_best() : c->backend_cpu;
+    c->backend = params.use_gpu ? crispasr_init_gpu_backend() : c->backend_cpu;
     if (!c->backend) {
         if (params.verbosity >= 1 && params.use_gpu) {
             fprintf(stderr, "indextts: GPU backend unavailable, falling back to CPU\n");

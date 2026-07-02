@@ -25,6 +25,7 @@
 
 #include "core/gguf_loader.h"
 #include "core/hifigan.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
@@ -1304,7 +1305,7 @@ struct speecht5_tts_context* speecht5_tts_init(const char* path, struct speecht5
     ctx->max_len = params.max_len;
 
     // Backend — prefer GPU (CUDA/Metal/Vulkan) when available + requested
-    ctx->backend = params.use_gpu ? ggml_backend_init_best() : nullptr;
+    ctx->backend = params.use_gpu ? crispasr_init_gpu_backend() : nullptr;
     if (!ctx->backend) {
         ctx->backend = ggml_backend_cpu_init();
     }

@@ -1355,6 +1355,7 @@ extern "C" const char* qwen3_asr_token_text(qwen3_asr_context* ctx, int id) {
 // below, granite uses the same primitives, and any future GPT-2-family
 // model gets them for free.
 #include "core/bpe.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -1467,8 +1468,8 @@ extern "C" qwen3_asr_context* qwen3_asr_init_from_file(const char* path, qwen3_a
         ctx->model_path = path;
 
     // Try GPU backend first (Metal, CUDA, Vulkan...), fall back to CPU.
-    // ggml_backend_init_best() picks the highest-priority available backend.
-    ctx->backend = params.use_gpu ? ggml_backend_init_best() : ggml_backend_cpu_init();
+    // crispasr_init_gpu_backend() picks the highest-priority available backend.
+    ctx->backend = params.use_gpu ? crispasr_init_gpu_backend() : ggml_backend_cpu_init();
     if (!ctx->backend)
         ctx->backend = ggml_backend_cpu_init();
     ctx->backend_cpu = ggml_backend_cpu_init();

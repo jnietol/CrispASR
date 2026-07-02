@@ -16,6 +16,7 @@
 #include "core/beam_decode.h"
 #include "core/greedy_decode.h"
 #include "core/mel.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 
 #include "ggml.h"
 #include "gguf.h"
@@ -1811,7 +1812,7 @@ extern "C" struct gemma4_e2b_context* gemma4_e2b_init_from_file(const char* path
     }
     ggml_backend_cpu_set_n_threads(ctx->backend_cpu, ctx->n_threads);
 
-    ctx->backend = params.use_gpu ? ggml_backend_init_best() : ctx->backend_cpu;
+    ctx->backend = params.use_gpu ? crispasr_init_gpu_backend() : ctx->backend_cpu;
     if (!ctx->backend)
         ctx->backend = ctx->backend_cpu;
 

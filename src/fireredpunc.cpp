@@ -10,6 +10,7 @@
 #include "fireredpunc.h"
 
 #include "core/gguf_loader.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 
 #include "ggml.h"
 #include "ggml-backend.h"
@@ -394,7 +395,7 @@ static bool fireredpunc_load(fireredpunc_context& ctx, const char* path) {
     const char* punc_backend = getenv("FIREREDPUNC_BACKEND");
     const bool force_cpu = punc_backend && strcmp(punc_backend, "cpu") == 0;
     const bool force_gpu = punc_backend && strcmp(punc_backend, "gpu") == 0;
-    ctx.backend = (force_cpu && !force_gpu) ? ggml_backend_cpu_init() : ggml_backend_init_best();
+    ctx.backend = (force_cpu && !force_gpu) ? ggml_backend_cpu_init() : crispasr_init_gpu_backend();
     if (!ctx.backend)
         ctx.backend = ggml_backend_cpu_init();
     // Always have a separate CPU backend on hand for ggml_backend_sched

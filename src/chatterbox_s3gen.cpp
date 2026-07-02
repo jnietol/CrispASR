@@ -21,6 +21,7 @@
 #include "chatterbox_s3tok.h"
 #include "core/conv.h"
 #include "core/gguf_loader.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
@@ -659,7 +660,7 @@ extern "C" struct chatterbox_s3gen_context* chatterbox_s3gen_init_from_file(cons
         if (verbosity >= 1)
             fprintf(stderr, "s3gen: CPU backend threads=%d\n", s3_threads);
     }
-    c->backend = use_gpu ? ggml_backend_init_best() : c->backend_cpu;
+    c->backend = use_gpu ? crispasr_init_gpu_backend() : c->backend_cpu;
     if (!c->backend) {
         if (verbosity >= 1 && use_gpu) {
             fprintf(stderr, "s3gen: GPU backend unavailable, falling back to CPU\n");

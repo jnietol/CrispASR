@@ -21,6 +21,7 @@
 #include "core/bpe.h"
 #include "core/ffn.h"
 #include "core/gguf_loader.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
@@ -3157,7 +3158,7 @@ extern "C" struct chatterbox_context* chatterbox_init_from_file(const char* path
     // via chatterbox_set_s3gen_path). c->backend is the T3 backend.
     c->params.use_gpu = s3gen_use_gpu;
     bool effective_use_gpu = t3_use_gpu;
-    c->backend = effective_use_gpu ? ggml_backend_init_best() : c->backend_cpu;
+    c->backend = effective_use_gpu ? crispasr_init_gpu_backend() : c->backend_cpu;
     if (!c->backend) {
         if (params.verbosity >= 1 && effective_use_gpu) {
             fprintf(stderr, "chatterbox: GPU backend unavailable, falling back to CPU\n");

@@ -21,6 +21,7 @@
 #include "core/ffn.h"
 #include "core/gguf_loader.h"
 #include "core/mel.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 
 #include <cmath>
 #include <cstdio>
@@ -319,7 +320,7 @@ extern "C" struct ark_asr_context* ark_asr_init_from_file(const char* path_model
     // CRISPASR_ARKASR_CPU=1. CUDA/other GPUs not yet validated.
     const bool force_cpu = std::getenv("CRISPASR_ARKASR_CPU") != nullptr;
     if (params.use_gpu && !force_cpu) {
-        ctx->backend = ggml_backend_init_best();
+        ctx->backend = crispasr_init_gpu_backend();
         if (!ctx->backend) {
             ctx->backend = ctx->backend_cpu;
         } else if (params.verbosity >= 1) {

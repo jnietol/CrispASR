@@ -23,6 +23,7 @@
 #include "wav2vec2-ggml.h"
 #include "core/ctc.h"
 #include "core/gguf_loader.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 
 #include <unordered_map>
 
@@ -145,7 +146,7 @@ bool wav2vec2_load(const char* fname, wav2vec2_model& model) {
     // Phase 2: load tensors via core_gguf (backend-buffer-backed)
     // GPU (CUDA/Metal/Vulkan) for scheduler-based ggml graphs; CPU fallback
     // for ops that need direct weight pointer access (via read_f32_vec).
-    model.backend = ggml_backend_init_best();
+    model.backend = crispasr_init_gpu_backend();
     if (!model.backend)
         model.backend = ggml_backend_cpu_init();
     if (!model.backend) {

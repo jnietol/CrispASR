@@ -30,6 +30,7 @@
 #include "ggml-cpu.h"
 
 #include "core/gguf_loader.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 
 #if defined(HAVE_ACCELERATE)
 #include <Accelerate/Accelerate.h>
@@ -1775,7 +1776,7 @@ struct f5_tts_context* f5_tts_init_from_file(const char* path_model, struct f5_t
     }
     ggml_backend_cpu_set_n_threads(ctx->backend_cpu, params.n_threads);
 
-    ctx->backend = params.use_gpu ? ggml_backend_init_best() : ctx->backend_cpu;
+    ctx->backend = params.use_gpu ? crispasr_init_gpu_backend() : ctx->backend_cpu;
     if (!ctx->backend)
         ctx->backend = ctx->backend_cpu;
 

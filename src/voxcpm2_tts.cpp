@@ -20,6 +20,7 @@ static int g_cpu_n_threads = 4;
 #include "core/ffn.h"
 #include "core/gguf_loader.h"
 #include "core/torch_rng.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 #include "ggml.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
@@ -6321,7 +6322,7 @@ struct voxcpm2_context* voxcpm2_init_from_file(const char* path_model, struct vo
         return nullptr;
     }
     if (params.use_gpu) {
-        ctx->backend = ggml_backend_init_best();
+        ctx->backend = crispasr_init_gpu_backend();
         if (!ctx->backend) {
             if (params.verbosity >= 1) {
                 fprintf(stderr, "voxcpm2: best backend unavailable, falling back to CPU\n");

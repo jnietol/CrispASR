@@ -1446,6 +1446,7 @@ static float* moss_audio_run_llm_prefill_with_deepstack(moss_audio_context* ctx,
 // ===========================================================================
 
 #include "core/bpe.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 
 extern "C" int moss_audio_tokenize(struct moss_audio_context* ctx, const char* text, int32_t* out_tokens,
                                    int max_tokens) {
@@ -2110,7 +2111,7 @@ extern "C" struct moss_audio_context* moss_audio_init_from_file(const char* path
     ctx->model_path = path_model;
 
     // Backend selection
-    ctx->backend = params.use_gpu ? ggml_backend_init_best() : ggml_backend_cpu_init();
+    ctx->backend = params.use_gpu ? crispasr_init_gpu_backend() : ggml_backend_cpu_init();
     if (!ctx->backend)
         ctx->backend = ggml_backend_cpu_init();
     ctx->backend_cpu = ggml_backend_cpu_init();

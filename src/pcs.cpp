@@ -13,6 +13,7 @@
 #include "pcs.h"
 
 #include "core/gguf_loader.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 
 #include "ggml.h"
 #include "ggml-backend.h"
@@ -296,7 +297,7 @@ static bool pcs_load(pcs_context& ctx, const char* path) {
 
     // Load weights. PCS_FORCE_CPU pins the CPU backend (diff-harness parity: match
     // the ONNX/onnxruntime CPU reference without GPU float-noise on borderline logits).
-    ctx.backend = std::getenv("PCS_FORCE_CPU") ? nullptr : ggml_backend_init_best();
+    ctx.backend = std::getenv("PCS_FORCE_CPU") ? nullptr : crispasr_init_gpu_backend();
     if (!ctx.backend)
         ctx.backend = ggml_backend_cpu_init();
     ctx.backend_cpu = ggml_backend_cpu_init();

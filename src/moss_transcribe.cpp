@@ -41,6 +41,7 @@
 #include "core/attention.h"
 #include "core/mel.h"
 #include "core/bpe.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -1495,7 +1496,7 @@ extern "C" struct moss_transcribe_context* moss_transcribe_init_from_file(
     ctx->n_threads = params.n_threads;
     ctx->model_path = path_model;
 
-    ctx->backend = params.use_gpu ? ggml_backend_init_best() : ggml_backend_cpu_init();
+    ctx->backend = params.use_gpu ? crispasr_init_gpu_backend() : ggml_backend_cpu_init();
     if (!ctx->backend)
         ctx->backend = ggml_backend_cpu_init();
     ctx->backend_cpu = ggml_backend_cpu_init();

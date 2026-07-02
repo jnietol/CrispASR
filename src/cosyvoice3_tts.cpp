@@ -38,6 +38,7 @@
 #include "core/fft.h"
 #include "core/mel.h"
 #include "core/wav_reader.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 #include "chatterbox_campplus.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
@@ -969,7 +970,7 @@ extern "C" struct cosyvoice3_tts_context* cosyvoice3_tts_init_from_file(const ch
     // CUDA machines.  All stages use the shared backend scheduler below and
     // can therefore follow their GPU-resident weights, with CPU retained as
     // the fallback for unsupported operations.
-    ctx->backend = params.use_gpu ? ggml_backend_init_best() : ctx->backend_cpu;
+    ctx->backend = params.use_gpu ? crispasr_init_gpu_backend() : ctx->backend_cpu;
     if (!ctx->backend) {
         if (params.use_gpu && params.verbosity >= 1) {
             fprintf(stderr, "cosyvoice3_tts: GPU backend unavailable, falling back to CPU\n");

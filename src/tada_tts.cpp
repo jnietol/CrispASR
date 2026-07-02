@@ -9,6 +9,7 @@
 #include "core/attention.h"
 #include "core/ffn.h"
 #include "core/bpe.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 
 #include "ggml.h"
 #include "ggml-backend.h"
@@ -2059,7 +2060,7 @@ struct tada_context* tada_init_from_file(const char* path_model, struct tada_con
         return nullptr;
     }
     ggml_backend_cpu_set_n_threads(c->backend_cpu, params.n_threads);
-    c->backend = params.use_gpu ? ggml_backend_init_best() : c->backend_cpu;
+    c->backend = params.use_gpu ? crispasr_init_gpu_backend() : c->backend_cpu;
     if (!c->backend)
         c->backend = c->backend_cpu;
 

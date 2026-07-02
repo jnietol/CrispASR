@@ -6,6 +6,7 @@
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 
 #ifdef CRISPASR_USE_COREML
 #include "coreml/whisper-encoder.h"
@@ -1748,6 +1749,9 @@ static size_t aheads_masks_nbytes(struct whisper_aheads_masks& aheads_masks) {
 static ggml_backend_t whisper_backend_init_gpu(const whisper_context_params& params) {
     ggml_log_set(g_state.log_callback, g_state.log_callback_user_data);
 
+    // Issue #214 — respect --gpu-backend preference.
+    const std::string pref = crispasr_get_gpu_backend_pref();
+
     ggml_backend_dev_t dev = nullptr;
 
     int cnt = 0;
@@ -1758,6 +1762,12 @@ static ggml_backend_t whisper_backend_init_gpu(const whisper_context_params& par
             const char* dev_name = ggml_backend_dev_name(dev_cur);
             CRISPASR_LOG_INFO("%s: device %zu: %s (type: %d)\n", __func__, i, dev_name, dev_type);
             if (dev_type == GGML_BACKEND_DEVICE_TYPE_GPU || dev_type == GGML_BACKEND_DEVICE_TYPE_IGPU) {
+                // If a gpu_backend preference is set, skip devices that
+                // don't match (e.g. skip CUDA devices when vulkan is wanted).
+                if (!pref.empty() && !ci_starts_with(dev_name, pref.c_str())) {
+                    CRISPASR_LOG_INFO("%s: skipping %s (--gpu-backend %s)\n", __func__, dev_name, pref.c_str());
+                    continue;
+                }
                 CRISPASR_LOG_INFO("%s: found GPU device %zu: %s (type: %d, cnt: %d)\n", __func__, i, dev_name, dev_type,
                                   cnt);
                 if (cnt == params.gpu_device) {

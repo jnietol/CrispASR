@@ -31,6 +31,7 @@
 #include "core/dac_decoder.h"
 #include "core/ffn.h"
 #include "core/gguf_loader.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
@@ -375,7 +376,7 @@ struct zonos_tts_context* zonos_tts_init_from_file(const char* path_model, struc
         return nullptr;
     }
     ggml_backend_cpu_set_n_threads(ctx->backend_cpu, ctx->n_threads);
-    ctx->backend = params.use_gpu ? ggml_backend_init_best() : ctx->backend_cpu;
+    ctx->backend = params.use_gpu ? crispasr_init_gpu_backend() : ctx->backend_cpu;
     if (ggml_backend_is_cpu(ctx->backend)) {
         ggml_backend_cpu_set_n_threads(ctx->backend, ctx->n_threads);
     }

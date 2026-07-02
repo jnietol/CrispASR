@@ -16,6 +16,7 @@
 #include "audioseal.h"
 #include "core/conv.h"
 #include "core/gguf_loader.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
@@ -661,7 +662,7 @@ struct audioseal_ctx* audioseal_init_from_file(const char* path, struct audiosea
 
     // Backend
     if (params.use_gpu) {
-        c->backend = ggml_backend_init_best();
+        c->backend = crispasr_init_gpu_backend();
     }
     if (!c->backend) {
         c->backend = ggml_backend_cpu_init();

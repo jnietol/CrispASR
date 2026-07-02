@@ -21,6 +21,7 @@
 #include "core/bpe.h"
 #include "core/ffn.h"
 #include "core/gguf_loader.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 #include "outetts_wavtok.h"
 
 #include "ggml-backend.h"
@@ -884,7 +885,7 @@ extern "C" struct outetts_context* outetts_init_from_file(const char* path_model
         return nullptr;
     }
     ggml_backend_cpu_set_n_threads(c->backend_cpu, c->n_threads);
-    c->backend = params.use_gpu ? ggml_backend_init_best() : c->backend_cpu;
+    c->backend = params.use_gpu ? crispasr_init_gpu_backend() : c->backend_cpu;
     if (!c->backend) {
         c->backend = c->backend_cpu;
     }

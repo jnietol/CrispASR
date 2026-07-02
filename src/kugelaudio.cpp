@@ -18,6 +18,7 @@
 #include "core/ffn.h"
 #include "core/gguf_loader.h"
 #include "core/torch_rng.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
@@ -425,7 +426,7 @@ extern "C" struct kugelaudio_context* kugelaudio_init_from_file(const char* path
     }
 
     // ── Backend init ────────────────────────────────────────────────────
-    ctx->backend = params.use_gpu ? ggml_backend_init_best() : ggml_backend_cpu_init();
+    ctx->backend = params.use_gpu ? crispasr_init_gpu_backend() : ggml_backend_cpu_init();
     if (!ctx->backend)
         ctx->backend = ggml_backend_cpu_init();
     ctx->backend_cpu = ggml_backend_cpu_init();

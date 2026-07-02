@@ -28,7 +28,8 @@
 #include "core/g2p_es.h"
 #include "core/g2p_fr.h"
 #include "core/gguf_loader.h"
-#include "phonemizer.h" // strip_espeak_lang_markers (#169)
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
+#include "phonemizer.h"            // strip_espeak_lang_markers (#169)
 // crispasr_cache is part of crispasr-lib, not piper-tts; guard behind CRISPASR_BUILD.
 #ifdef CRISPASR_BUILD
 #include "crispasr_cache.h"
@@ -2266,7 +2267,7 @@ struct piper_tts_context* piper_tts_init_from_file(const char* path_model, struc
     }
     ggml_backend_cpu_set_n_threads(ctx->backend_cpu, params.n_threads);
 
-    ctx->backend = params.use_gpu ? ggml_backend_init_best() : ctx->backend_cpu;
+    ctx->backend = params.use_gpu ? crispasr_init_gpu_backend() : ctx->backend_cpu;
     if (!ctx->backend)
         ctx->backend = ctx->backend_cpu;
 

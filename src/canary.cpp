@@ -507,6 +507,7 @@ static void canary_fft_r2c(const float* in, int N, float* out) {
 // Delegates to core_mel::compute() with the NeMo cluster's parameters; only
 // the FFT function pointer differs between parakeet/canary/canary_ctc/cohere.
 #include "core/mel.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -1194,11 +1195,11 @@ static void canary_fold_batchnorm(canary_model& model) {
 // ===========================================================================
 
 static ggml_backend_t pick_backend() {
-    // ggml_backend_init_best() tries all compiled backends in priority
+    // crispasr_init_gpu_backend() tries all compiled backends in priority
     // order (CUDA > Metal > Vulkan > CPU) and returns the first one
     // that initialises. This replaces the old Metal/CUDA-specific
     // #ifdef chain and adds Vulkan support for free.
-    ggml_backend_t b = ggml_backend_init_best();
+    ggml_backend_t b = crispasr_init_gpu_backend();
     return b ? b : ggml_backend_cpu_init();
 }
 

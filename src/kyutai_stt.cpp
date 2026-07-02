@@ -18,6 +18,7 @@
 #include "core/attention.h"
 #include "core/beam_decode.h"
 #include "core/gguf_loader.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
@@ -335,7 +336,7 @@ extern "C" struct kyutai_stt_context* kyutai_stt_init_from_file(const char* path
     sctx->params = params;
     sctx->n_threads = params.n_threads > 0 ? params.n_threads : 4;
 
-    sctx->backend = params.use_gpu ? ggml_backend_init_best() : ggml_backend_cpu_init();
+    sctx->backend = params.use_gpu ? crispasr_init_gpu_backend() : ggml_backend_cpu_init();
     if (!sctx->backend)
         sctx->backend = ggml_backend_cpu_init();
     sctx->backend_cpu = ggml_backend_cpu_init();

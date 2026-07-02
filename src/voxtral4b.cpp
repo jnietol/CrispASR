@@ -505,6 +505,7 @@ static void voxtral4b_fft(float* in, int N, float* out) {
 #include "core/mel.h"
 #include "core/ffn.h"
 #include "core/attention.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -928,7 +929,7 @@ extern "C" struct voxtral4b_context* voxtral4b_init_from_file(const char* path,
     ctx->params = params;
     ctx->n_threads = params.n_threads > 0 ? params.n_threads : 4;
 
-    ctx->backend = params.use_gpu ? ggml_backend_init_best() : ggml_backend_cpu_init();
+    ctx->backend = params.use_gpu ? crispasr_init_gpu_backend() : ggml_backend_cpu_init();
     if (!ctx->backend)
         ctx->backend = ggml_backend_cpu_init();
     ctx->backend_cpu = ggml_backend_cpu_init();

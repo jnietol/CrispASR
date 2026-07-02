@@ -10,6 +10,7 @@
 #include "crispasr_speaker_embedder.h" // pluggable speaker embedder (#107 P3)
 #include "crispasr_stream_punc.h"      // streaming punctuation mode helpers (#112)
 #include "crispasr_cache.h"            // crispasr_cache::ensure_cached_file (for --hf-repo, #128)
+#include "core/gpu_backend_pref.h"     // crispasr_set_gpu_backend_pref (#214)
 #include "crispasr_model_mgr_cli.h"
 #include "crispasr_model_registry.h"
 #include "crispasr_output.h"   // crispasr_make_disp_segments — split-on-punct (#29)
@@ -2040,6 +2041,12 @@ int main(int argc, char** argv) {
 
     if (params.use_gpu && params.gpu_backend != "cpu") {
         ggml_backend_load_all();
+        // Issue #214 — propagate --gpu-backend preference so every
+        // backend's init picks the right GPU device instead of the
+        // highest-priority one (CUDA over Vulkan).
+        if (!params.gpu_backend.empty()) {
+            crispasr_set_gpu_backend_pref(params.gpu_backend.c_str());
+        }
     }
 
     // Issue #128 — resolve --hf-repo / --hf-file early, before any

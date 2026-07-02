@@ -14,6 +14,7 @@
 
 #include "crispasr_session.h"
 #include "core/bpe.h"
+#include "core/gpu_backend_pref.h" // crispasr_set_gpu_backend_pref (#214)
 
 #include <atomic>
 #include <cstdint>
@@ -2923,6 +2924,14 @@ CA_EXPORT crispasr_session* crispasr_session_open(const char* model_path, int n_
 // `backend` may be "" / NULL to delegate to GGUF arch detection
 // (same path as `crispasr_session_open`).
 // ─────────────────────────────────────────────────────────────────
+
+// Issue #214 — process-global GPU backend preference. Call before any
+// session open to force a specific GPU backend (e.g. "vulkan" when both
+// CUDA and Vulkan are compiled in).
+CA_EXPORT void crispasr_set_gpu_backend(const char* name) {
+    crispasr_set_gpu_backend_pref(name);
+}
+
 struct crispasr_open_params_v1 {
     int abi_version; // = 1 or 2
     int n_threads;

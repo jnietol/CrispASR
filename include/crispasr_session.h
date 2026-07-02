@@ -153,6 +153,10 @@ CRISPASR_SESSION_API int64_t crispasr_parakeet_result_token_t0(parakeet_result* 
 CRISPASR_SESSION_API int64_t crispasr_parakeet_result_token_t1(parakeet_result* r, int i);
 CRISPASR_SESSION_API float crispasr_parakeet_result_token_p(parakeet_result* r, int i);
 CRISPASR_SESSION_API void crispasr_parakeet_result_free(parakeet_result* r);
+// Issue #214: set the preferred GPU backend name ("cuda", "vulkan",
+// "metal"). Call before any crispasr_session_open*. NULL or "" = auto.
+CRISPASR_SESSION_API void crispasr_set_gpu_backend(const char* name);
+
 CRISPASR_SESSION_API int crispasr_detect_backend_from_gguf(const char* path, char* out_name, int out_cap);
 CRISPASR_SESSION_API crispasr_session* crispasr_session_open_explicit(const char* model_path, const char* backend_name,
                                                                       int n_threads);

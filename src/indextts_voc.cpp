@@ -33,6 +33,7 @@
 #include "core/fft.h"
 #include "core/gguf_loader.h"
 #include "core/mel.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
@@ -1360,7 +1361,7 @@ extern "C" struct indextts_voc_context* indextts_voc_init(const char* path, int 
     // site. The auto-CPU fallback only applies to the legacy map_custom1 path.
     const bool aa_blocks_gpu = c->use_aa && !aa_use_native() && !aa_use_opvariant() && !force_gpu_with_aa;
     const bool effective_use_gpu = use_gpu && !aa_blocks_gpu;
-    c->backend = effective_use_gpu ? ggml_backend_init_best() : c->backend_cpu;
+    c->backend = effective_use_gpu ? crispasr_init_gpu_backend() : c->backend_cpu;
     if (!c->backend) {
         c->backend = c->backend_cpu;
     }

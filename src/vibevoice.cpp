@@ -19,6 +19,7 @@
 #include "core/conv.h"
 #include "core/ffn.h"
 #include "core/gguf_loader.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 #include "vibevoice_wav_ref.h"
 
 #include "ggml-backend.h"
@@ -263,8 +264,8 @@ extern "C" struct vibevoice_context* vibevoice_init_from_file(const char* path_m
     // Backend selection: GPU first, CPU fallback. The scheduler requires
     // a CPU backend to be present as the final backend when the primary
     // backend is Metal/CUDA/Vulkan.
-    ctx->backend =
-        hp.d_lm > 0 ? (params.use_gpu ? ggml_backend_init_best() : ggml_backend_cpu_init()) : ggml_backend_cpu_init();
+    ctx->backend = hp.d_lm > 0 ? (params.use_gpu ? crispasr_init_gpu_backend() : ggml_backend_cpu_init())
+                               : ggml_backend_cpu_init();
     if (!ctx->backend)
         ctx->backend = ggml_backend_cpu_init();
     ctx->backend_cpu = ggml_backend_cpu_init();

@@ -36,6 +36,7 @@
 #include "core/fastconformer.h"
 #include "core/gguf_loader.h"
 #include "core/mel.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 
 #if defined(HAVE_ACCELERATE)
 #include <Accelerate/Accelerate.h>
@@ -2107,12 +2108,12 @@ extern "C" struct nemotron_context* nemotron_init_from_file(const char* path_mod
     ctx->params = params;
     ctx->n_threads = params.n_threads > 0 ? params.n_threads : 4;
 
-    // Backend selection — use ggml_backend_init_best() for portable GPU init
+    // Backend selection — use crispasr_init_gpu_backend() for portable GPU init
     ctx->backend = nullptr;
     ctx->backend_cpu = ggml_backend_cpu_init();
 
     if (params.use_gpu) {
-        ctx->backend = ggml_backend_init_best();
+        ctx->backend = crispasr_init_gpu_backend();
     }
     if (!ctx->backend) {
         ctx->backend = ctx->backend_cpu;

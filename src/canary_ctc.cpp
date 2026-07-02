@@ -220,6 +220,7 @@ static void cc_fft_r2c(const float* in, int N, float* out) {
 // ===========================================================================
 
 #include "core/mel.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -514,7 +515,7 @@ static bool cc_load_model(cc_model& model, canary_ctc_vocab& vocab, const char* 
 // ===========================================================================
 
 static ggml_backend_t cc_pick_backend() {
-    ggml_backend_t b = ggml_backend_init_best();
+    ggml_backend_t b = crispasr_init_gpu_backend();
     return b ? b : ggml_backend_cpu_init();
 }
 

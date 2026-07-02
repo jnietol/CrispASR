@@ -1423,6 +1423,7 @@ static void cohere_fft_r2c(const float* in, int N, float* out) {
 // ---------------------------------------------------------------------------
 
 #include "core/mel.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -1897,7 +1898,7 @@ struct cohere_context* cohere_init_from_file(const char* path_model, struct cohe
             }
         }
         if (!ctx->ggml_backend) {
-            ctx->ggml_backend = params.use_gpu ? ggml_backend_init_best() : ggml_backend_cpu_init();
+            ctx->ggml_backend = params.use_gpu ? crispasr_init_gpu_backend() : ggml_backend_cpu_init();
         }
         if (!ctx->ggml_backend) {
             fprintf(stderr, "cohere: failed to initialize any ggml backend\n");

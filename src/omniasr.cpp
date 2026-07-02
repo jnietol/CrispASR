@@ -9,6 +9,7 @@
 #include "core/beam_decode.h"
 #include "core/ffn.h"
 #include "core/gguf_loader.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
@@ -442,7 +443,7 @@ extern "C" struct omniasr_context* omniasr_init_from_file(const char* path_model
 
     // Load weights
     if (params.use_gpu) {
-        ctx->backend = ggml_backend_init_best();
+        ctx->backend = crispasr_init_gpu_backend();
     }
     if (!ctx->backend) {
         ctx->backend = ggml_backend_cpu_init();
