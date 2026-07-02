@@ -1707,6 +1707,18 @@ if(NOT MSVC)
 endif()
 
 # ---------------------------------------------------------------------------
+# bananamind-tts — BananaMind-TTS-V2.1 Tacotron-lite + HiFi-GAN TTS
+# ---------------------------------------------------------------------------
+add_library(bananamind-tts STATIC bananamind_tts.h bananamind_tts.cpp)
+set_target_properties(bananamind-tts PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(bananamind-tts PUBLIC .)
+target_compile_features   (bananamind-tts PUBLIC cxx_std_17)
+target_link_libraries     (bananamind-tts PUBLIC crispasr-core ggml ggml-base ggml-cpu)
+if(NOT MSVC)
+    target_compile_options(bananamind-tts PRIVATE -O3)
+endif()
+
+# ---------------------------------------------------------------------------
 # fastpitch-tts — NVIDIA FastPitch parallel TTS (native ggml runtime)
 # ---------------------------------------------------------------------------
 add_library(fastpitch-tts STATIC fastpitch_tts.h fastpitch_tts.cpp)
@@ -2244,6 +2256,9 @@ if (TARGET dots-tts)
 endif()
 if (TARGET fastpitch-tts)
     target_link_libraries(crispasr-lib PUBLIC fastpitch-tts)
+endif()
+if (TARGET bananamind-tts)
+    target_link_libraries(crispasr-lib PUBLIC bananamind-tts)
 endif()
 if (TARGET parler-tts)
     target_link_libraries(crispasr-lib PUBLIC parler-tts)

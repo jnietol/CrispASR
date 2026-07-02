@@ -41,6 +41,7 @@ add_executable(${TARGET}
     crispasr_backend_csm.cpp
     crispasr_backend_parler.cpp
     crispasr_backend_fastpitch.cpp
+    crispasr_backend_bananamind_tts.cpp
     crispasr_backend_bark.cpp
     crispasr_backend_dia.cpp
     crispasr_backend_dots_tts.cpp
@@ -296,6 +297,7 @@ target_link_libraries(${TARGET} PRIVATE
     piper-tts
     speecht5-tts
     fastpitch-tts
+    bananamind-tts
     bark-tts
     dia-tts
     dots-tts
