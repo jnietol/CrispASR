@@ -79,6 +79,7 @@ crispasr -m voxcpm2-q4_k.gguf \
 |------|------|-------------|
 | `voxcpm2-f16.gguf` | 4.63 GB | F16 weights (full precision) |
 | `voxcpm2-q4_k.gguf` | ~1.5 GB | Q4_K quantized (faster, slightly lower quality) |
+| `voxcpm2-q8_0.gguf` | 2.83 GB | Q8_0 quantized (near-F16 quality) |
 | `voxcpm2-ref.gguf` | 371 KB | Reference activation dump for numerical validation |
 
 ## Numerical Validation
