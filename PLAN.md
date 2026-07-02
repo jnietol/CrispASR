@@ -31,7 +31,11 @@ but the actual reported bug lived in the **CLI/c_api adapter** which overrode it
 to 4 (and a parallel session to 8). The parity test never sees the adapter
 override. The audit should also assert the CLI-adapter/c_api resolved defaults
 equal upstream — not just the library struct. (The cand default is now back to 1;
-`extra_steps` back to 0.)
+`extra_steps` back to 0.) **CLOSED structurally (commit `3b52d268`):** the CLI
+adapter and c_api no longer re-hardcode `num_acoustic_candidates` — they inherit
+the library default (`tada_context_default_params` → 1), so the existing
+defaults-audit test now guards all three paths. The only deliberate adapter
+override left is `text_do_sample=true`.
 
 Three larger extensions remain:
 
@@ -103,11 +107,17 @@ aligners (q8_0, 906 MB) + encoder are published on `cstr/tada-tts-{1b,3b-ml}-GGU
 at synth time now **fails loudly** and points at `--make-ref` (was silently using
 the default voice).
 
-The remaining OPEN half is **on-the-fly ref generation at inference time** —
-accept raw audio (+ transcript) in the server / a single synth call and bake the
-reference in-memory, instead of the two-step `--make-ref` then `--voice ref.gguf`.
-Today a `.wav` passed to `voice` at synth time is rejected (fails loudly) because
-the make-ref pipeline isn't loaded in the backend/server.
+**CLI query-time inline cloning now DONE (#192, commit `3b52d268`).** `--tts "…"
+--voice sample.wav --ref-text "…"` bakes the reference in-memory before the
+backend loads and synthesizes in that voice in one command (shared helper
+`tada_run_aligner_pipeline`; fails loudly if the ref can't be written). Validated
+end-to-end.
+
+The remaining OPEN half is the **server / C-ABI** on-the-fly path: accept raw
+audio (+ transcript) on `/v1/audio/speech` (with the existing consent gate) and
+in `crispasr_session_synthesize`, baking in-memory without a temp GGUF. The CLI
+helper is the reference; the server needs the encoder/aligner loaded in the
+session and the `ref_text` request field wired.
 
 **Approach:** the make-ref pipeline already exists in C++ (`src/tada_encoder.{h,cpp}`
 + wav2vec2 aligner runtime; CLI `--make-ref` drives it via wav2vec2 aligner → BPE
