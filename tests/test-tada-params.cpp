@@ -33,16 +33,20 @@ TEST_CASE("tada_params: value knobs match upstream InferenceOptions", "[unit][ta
 }
 
 // The one deliberate lib-vs-production split: the LIBRARY default is
-// deterministic (greedy text + single FM candidate) so crispasr-diff matches
-// the greedy Python reference bit-exactly, while the CLI adapter and session
-// C ABI flip these to upstream production values (do_sample=True,
-// num_acoustic_candidates=4). Guarding both directions stops a future change
-// from silently shipping greedy to production again [the #197 regression] or
-// making the diff harness non-deterministic.
+// deterministic *text sampling* off (greedy) so crispasr-diff matches the greedy
+// Python reference bit-exactly, while the CLI adapter and session C ABI flip
+// text_do_sample=True (upstream production). That is the ONLY knob the adapters
+// override — num_acoustic_candidates stays at the library default of 1 in every
+// path (lib, CLI, c_api). #192: the adapters used to re-hardcode it to 4 (and a
+// parallel session to 8), which is NOT upstream (InferenceOptions default is 1)
+// and mangled output (best-of-N with the acoustic-only reconstruction scorer
+// picks duration outliers: "…four hours" → "…and forth"). The adapters now
+// INHERIT this value instead of overriding it, so this single assertion guards
+// the effective default of all three paths.
 TEST_CASE("tada_params: library default is deterministic for diff parity", "[unit][tada]") {
     struct tada_context_params p = tada_context_default_params();
     REQUIRE(p.text_do_sample == false);
-    REQUIRE(p.num_acoustic_candidates == 1);
+    REQUIRE(p.num_acoustic_candidates == 1); // upstream InferenceOptions default; adapters inherit, never hardcode
 }
 
 // Sampling setters must be NULL-safe (each guards `if (ctx)`).

@@ -110,17 +110,14 @@ public:
             cp.temperature = p.temperature;
         cp.seed = p.seed;
 
-        // num_acoustic_candidates: draw N flow-matching noise samples per token
-        // and keep the best by reconstruction score (Python
-        // _solve_flow_matching_ranked). Upstream InferenceOptions default is 1,
-        // and 1 is what we default to: the reconstruction ("likelihood") scorer
-        // fits the OT velocity field, which does NOT correlate with speech
-        // intelligibility, so best-of-N can reliably pick a WORSE draw than a
-        // single one. Measured on "I went to school and back in four hours"
-        // (#192): N=1 → verbatim "…four hours"; N=4 → mangled "…and forth"
-        // with a spurious 43-frame duration gap. The Python reference behaves
-        // the same at N=4. Opt in to >1 with TADA_NUM_CANDIDATES for A/B only.
-        cp.num_acoustic_candidates = 1;
+        // num_acoustic_candidates INHERITS the library default (1) from
+        // tada_context_default_params() above — do NOT re-hardcode it. Upstream
+        // InferenceOptions default is 1; the reconstruction ("likelihood") scorer
+        // used to rank >1 candidates scores acoustic dims only and can PREFER a
+        // duration outlier, so best-of-N mangled "…four hours" → "…and forth"
+        // (#192, N=4). A redundant override here is exactly how that 4 (and a
+        // parallel session's 8) shipped; inheriting the tested library default
+        // keeps one source of truth. Opt in to >1 with TADA_NUM_CANDIDATES.
         if (const char* env = std::getenv("TADA_NUM_CANDIDATES"); env && *env) {
             int n = atoi(env);
             if (n >= 1)

@@ -1142,7 +1142,9 @@ static void whisper_print_usage(int /*argc*/, char** argv, const whisper_params&
     fprintf(
         stderr,
         "             --make-ref                create a TADA voice reference GGUF (with --voice <audio.wav>\n"
-        "                                                 --ref-text \"transcript\" [--make-ref-output path.gguf])\n");
+        "                                                 --ref-text \"transcript\" [--make-ref-output path.gguf])\n"
+        "                                       (TADA also clones inline: --tts \"…\" --voice ref.wav --ref-text "
+        "\"…\")\n");
     fprintf(stderr,
             "             --align                   forced-alignment word timestamps via the TADA aligner\n"
             "                                                 (--voice <audio.wav> --ref-text \"transcript\"\n"

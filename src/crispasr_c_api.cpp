@@ -2317,12 +2317,13 @@ CA_EXPORT crispasr_session* crispasr_session_open_explicit(const char* model_pat
         p.n_threads = s->n_threads;
         p.verbosity = g_open_verbosity_tls > 0 ? g_open_verbosity_tls : 1;
         p.use_gpu = g_open_use_gpu_tls;
-        // Mirror the CLI + upstream default of 1 (#192): the reconstruction
-        // scorer used to rank >1 candidates fits the OT velocity field, which
-        // does not correlate with intelligibility, so best-of-N can pick a
-        // WORSE draw (measured: N=4 mangles "…four hours" → "…and forth").
-        // Opt in to >1 with TADA_NUM_CANDIDATES for A/B only.
-        p.num_acoustic_candidates = 1;
+        // num_acoustic_candidates INHERITS the library default (1) from
+        // tada_context_default_params() above — do NOT re-hardcode it here. The
+        // upstream default is 1; a redundant override is exactly how #192 shipped
+        // a 4 (best-of-N with the reconstruction scorer mangles "…four hours" →
+        // "…and forth"). Keeping a single source of truth means the defaults-audit
+        // test (which checks the library default) also guards this path. Opt in
+        // to >1 with TADA_NUM_CANDIDATES for A/B only.
         if (const char* env = std::getenv("TADA_NUM_CANDIDATES"); env && *env) {
             int n = atoi(env);
             if (n >= 1)

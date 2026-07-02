@@ -1138,6 +1138,102 @@ int process_one_input(CrispasrBackend& backend, const std::string& fname_inp, co
 
 } // namespace
 
+// Resolve the TADA encoder + aligner GGUFs (make-ref-encoder/aligner flags, else
+// model dir → shared cache → auto-download from the model's HF repo, honouring
+// --language), load the voice audio at 24 kHz, and run the aligner+encoder
+// pipeline into `result`. Shared by --make-ref, --align, and query-time inline
+// .wav voice cloning. Returns 0 on success, non-zero (with a stderr message
+// prefixed by `label`) on failure.
+static int tada_run_aligner_pipeline(const whisper_params& params, const std::string& audio_path,
+                                     const std::string& transcript, const char* label, tada_encoder_result& result,
+                                     double* out_audio_seconds = nullptr) {
+    auto dir_of = [](const std::string& p) -> std::string {
+        auto sep = p.find_last_of("/\\");
+        return (sep == std::string::npos) ? "." : p.substr(0, sep);
+    };
+    const std::string aux_base = (params.backend == "tada-1b" || params.backend == "tada-tts-1b")
+                                     ? "https://huggingface.co/cstr/tada-tts-1b-GGUF/resolve/main/"
+                                     : "https://huggingface.co/cstr/tada-tts-3b-ml-GGUF/resolve/main/";
+    auto resolve_aux = [&](const std::string& name) -> std::string {
+        std::string local = dir_of(params.model) + "/" + name;
+        struct stat st;
+        if (stat(local.c_str(), &st) == 0)
+            return local;
+        std::string cached = crispasr_cache::dir(params.cache_dir) + "/" + name;
+        if (crispasr_cache::file_present(cached))
+            return cached;
+        if (params.auto_download)
+            return crispasr_cache::ensure_cached_file(name, aux_base + name, params.no_prints, "crispasr",
+                                                      params.cache_dir);
+        return std::string();
+    };
+    std::string encoder_path = params.make_ref_encoder;
+    std::string aligner_path = params.make_ref_aligner;
+    if (encoder_path.empty())
+        encoder_path = resolve_aux("tada-encoder-f16.gguf");
+    if (aligner_path.empty()) {
+        const std::string lang = (params.language.empty() || params.language == "auto") ? "en" : params.language;
+        aligner_path = resolve_aux("tada-aligner-" + lang + ".gguf");
+        if (aligner_path.empty() && lang != "en")
+            aligner_path = resolve_aux("tada-aligner-en.gguf");
+    }
+    if (encoder_path.empty()) {
+        fprintf(stderr,
+                "crispasr[%s]: cannot find tada-encoder GGUF. Add --auto-download to fetch it, pass "
+                "--make-ref-encoder <path>, or place tada-encoder-f16.gguf next to the model.\n",
+                label);
+        return 20;
+    }
+    if (aligner_path.empty()) {
+        fprintf(stderr,
+                "crispasr[%s]: cannot find tada-aligner GGUF. Add --auto-download to fetch it, pass "
+                "--make-ref-aligner <path>, or place tada-aligner-en.gguf next to the model.\n",
+                label);
+        return 20;
+    }
+    fprintf(stderr, "crispasr[%s]: encoder=%s\n", label, encoder_path.c_str());
+    fprintf(stderr, "crispasr[%s]: aligner=%s\n", label, aligner_path.c_str());
+    fprintf(stderr, "crispasr[%s]: voice=%s text='%s'\n", label, audio_path.c_str(), transcript.c_str());
+
+    std::vector<float> ref_audio;
+    std::vector<std::vector<float>> stereo_dummy;
+    if (!read_audio_data(audio_path, ref_audio, stereo_dummy, false)) {
+        fprintf(stderr, "crispasr[%s]: failed to load audio '%s'\n", label, audio_path.c_str());
+        return 20;
+    }
+    // read_audio_data returns 16 kHz — resample to 24 kHz for the encoder.
+    int n_16k = (int)ref_audio.size();
+    int n_24k = (int)((int64_t)n_16k * 24000 / 16000);
+    std::vector<float> audio_24k(n_24k);
+    for (int i = 0; i < n_24k; i++) {
+        float src = (float)i * 16000.0f / 24000.0f;
+        int idx = (int)src;
+        float frac = src - idx;
+        if (idx + 1 < n_16k)
+            audio_24k[i] = ref_audio[idx] * (1.0f - frac) + ref_audio[idx + 1] * frac;
+        else if (idx < n_16k)
+            audio_24k[i] = ref_audio[idx];
+    }
+    fprintf(stderr, "crispasr[%s]: audio %.2fs @ 24kHz (%d samples)\n", label, n_24k / 24000.0f, n_24k);
+    if (out_audio_seconds)
+        *out_audio_seconds = (double)n_24k / 24000.0;
+
+    tada_encoder_params ep = tada_encoder_default_params();
+    ep.n_threads = params.n_threads;
+    ep.seed = params.seed;
+    ep.verbosity = params.no_prints ? 0 : 1;
+    tada_encoder_context* ectx = tada_encoder_init(encoder_path.c_str(), ep);
+    if (!ectx) {
+        fprintf(stderr, "crispasr[%s]: failed to load encoder '%s'\n", label, encoder_path.c_str());
+        return 20;
+    }
+    int rc = tada_encoder_encode(ectx, aligner_path.c_str(), audio_24k.data(), n_24k, transcript.c_str(), result);
+    tada_encoder_free(ectx);
+    if (rc != 0)
+        fprintf(stderr, "crispasr[%s]: encode failed (rc=%d)\n", label, rc);
+    return rc;
+}
+
 int crispasr_run_backend(const whisper_params& params_in) {
     whisper_params params = params_in;
 
@@ -1424,6 +1520,51 @@ int crispasr_run_backend(const whisper_params& params_in) {
         params.aligner_model = resolved_aligner;
     }
 
+    // Query-time inline voice cloning for TADA: if the user asks to synthesize
+    // (--tts) with a .wav voice reference, bake the reference GGUF in-memory here
+    // (before the backend loads) and rewrite --voice to it, so the two-step
+    // "--make-ref then --voice ref.gguf" collapses to one command. Requires
+    // --ref-text (the transcript drives the alignment). #201 follow-up.
+    {
+        const bool is_tada = backend_name == "tada" || backend_name == "tada-tts" || backend_name == "tada-1b" ||
+                             backend_name == "tada-tts-1b" || backend_name == "tada-3b" || backend_name == "tada-3b-ml";
+        const std::string& v = params.tts_voice;
+        const bool voice_is_wav =
+            v.size() >= 4 && (v.substr(v.size() - 4) == ".wav" || v.substr(v.size() - 4) == ".WAV");
+        if (is_tada && !params.tts_text.empty() && voice_is_wav && !params.make_ref && !params.align) {
+            if (params.tts_ref_text.empty()) {
+                fprintf(stderr, "crispasr[tada]: cloning from a .wav needs --ref-text \"exact transcript of %s\".\n",
+                        v.c_str());
+                return 20;
+            }
+            tada_encoder_result result;
+            if (tada_run_aligner_pipeline(params, v, params.tts_ref_text, "tada-clone", result) != 0)
+                return 20;
+            // Bake to a temp ref GGUF in the cache dir, keyed so repeat runs reuse it.
+            std::string tmp = crispasr_cache::dir(params.cache_dir) + "/tada-inline-voice.gguf";
+            if (tada_encoder_write_ref_gguf(tmp.c_str(), result, params.tts_ref_text.c_str(),
+                                            params.language.empty() ? nullptr : params.language.c_str()) != 0) {
+                fprintf(stderr, "crispasr[tada-clone]: failed to write reference GGUF\n");
+                return 20;
+            }
+            // Guard against a silent write no-op (e.g. an unwritable/dangling cache
+            // dir): if the ref didn't actually land, fail loudly rather than
+            // synthesizing in the default voice.
+            struct stat rst;
+            if (stat(tmp.c_str(), &rst) != 0 || rst.st_size == 0) {
+                fprintf(stderr,
+                        "crispasr[tada-clone]: baked ref did not land at '%s' (cache dir unwritable?). "
+                        "Pass --cache-dir <writable-dir>.\n",
+                        tmp.c_str());
+                return 20;
+            }
+            if (!params.no_prints)
+                fprintf(stderr, "crispasr[tada-clone]: baked voice ref (%d tokens) → %s\n", result.n_tokens,
+                        tmp.c_str());
+            params.tts_voice = tmp; // backend init() now sees a .gguf reference
+        }
+    }
+
     // Create and init the backend.
     std::unique_ptr<CrispasrBackend> backend = crispasr_create_backend(backend_name);
     if (!backend) {
@@ -1519,106 +1660,13 @@ int crispasr_run_backend(const whisper_params& params_in) {
             return 20;
         }
 
-        // Resolve paths
-        std::string encoder_path = params.make_ref_encoder;
-        std::string aligner_path = params.make_ref_aligner;
-        std::string out_path = params.make_ref_output.empty() ? "tada-ref-custom.gguf" : params.make_ref_output;
+        const std::string out_path = params.make_ref_output.empty() ? "tada-ref-custom.gguf" : params.make_ref_output;
 
-        // Auto-discover encoder + aligner GGUFs: next to the model, then the
-        // shared cache dir, then auto-download from the model's HF repo (same
-        // repo the tada-ref-<lang>.gguf voices come from). The encoder/aligner
-        // are only needed by --make-ref, so they are opt-in downloads.
-        auto dir_of = [](const std::string& p) -> std::string {
-            auto sep = p.find_last_of("/\\");
-            return (sep == std::string::npos) ? "." : p.substr(0, sep);
-        };
-        const std::string aux_base = (params.backend == "tada-1b" || params.backend == "tada-tts-1b")
-                                         ? "https://huggingface.co/cstr/tada-tts-1b-GGUF/resolve/main/"
-                                         : "https://huggingface.co/cstr/tada-tts-3b-ml-GGUF/resolve/main/";
-        // Resolve one aux GGUF by name: model dir → cache dir → download.
-        auto resolve_aux = [&](const std::string& name) -> std::string {
-            std::string local = dir_of(params.model) + "/" + name;
-            struct stat st;
-            if (stat(local.c_str(), &st) == 0)
-                return local;
-            std::string cached = crispasr_cache::dir(params.cache_dir) + "/" + name;
-            if (crispasr_cache::file_present(cached))
-                return cached;
-            if (params.auto_download)
-                return crispasr_cache::ensure_cached_file(name, aux_base + name, params.no_prints, "crispasr",
-                                                          params.cache_dir);
-            return std::string();
-        };
-        if (encoder_path.empty())
-            encoder_path = resolve_aux("tada-encoder-f16.gguf");
-        if (aligner_path.empty()) {
-            const std::string lang = (params.language.empty() || params.language == "auto") ? "en" : params.language;
-            aligner_path = resolve_aux("tada-aligner-" + lang + ".gguf");
-            if (aligner_path.empty() && lang != "en")
-                aligner_path = resolve_aux("tada-aligner-en.gguf");
-        }
-
-        if (encoder_path.empty()) {
-            fprintf(stderr, "crispasr[make-ref]: cannot find tada-encoder GGUF. Add --auto-download to "
-                            "fetch it, pass --make-ref-encoder <path>, or place tada-encoder-f16.gguf "
-                            "next to the model.\n");
-            return 20;
-        }
-        if (aligner_path.empty()) {
-            fprintf(stderr, "crispasr[make-ref]: cannot find tada-aligner GGUF. Add --auto-download to "
-                            "fetch it, pass --make-ref-aligner <path>, or place tada-aligner-en.gguf "
-                            "next to the model.\n");
-            return 20;
-        }
-
-        fprintf(stderr, "crispasr[make-ref]: encoder=%s\n", encoder_path.c_str());
-        fprintf(stderr, "crispasr[make-ref]: aligner=%s\n", aligner_path.c_str());
-        fprintf(stderr, "crispasr[make-ref]: voice=%s\n", params.tts_voice.c_str());
-        fprintf(stderr, "crispasr[make-ref]: text='%s'\n", params.tts_ref_text.c_str());
-
-        // Load audio
-        std::vector<float> ref_audio;
-        std::vector<std::vector<float>> stereo_dummy;
-        if (!read_audio_data(params.tts_voice, ref_audio, stereo_dummy, false)) {
-            fprintf(stderr, "crispasr[make-ref]: failed to load audio '%s'\n", params.tts_voice.c_str());
-            return 20;
-        }
-        // ref_audio is 16kHz from the loader — resample to 24kHz for the encoder
-        int n_16k = (int)ref_audio.size();
-        int n_24k = (int)((int64_t)n_16k * 24000 / 16000);
-        std::vector<float> audio_24k(n_24k);
-        for (int i = 0; i < n_24k; i++) {
-            float src = (float)i * 16000.0f / 24000.0f;
-            int idx = (int)src;
-            float frac = src - idx;
-            if (idx + 1 < n_16k)
-                audio_24k[i] = ref_audio[idx] * (1.0f - frac) + ref_audio[idx + 1] * frac;
-            else if (idx < n_16k)
-                audio_24k[i] = ref_audio[idx];
-        }
-        fprintf(stderr, "crispasr[make-ref]: audio %.2fs @ 24kHz (%d samples)\n", n_24k / 24000.0f, n_24k);
-
-        // Init encoder
-        tada_encoder_params ep = tada_encoder_default_params();
-        ep.n_threads = params.n_threads;
-        ep.seed = params.seed;
-        ep.verbosity = params.no_prints ? 0 : 1;
-        tada_encoder_context* ectx = tada_encoder_init(encoder_path.c_str(), ep);
-        if (!ectx) {
-            fprintf(stderr, "crispasr[make-ref]: failed to load encoder '%s'\n", encoder_path.c_str());
-            return 20;
-        }
-
-        // Run full pipeline
         tada_encoder_result result;
-        int rc = tada_encoder_encode(ectx, aligner_path.c_str(), audio_24k.data(), n_24k, params.tts_ref_text.c_str(),
-                                     result);
-        tada_encoder_free(ectx);
-
-        if (rc != 0) {
-            fprintf(stderr, "crispasr[%s]: encode failed (rc=%d)\n", verb, rc);
+        double audio_seconds = 0.0;
+        if (tada_run_aligner_pipeline(params, params.tts_voice, params.tts_ref_text, verb, result, &audio_seconds) != 0)
             return 20;
-        }
+        int rc = 0;
 
         // --align: emit forced-alignment word timestamps and exit.
         if (params.align) {
@@ -1643,7 +1691,7 @@ int crispasr_run_backend(const whisper_params& params_in) {
                     words.back().text += tk;
                 }
             }
-            const double clip_end = (double)n_24k / 24000.0;
+            const double clip_end = audio_seconds;
             auto ts = [](double s, bool comma) -> std::string {
                 if (s < 0)
                     s = 0;
