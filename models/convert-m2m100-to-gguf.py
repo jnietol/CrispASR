@@ -344,21 +344,19 @@ def build_vocab(model_dir: Path) -> tuple[list[str], list[float], list[str]]:
     #   M2M IDs 4..127999 → SPM IDs 3..127996 (offset -1 due to inserted <pad>)
     #   M2M IDs 128000..128003 → extra vocab.json tokens, score 0
 
-    def get_spm_score(m2m_id: int) -> float:
-        """Map M2M token ID to SPM score, or 0.0 if unavailable."""
-        if m2m_id == 0:   # <s> → SPM 1
-            return sp.get_score(1)
-        if m2m_id == 1:   # <pad> → no SPM entry
+    unk_spm_id = sp.unk_id()
+
+    def get_spm_score(tok: str) -> float:
+        """SPM merge-rank score for a token, looked up BY STRING.
+
+        M2M's vocab.json is NOT a constant-offset reordering of the SPM model, so
+        the old `spm_id = m2m_id - 1` arithmetic mis-aligned scores (corrupting BPE
+        merges). Look up each piece by its string; special/lang tokens aren't SP
+        pieces and never merge, so 0.0."""
+        sid = sp.piece_to_id(tok)
+        if sid == unk_spm_id and tok != sp.id_to_piece(unk_spm_id):
             return 0.0
-        if m2m_id == 2:   # </s> → SPM 2
-            return sp.get_score(2)
-        if m2m_id == 3:   # <unk> → SPM 0
-            return sp.get_score(0)
-        # Regular tokens: M2M ID K maps to SPM ID K-1
-        spm_id = m2m_id - 1
-        if 0 <= spm_id < spm_size:
-            return sp.get_score(spm_id)
-        return 0.0
+        return sp.get_score(sid)
 
     # Read lang codes from tokenizer_config.json (model-specific)
     tok_cfg_path = model_dir / "tokenizer_config.json"
@@ -390,7 +388,7 @@ def build_vocab(model_dir: Path) -> tuple[list[str], list[float], list[str]]:
     for i in range(vocab_size_base):
         tok = inv_vj.get(i, f"[UNK_{i}]")
         tokens.append(tok)
-        scores.append(get_spm_score(i))
+        scores.append(get_spm_score(tok))
 
     # Language tokens at IDs vocab_size_base .. vocab_size_base+n_lang-1
     for code in lang_codes_list:
@@ -402,9 +400,27 @@ def build_vocab(model_dir: Path) -> tuple[list[str], list[float], list[str]]:
         tokens.append("")
         scores.append(0.0)
 
-    # Truncate if we overshot (shouldn't happen with correct config)
+    # Truncate the embedding vocab to exactly vocab_size (ids 0..vocab_size-1
+    # correspond to embedding rows) BEFORE appending BPE intermediates below.
     tokens = tokens[:vocab_size]
     scores = scores[:vocab_size]
+
+    # BPE-intermediate pieces: SentencePiece has pieces (~390) absent from
+    # vocab.json that are needed as intermediate merges (e.g. "esterd" building
+    # "esterday"). Append them at IDs >= vocab_size with their SPM scores so the
+    # engine's BPE can perform those merges; they are never final tokens (always
+    # merge further), so they get no embedding row — the engine maps any final
+    # token whose id >= vocab_size to <unk>, matching HF's convert_token_to_id.
+    n_embed = len(tokens)  # = vocab_size (embedding rows)
+    present = set(tokens)
+    for i in range(spm_size):
+        p = sp.id_to_piece(i)
+        if p not in present:
+            tokens.append(p)
+            scores.append(sp.get_score(i))
+            present.add(p)
+    n_intermediate = len(tokens) - n_embed
+    print(f"  Tokenizer: {n_embed} embedding tokens + {n_intermediate} BPE-intermediate pieces")
 
     print(f"  vocab:   {vocab_size} tokens ({vocab_size_base} from vocab.json, "
           f"{n_lang} lang codes, {max(0, vocab_size - vocab_size_base - n_lang)} padding)")
