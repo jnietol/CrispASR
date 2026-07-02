@@ -679,6 +679,11 @@ constexpr Entry k_registry[] = {
     {"m2m100", "m2m100-418m-q8_0.gguf",
      "https://huggingface.co/cstr/m2m100-418m-GGUF/resolve/main/m2m100-418m-q8_0.gguf",
      "~502 MB", nullptr, nullptr},
+    // f16 build — exact HF translation parity (q8_0 has rare quant-floor
+    // decode flips on borderline words). Same faithful SP-BPE tokenizer.
+    {"m2m100-f16", "m2m100-418m-f16.gguf",
+     "https://huggingface.co/cstr/m2m100-418m-GGUF/resolve/main/m2m100-418m-f16.gguf",
+     "~980 MB", nullptr, nullptr},
     // WMT21 dense-24-wide-en-x (facebook, MIT) — same m2m100
     // architecture as the 418M base, scaled up to 4.7B params and
     // narrower in coverage (English → 7 target languages, won the
