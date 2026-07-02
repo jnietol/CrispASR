@@ -45,7 +45,7 @@ TADA-3B-ML is a multilingual text-to-speech model built on Meta Llama 3.2 3B wit
 | `tada-codec-f16.gguf` | F16 | ~1.0 GB | Codec decoder (required companion) |
 | `tada-ref.gguf` | F32 | ~466 KB | Default voice reference (JFK prompt, ~5 s) |
 | `tada-encoder-f16.gguf` | F16 | ~187 MB | Reference encoder for `--make-ref` voice cloning |
-| `tada-aligner-<lang>.gguf` | Q8_0 | ~906 MB | CTC aligner for `--make-ref` / `--align` (ar ch de en es fr it ja pl pt) |
+| `tada-aligner-<lang>.gguf` | Q8_0 | ~520 MB | CTC aligner for `--make-ref` / `--align` (ar ch de en es fr it ja pl pt) |
 
 The Q4_K file uses a TADA-aware quantization policy (tail=14): large transformer block matrices are quantized, while the last 14 token-embedding rows and all `tada.*` flow-matching tensors are kept at F16. This preserves the timing and acoustic conditioning paths where quantization noise matters most.
 

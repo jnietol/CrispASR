@@ -35,7 +35,7 @@ TADA-1B is a text-to-speech model built on Meta Llama 3.2 1B with a flow-matchin
 | `tada-codec-f16.gguf` | F16 | ~1.0 GB | Codec decoder, required companion |
 | `tada-ref.gguf` | F32 | ~17 KB | Default voice reference (8-token JFK prompt) |
 | `tada-encoder-f16.gguf` | F16 | ~187 MB | Reference encoder for `--make-ref` voice cloning |
-| `tada-aligner-<lang>.gguf` | Q8_0 | ~906 MB | CTC aligner for `--make-ref` / `--align` (en) |
+| `tada-aligner-<lang>.gguf` | Q8_0 | ~520 MB | CTC aligner for `--make-ref` / `--align` (en) |
 
 The Q4_K file uses a TADA-aware quantization policy (tail=8): large transformer block projection matrices are quantized, while the last 8 token-embedding rows and all `tada.*` flow-matching tensors are kept at F16. This preserves the timing and acoustic conditioning paths where quantization noise matters most.
 
