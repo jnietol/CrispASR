@@ -228,6 +228,16 @@ struct moss_transcribe_context {
     int n_threads = 4;
     std::string model_path;
     int beam_size = 1;
+
+    // Encoder attention path. flash_attn_ext is fast on CPU/Metal/CUDA but
+    // segfaults on Vulkan during graph/command-pool cleanup (issue #215, both
+    // NVIDIA and AMD) — its split-k / mask-opt resource path mismanages command
+    // buffers on the Vulkan backend. On Vulkan we fall back to the manual
+    // mul_mat + soft_max_ext + mul_mat path (mathematically identical, the same
+    // op sequence the LLM decode already runs safely on Vulkan). Overridable:
+    //   CRISPASR_MOSS_TRANSCRIBE_ENC_FLASH=1  → force flash_attn_ext everywhere
+    //   CRISPASR_MOSS_TRANSCRIBE_ENC_MANUAL=1 → force the manual path everywhere
+    bool enc_use_flash = true;
 };
 
 // ===========================================================================
@@ -239,6 +249,13 @@ static ggml_tensor* try_get(moss_transcribe_model& m, const char* name) {
 }
 static ggml_tensor* require(moss_transcribe_model& m, const char* name) {
     return core_gguf::require(m.tensors, name, "moss_transcribe");
+}
+
+static bool backend_is_vulkan(ggml_backend_t b) {
+    if (!b)
+        return false;
+    const char* name = ggml_backend_name(b);
+    return name && std::strncmp(name, "Vulkan", 6) == 0;
 }
 
 // Conv2d stride-2 downsampling output length (kernel 3, pad 1).
@@ -670,8 +687,22 @@ static ggml_cgraph* moss_transcribe_build_encoder_xf_graph(moss_transcribe_conte
         K = ggml_cont(ctx0, ggml_permute(ctx0, K, 0, 2, 1, 3));
         V = ggml_cont(ctx0, ggml_permute(ctx0, V, 0, 2, 1, 3));
 
-        ggml_tensor* attn = ggml_flash_attn_ext(ctx0, Q, K, V, attn_mask, attn_scale, 0.0f, 0.0f);
-        attn = ggml_reshape_2d(ctx0, attn, d, T_enc);
+        ggml_tensor* attn;
+        if (ctx->enc_use_flash) {
+            // flash_attn_ext output: (hd, n_h, T) → reshape to (d, T).
+            attn = ggml_flash_attn_ext(ctx0, Q, K, V, attn_mask, attn_scale, 0.0f, 0.0f);
+            attn = ggml_reshape_2d(ctx0, attn, d, T_enc);
+        } else {
+            // Manual masked-softmax attention (Vulkan-safe, issue #215). Produces
+            // the identical (hd, n_h, T) → (d, T) layout as flash_attn_ext above.
+            // Q,K,V are (hd, T, n_h) contiguous.
+            ggml_tensor* scores = ggml_mul_mat(ctx0, K, Q);                           // (T_k, T_q, n_h)
+            scores = ggml_soft_max_ext(ctx0, scores, attn_mask, attn_scale, 0.0f);    // mask over T_k
+            ggml_tensor* V_perm = ggml_cont(ctx0, ggml_permute(ctx0, V, 1, 0, 2, 3)); // (T_k, hd, n_h)
+            attn = ggml_mul_mat(ctx0, V_perm, scores);                                // (hd, T_q, n_h)
+            attn = ggml_cont(ctx0, ggml_permute(ctx0, attn, 0, 2, 1, 3));             // (hd, n_h, T_q)
+            attn = ggml_reshape_2d(ctx0, attn, d, T_enc);
+        }
 
         ggml_tensor* attn_out = ggml_add(ctx0, ggml_mul_mat(ctx0, blk.attn_o_w, attn), blk.attn_o_b);
         x = ggml_add(ctx0, residual, attn_out);
@@ -1472,6 +1503,25 @@ extern "C" struct moss_transcribe_context* moss_transcribe_init_from_file(
         ggml_backend_cpu_set_n_threads(ctx->backend_cpu, ctx->n_threads);
     if (ggml_backend_is_cpu(ctx->backend))
         ggml_backend_cpu_set_n_threads(ctx->backend, ctx->n_threads);
+
+    // Encoder attention path selection (issue #215). flash_attn_ext segfaults on
+    // Vulkan during graph cleanup → default to the manual attention path there.
+    {
+        const char* force_flash = std::getenv("CRISPASR_MOSS_TRANSCRIBE_ENC_FLASH");
+        const char* force_manual = std::getenv("CRISPASR_MOSS_TRANSCRIBE_ENC_MANUAL");
+        if (force_flash && force_flash[0] == '1') {
+            ctx->enc_use_flash = true;
+        } else if (force_manual && force_manual[0] == '1') {
+            ctx->enc_use_flash = false;
+        } else {
+            ctx->enc_use_flash = !backend_is_vulkan(ctx->backend);
+        }
+        if (!ctx->enc_use_flash && backend_is_vulkan(ctx->backend)) {
+            fprintf(stderr, "moss_transcribe: Vulkan backend detected — encoder using manual "
+                            "soft_max_ext attention (flash_attn_ext segfaults on Vulkan, issue #215; "
+                            "set CRISPASR_MOSS_TRANSCRIBE_ENC_FLASH=1 to override)\n");
+        }
+    }
 
     if (!moss_transcribe_load_model(ctx->model, ctx->vocab, path_model, ctx->backend)) {
         fprintf(stderr, "moss_transcribe: failed to load model from %s\n", path_model);

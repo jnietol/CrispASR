@@ -201,6 +201,33 @@ registry, quantize keeping enc/adapter/tied-embed at F16, Go LDFLAGS, live test,
 `cstr/MOSS-Transcribe-preview-2B-GGUF` (card `22818f7a`). f16/q8_0 held back for
 bandwidth.
 
+### #215 2026-07-02 moss-transcribe Vulkan segfault — encoder `flash_attn_ext` → manual attention
+
+Reporter: moss-transcribe segfaults on **Vulkan** (both NVIDIA and AMD, q8_0 and
+q4_k) during encoder execution — stack `ggml_vk_command_pool_cleanup →
+ggml_vk_graph_cleanup → ggml_backend_sched_compute_splits`, faulting inside the
+vendor driver (`libvulkan_radeon.so` / `libnvidia-eglcore`). Root cause: the
+encoder is the only graph using `ggml_flash_attn_ext` (the LLM decode uses the
+manual `core_attn::kv_self_attn` soft_max_ext path, which runs on Vulkan fine).
+The Vulkan FA path's split-k / mask-opt resource management (extra prealloc
+buffers, semaphores, descriptor sets, a separate reduce pipeline) mishandles
+command-buffer lifecycle → the corruption only surfaces at pool cleanup. Both
+FA shaders correctly bounds-check the unpadded `T_enc×T_enc` block-diagonal mask,
+so it is not a simple mask OOB — it is the same graph-scale Vulkan resource class
+as TADA #192, but op-specific here.
+
+Fix: on Vulkan the encoder uses a manual `mul_mat + soft_max_ext + mul_mat`
+attention (identical `(hd, n_h, T)` layout as flash), keeping the encoder
+GPU-resident while avoiding the crashing op. Auto-selected when the backend name
+starts with "Vulkan"; overridable with `CRISPASR_MOSS_TRANSCRIBE_ENC_FLASH=1`
+(force flash, e.g. to retest a fixed driver) or `CRISPASR_MOSS_TRANSCRIBE_ENC_MANUAL=1`
+(force manual anywhere, for A/B). Verified: manual ≡ flash encoder output on CPU
+(`crispasr-diff` cos identical to 5 decimals), jfk.wav transcribes verbatim on
+CPU and on MoltenVK-Vulkan under both paths. The native NVIDIA/AMD segfault is
+not reproducible on MoltenVK (Metal-translation layer never exercises the vendor
+command-pool path). The sibling `moss-audio` encoder shares the same
+`flash_attn_ext` pattern and likely needs the same guard (separate follow-up).
+
 ## #205 2026-06-30 `--max-len` for text-only backends + granite-plus timestamp-mode derail
 
 Reporter: `--max-len` had no effect on granite / qwen3 (worked on whisper/cohere).
