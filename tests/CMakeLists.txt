@@ -108,7 +108,7 @@ set_tests_properties(${TEST_TARGET} PROPERTIES
     TIMEOUT 600
     PASS_REGULAR_EXPRESSION "do for your country")
 
-# kyutai-stt (Mimi codec) — default non-causal attention.
+# kyutai-stt (Mimi codec) — default causal+sliding-window attention.
 set(TEST_TARGET test-kyutai-stt-jfk-live)
 add_test(NAME ${TEST_TARGET}
     COMMAND $<TARGET_FILE:crispasr-cli>
@@ -118,15 +118,18 @@ set_tests_properties(${TEST_TARGET} PROPERTIES
     TIMEOUT 600
     PASS_REGULAR_EXPRESSION "what you can do for your country")
 
-# kyutai-stt with the opt-in Mimi causal+window mask — must still transcribe.
-set(TEST_TARGET test-kyutai-stt-mimi-causal-jfk-live)
+# kyutai-stt with the old full non-causal path (CRISPASR_MIMI_NONCAUSAL=1 opt-out).
+# On short audio (jfk, <250 frames) it ties the causal default; this guards that the
+# bisection opt-out still transcribes. (The causal default's win only shows on audio
+# > mimi_context frames — see LEARNINGS; that A/B is run manually with a 3x sample.)
+set(TEST_TARGET test-kyutai-stt-mimi-noncausal-jfk-live)
 add_test(NAME ${TEST_TARGET}
     COMMAND $<TARGET_FILE:crispasr-cli>
     --backend kyutai-stt --auto-download -f ${PROJECT_SOURCE_DIR}/samples/jfk.mp3)
 set_tests_properties(${TEST_TARGET} PROPERTIES
     LABELS "live;asr;mimi"
     TIMEOUT 600
-    ENVIRONMENT "CRISPASR_MIMI_CAUSAL=1"
+    ENVIRONMENT "CRISPASR_MIMI_NONCAUSAL=1"
     PASS_REGULAR_EXPRESSION "what you can do for your country")
 
 set(TEST_TARGET test-crispasr-cli-large)

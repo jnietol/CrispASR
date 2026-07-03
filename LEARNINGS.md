@@ -10,7 +10,7 @@ If a lesson is still "live" (affects current work), it's linked from
 
 ---
 
-## The Mimi codec transformer runs non-causal — a divergence from moshi's streaming architecture (gated, A/B-equal so far) (2026-07)
+## The Mimi codec transformer must be causal — non-causal silently truncates long audio; the >250-frame WER A/B settled it (2026-07)
 
 Sweeping CrispASR for the CrispEmbed `deepseek_ocr2` bug class (a masked attention replaced by
 `ggml_flash_attn_ext` with `mask=nullptr` → every query attends to everything → garbage) surfaced the
@@ -29,10 +29,22 @@ change, so it's implemented **opt-in** behind `CRISPASR_MIMI_CAUSAL` (default = 
 the flag builds a causal + sliding-window-250 F16 mask, filled after alloc: attend iff `k<=q && q-k<
 window`). **A/B (kyutai-stt-1b q4_k, jfk):** non-causal → "…do for you. Ask what you can do…", causal →
 "…do for you, ask what you can do…" — both correct, differ only by one downstream punctuation choice;
-the causal path neither asserts nor degrades. Note jfk is ~137 mimi frames < 250, so the *window*
-never engages here — this only exercised causal masking, and it came out **quality-equal, not a win**.
-Decision: **keep opt-in** (a proven win, not equality, is required to flip). To settle it, A/B on
-audio > 250 frames (window engages) and judge by WER, and add the symmetric gate to `csm_tts` decoder.
+the causal path neither asserts nor degrades. But jfk is ~137 mimi frames < 250, so the *window*
+never engaged — that only exercised causal masking and came out quality-equal, which is why the first
+pass looked like a non-issue.
+
+**RESOLVED — the >250-frame A/B settled it (2026-07).** Re-ran on 3× jfk (33 s ≈ 412 frames, so the
+window engages): the old **non-causal path TRUNCATES the tail** — it transcribed 2 of 3 repetitions
+then cut to "And so, my fellow Americans," (dropping ~25 % of content), because attending over the
+full 412-frame sequence is out-of-distribution for a model trained with a 250-frame streaming window.
+**Causal+window transcribed all three in full.** So causal *wins on long audio and ties on short* — a
+real win, not equality. **The default is now causal+sliding-window** for `kyutai_stt`; the old
+full-attention path is preserved for bisection behind `CRISPASR_MIMI_NONCAUSAL=1` (gate the OLD path
+once the new is proven — mandate). Lesson: **an A/B on a sample shorter than the model's context
+window can't see a context/windowing bug** — size the probe to exceed the window (here, concatenate
+the clip past `mimi_context` frames). `csm_tts`'s decoder has the identical gate but is **still
+opt-in** (`CRISPASR_MIMI_CAUSAL`) — the STT WER A/B doesn't transfer to TTS; a TTS→ASR round-trip A/B
+on >250-frame output is needed before flipping its default.
 
 ## Auditing CrispASR against CrispEmbed's bug classes: a weight reader with no quantized branch fails silently (2026-07)
 

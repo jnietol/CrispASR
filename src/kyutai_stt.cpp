@@ -659,14 +659,16 @@ static ggml_tensor* build_mimi_transformer(ggml_context* ctx, const std::vector<
     int T = (int)x->ne[1];
     int dim = (int)x->ne[0]; // 512
 
-    // Optional causal + sliding-window (mimi_context) self-attention mask,
-    // matching moshi's streaming Mimi transformer (the RoPE is already labelled
-    // "causal" and mimi_context=250 is loaded but currently unused). OPT-IN via
-    // CRISPASR_MIMI_CAUSAL and default OFF (nullptr = today's full non-causal
-    // attention) until an A/B on decoded transcripts proves it. Filled by the
-    // caller after alloc. See LEARNINGS "Mimi codec transformer runs non-causal".
+    // Causal + sliding-window (mimi_context) self-attention is the DEFAULT — it
+    // matches moshi's streaming Mimi (the RoPE is already labelled "causal" and
+    // mimi_context=250 is loaded for exactly this). WER A/B (2026-07, 3× jfk =
+    // ~412 frames > 250): the old full non-causal attention TRUNCATED the tail
+    // (~25% of content dropped once the sequence exceeds the window), while
+    // causal transcribed all of it; on short audio (<250 frames) the two tie.
+    // CRISPASR_MIMI_NONCAUSAL=1 restores the old full-attention path (bisection).
+    // Filled by the caller after alloc.
     ggml_tensor* attn_mask = nullptr;
-    if (std::getenv("CRISPASR_MIMI_CAUSAL")) {
+    if (!std::getenv("CRISPASR_MIMI_NONCAUSAL")) {
         attn_mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, T, T); // [Lk, Lq]
         ggml_set_name(attn_mask, "mimi_causal_mask");
         ggml_set_input(attn_mask);
