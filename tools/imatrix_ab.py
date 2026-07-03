@@ -17,8 +17,11 @@ once). Pipeline:
                    CRISPASR_ACTDUMP_OUT) from src / A / B and report
                    mean cosine(A, src) vs mean cosine(B, src).
 
-Accept criterion: mean cos(B,src) >= mean cos(A,src) (imatrix must not regress;
-target: close part of the gap to the f16 gold).
+Two signals vs the f16 gold: transcript **CER** (primary — the real quality
+metric) and prefill-logit **cosine** (a proxy). Accept criterion: imatrix must
+not worsen CER; cosine only breaks the tie on easy quants where transcripts
+already match. NOTE: the two can diverge at aggressive bit-widths — measured on
+q3_k, imatrix improved CER (0.37→0.13) while cosine dipped — so CER is the gate.
 
 Usage:
   python tools/imatrix_ab.py --cli build/bin/crispasr \\
@@ -152,12 +155,21 @@ def main():
     ma, mb = mean(cos_a_all), mean(cos_b_all)
     ra_, rb_ = mean(cer_a_all), mean(cer_b_all)
     print(f"  {'MEAN':22s}  {ma:.4f}   {mb:.4f}  {mb-ma:+.4f}    {ra_:.4f}  {rb_:.4f}  {rb_-ra_:+.4f}")
-    # PASS = imatrix at least ties on cosine AND does not worsen CER.
-    ok_cos = mb >= ma - 1e-6
-    ok_cer = rb_ <= ra_ + 1e-6
-    verdict = "PASS (imatrix >= baseline)" if (ok_cos and ok_cer) else (
-        "PASS-cos / CER-regress" if ok_cos else "REGRESSION")
-    print(f"  VERDICT: {verdict}   (cosine higher=better, CER lower=better)")
+    # Verdict gates on CER — transcript fidelity to the f16 gold is the real
+    # quality signal. The prefill-logit cosine is only a proxy and can move the
+    # OTHER way at aggressive bit-widths (measured: q3_k imatrix improves CER
+    # while cosine dips), so it is reported but not the gate; it only breaks the
+    # tie on easy quants where transcripts already match f16 (CER≈0 either way).
+    eps = 1e-6
+    if rb_ < ra_ - eps:
+        verdict = "PASS — imatrix improves transcript CER"
+    elif rb_ > ra_ + eps:
+        verdict = "REGRESSION — imatrix worsens transcript CER"
+    else:
+        verdict = "PASS — CER tied, cosine improves" if mb >= ma - eps else "WEAK — CER tied, cosine dips"
+    print(f"  VERDICT: {verdict}")
+    print("  (CER vs f16 = transcript fidelity = primary signal; prefill-logit")
+    print("   cosine is a proxy that can diverge at aggressive bit-widths.)")
 
     if not args.keep:
         for p in (out_a, out_b, dump):

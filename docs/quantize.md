@@ -178,6 +178,12 @@ Notes:
   corpus that produced it. Measured on qwen3-asr-0.6b q4_k: an EN+DE
   Common Voice set lifted cosine-to-f16 **0.890 → 0.941**, while an
   English-only set **regressed** it. Language/domain coverage is decisive.
+- **imatrix helps most at aggressive bit-widths.** On qwen3-asr-0.6b
+  **q3_k**, imatrix roughly *thirded* the transcript error vs f16
+  (CER **0.37 → 0.13**, 6/12 held-out clips improved). Note the two A/B
+  signals can diverge there: the prefill-logit **cosine** dipped
+  (−0.04) even as **CER** — the real quality metric — improved sharply.
+  Trust CER; the single-position cosine is only a proxy.
 - Implemented for the ASR backends whose large weights actually benefit
   (whisper, parakeet, canary, cohere, qwen3-asr / mega-asr, higgs-stt,
   ark-asr, moss-transcribe, granite, glm-asr, mimo-asr, voxtral). The

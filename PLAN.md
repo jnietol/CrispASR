@@ -6761,6 +6761,12 @@ Legend: ✅ have · ⚠️ partial/manual · ❌ missing · 🎁 inherited-via-g
    transcript-CER signal (alongside logit cosine): on qwen3-asr-0.6b q4_k the
    EN+DE win holds (cos +0.05, CER 0.0 = no transcript regression). Calibration
    set published CC0 at `cstr/crispasr-imatrix-calib` (+ `tools/imatrix-calib/`).
+   **Metric finding (q3_k):** the two A/B signals DIVERGE at aggressive
+   bit-widths — imatrix improved q3_k transcript CER **0.37→0.13** (6/12 clips)
+   while the prefill-logit **cosine dipped −0.04**. So CER (transcript fidelity)
+   is the real gate; the single first-token-logit cosine is a proxy that can
+   mislead. Harness verdict now gates on CER (cosine tiebreaks easy quants).
+   Lesson: imatrix's payoff grows as bits shrink — biggest at q3_k/iq3.
    Still **OPEN**: wiring the collector into the remaining (non-ASR-decoder)
    backends if we ever want imatrix there too.
 2. **FA default-on audit.** Upstream flipped flash-attn to baseline. Re-check
