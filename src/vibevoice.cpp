@@ -3845,7 +3845,17 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
             size_t head_src_elems = (size_t)hd * seq_len;
             size_t head_src_bytes = head_src_elems * src_el_size;
             size_t head_dst_bytes = head_src_elems * dst_el_size;
-            size_t head_dst_stride = (size_t)hd * max_ctx * dst_el_size; // nb[2] in dst
+            // Per-head stride MUST come from the destination tensor's real
+            // ne[1] (== ctx->kv_max_ctx), not this call's local max_ctx. The
+            // persistent KV cache is only reallocated when it needs to GROW
+            // (see the kv_max_ctx < max_ctx guard above), so a short request
+            // that follows a longer one REUSES the larger allocation whose
+            // ne[1] > max_ctx. Using hd*max_ctx here would pack the voice
+            // prompt heads too tightly, writing K/V at the wrong positions and
+            // corrupting speaker conditioning for every request after a longer
+            // one — the server "1st/2nd fine, 3rd garbage" leak (issue #171).
+            // dst_k and dst_v share the same shape, so nb[2] is identical.
+            size_t head_dst_stride = dst_k->nb[2]; // real per-head stride
 
             for (int il = 0; il < lm_n_layers; il++) {
                 for (int kv_type = 0; kv_type < 2; kv_type++) {

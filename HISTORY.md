@@ -6,6 +6,35 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## #171 2026-07-03 VibeVoice TTS server "3rd-request garbage" — voice-KV stride leak
+
+Reporter (logiclove, RDNA4 / RADV GFX1201) saw VibeVoice-realtime-0.5b TTS degrade in
+**server** mode: 1st/2nd request clean, 3rd (and any short request after a longer one)
+produced garbage / mixed voices / wrong length. The CLI was always clean. `GGML_VK_DISABLE_COOPMAT2`,
+`VIBEVOICE_TTS_FLASH_ATTN=0`, `VIBEVOICE_VAE_BACKEND=cpu` (even all together) did **not** fix it —
+so it was never the RDNA4 coopmat2 shader, it was a **host-side cross-request state leak**.
+
+Reproduced on **Metal** (owner had only tested via CLI = fresh process each time): send the
+same French sentence as request #1 vs after several other sentences → **different** audio
+(different length ⇒ different EOS frame). Since the diffusion RNG reseeds to 42 every call and
+all caches clear per call, that divergence had to be a stale pointer/stride.
+
+Root cause in `copy_voice_kv` (realtime voice path, `vibevoice_synthesize`): the per-head
+destination stride into the **persistent** `ctx->kv_k/kv_v` was `hd * max_ctx * el`, using
+**this call's local `max_ctx`**. But the KV cache is only reallocated when it needs to *grow*
+(`kv_max_ctx < max_ctx` guard); a short request that follows a longer one **reuses** the larger
+allocation whose real `ne[1] == ctx->kv_max_ctx > max_ctx`. So the voice prompt for heads ≥1 was
+written at the wrong offsets → corrupted speaker conditioning on every request after a longer one.
+The server's startup **warmup** synth grows `kv_max_ctx`, so even the first real short request was
+already corrupted. Explains all four observations (CLI clean, server 3rd garbage, coopmat-off
+no help, same-sentence-back-to-back fine — equal `max_ctx`).
+
+Fix (1 line): use the tensor's real per-head stride `dst_k->nb[2]` — which is exactly what the
+attention read side already uses. Validation: fixed server output is now **byte-identical (PCM)**
+to the fresh-CLI ground truth for the adversarial long-then-short ordering, and re-sending an
+earlier sentence is byte-identical to its first synthesis. Base 1.5B/7B path is unaffected (no
+`copy_voice_kv`). No GGUF reconversion — recompile only.
+
 ## #192 2026-07-01 TADA CPU quality (last-word / tempo), cand>1 viability, `.wav` voice cloning + `--align`
 
 Closed out the CPU-side complaints in #192 and shipped the voice-cloning + forced-alignment
