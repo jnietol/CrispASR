@@ -102,6 +102,7 @@ to the [TTS table](#text-to-speech-models) for the synthesis side.
 | **voxtral4b** | [`mistralai/Voxtral-Mini-4B-Realtime-2602`](https://huggingface.co/mistralai/Voxtral-Mini-4B-Realtime-2602) | Causal encoder + 3.4B LLM, sliding window | 13, realtime streaming | Apache-2.0 |
 | **qwen3** | [`Qwen/Qwen3-ASR-0.6B`](https://huggingface.co/Qwen/Qwen3-ASR-0.6B) | Whisper-style audio encoder + Qwen3 0.6B LLM | 30 + 22 Chinese dialects | Apache-2.0 |
 | **qwen3-1.7b** | [`Qwen/Qwen3-ASR-1.7B`](https://huggingface.co/Qwen/Qwen3-ASR-1.7B) | Whisper-style audio encoder + Qwen3 1.7B LLM | 30 + 22 Chinese dialects | Apache-2.0 |
+| **qwen3-ja-anime** | [`jaykwok/Qwen3-ASR-1.7B-JA-Anime-Galgame-hf`](https://huggingface.co/jaykwok/Qwen3-ASR-1.7B-JA-Anime-Galgame-hf) | Qwen3-ASR-1.7B fine-tuned for Japanese anime/galgame speech | ja + 30 langs | Apache-2.0 |
 | **mega-asr** | [`zhifeixie/Mega-ASR`](https://huggingface.co/zhifeixie/Mega-ASR) | Qwen3-ASR-1.7B + merged robustness LoRA; always-on robust path | noisy / degraded speech | Apache-2.0 |
 | **higgs-stt** | [`bosonai/higgs-audio-v3-stt`](https://huggingface.co/bosonai/higgs-audio-v3-stt) | Whisper-large-v3 encoder (4 s chunked) + Qwen3-1.7B LLM ([more](docs/architecture.md#higgs-stt)) | en | Apache-2.0 |
 | **wav2vec2** | [`jonatasgrosman/wav2vec2-large-xlsr-53-english`](https://huggingface.co/jonatasgrosman/wav2vec2-large-xlsr-53-english) | CNN + 24L transformer + CTC head (any Wav2Vec2ForCTC) | per-model | Apache-2.0 |
@@ -560,7 +561,14 @@ curl -L -o parakeet.gguf \
 ### Qwen3-ASR (30 languages + Chinese dialects)
 
 ```bash
+# 0.6B (default, ~500 MB)
 ./build/bin/crispasr --backend qwen3 -m auto -f audio.zh.wav
+
+# 1.7B (higher quality, ~1.3 GB) — supports both -hf and non-hf source models
+./build/bin/crispasr --backend qwen3 -m qwen3-1.7b --auto-download -f audio.wav
+
+# Japanese anime/galgame fine-tune (~1.3 GB)
+./build/bin/crispasr --backend qwen3 -m qwen3-ja-anime --auto-download -f anime.wav
 ```
 
 ### MiMo-V2.5-ASR (Mandarin + dialects + English, 7.5B Qwen2 LM)
