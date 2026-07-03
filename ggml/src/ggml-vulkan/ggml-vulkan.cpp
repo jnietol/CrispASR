@@ -2616,6 +2616,21 @@ static vk::Event ggml_vk_create_event(ggml_backend_vk_context * ctx) {
 static void ggml_vk_command_pool_cleanup(vk_device& device, vk_command_pool& p) {
     VK_LOG_DEBUG("ggml_vk_command_pool_cleanup()");
 
+    // CrispASR patch (issue #215 / upstream draft 21) — MUST RE-APPLY on ggml sync.
+    // vkResetCommandPool requires every command buffer in the pool to be out of the
+    // pending state. Callers are expected to have synchronized first, but in async
+    // mode (support_async) that guarantee can be violated: graph_compute returns
+    // without waiting, so buffers submitted for prior graphs stay pending when a
+    // later cleanup (graph_cleanup at a sched split, or queue_command_pools_cleanup
+    // at buffers_in_use>=10) resets the pool — vkResetCommandPool then faults inside
+    // the RADV/NVIDIA driver. Enforce the precondition here: drain the pool's own
+    // queue first. This is a no-op when the queue is already idle (the common,
+    // already-synchronized path) and only blocks when it would otherwise be UB.
+    if (p.q) {
+        std::lock_guard<std::mutex> guard(queue_mutex);
+        p.q->queue.waitIdle();
+    }
+
     // Requires command buffers to be done
     device->device.resetCommandPool(p.pool);
     // Don't clear the command buffers and mark them as not in use.

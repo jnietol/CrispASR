@@ -302,6 +302,28 @@ verbatim. The crash-gone confirmation needs real RADV/NVIDIA hardware (reporter)
 The encoder manual-attn path (#215a) and the diff harness `CRISPASR_DIFF_USE_GPU=1`
 toggle for moss-transcribe are retained.
 
+### #215c 2026-07-03 the proper ggml-vulkan fix — drain the queue before pool reset
+
+The #215b async-disable is our conservative default; the real bug is in ggml-vulkan
+and now fixed at the root. `ggml_vk_command_pool_cleanup` calls `vkResetCommandPool`,
+whose precondition is that no command buffer in the pool is still pending (its own
+comment: "Requires command buffers to be done"). In async mode `graph_compute`
+returns without synchronizing, so buffers stay pending and a later reset (from
+`graph_cleanup` at a sched split, or `queue_command_pools_cleanup` at
+`buffers_in_use>=10`) faults the native driver. Fix: drain the pool's own queue
+(`p.q->queue.waitIdle()` under `queue_mutex`) before the reset — a no-op on the
+already-synchronized path, blocking only when a reset would be UB. `vk_command_pool`
+already carries `q`, and no caller holds `queue_mutex`, so no deadlock. This is a
+local patch to vendored ggml (marked "MUST RE-APPLY on ggml sync"); the clean
+upstream draft + reference patch live in `tools/upstream-prs/21-vulkan-async-command-
+pool-reset.{md,patch}` (file at ggml-org/llama.cpp once confirmed on native HW).
+Verified on MoltenVK: async on + guard transcribes jfk and jfk×3 verbatim with no
+perf regression (the `waitIdle` is a no-op when idle). The guard makes the async
+path safe, so once the reporter confirms `CRISPASR_MOSS_TRANSCRIBE_VULKAN_ASYNC=1`
+runs clean on RADV/NVIDIA, the #215b async-disable default can be dropped and moss
+returns to full native-async speed. Not reproducible on MoltenVK (Metal
+auto-manages command-buffer lifetime), so crash-gone is HW-pending.
+
 ## #205 2026-06-30 `--max-len` for text-only backends + granite-plus timestamp-mode derail
 
 Reporter: `--max-len` had no effect on granite / qwen3 (worked on whisper/cohere).
