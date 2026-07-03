@@ -361,13 +361,16 @@ static bool crispasr_model_quantize(const std::string& fname_inp, const std::str
     // per step and compounds across steps and across the AR feedback loop —
     // enough to push the first few frames onto a wrong diffusion trajectory
     // that decodes as a hallucinated non-speech "music" onset before the voice
-    // (issue #171, seen on q8_0). The default (no vibevoice carve-out) quantizes
-    // 22/26 pred.* tensors plus at_conn/at_dec/tts_eos — exactly the synthesis
-    // stack every other TTS backend here keeps at original precision
-    // (chatterbox vocoder, dia DAC, tada acoustic head, zonos heads). Keep the
-    // whole non-transformer synthesis stack at source precision and quantize
-    // only the two backbones (which dominate the footprint) + the ASR-side
-    // encoders. Force full quant with CRISPASR_VIBEVOICE_QUANT_ALL=1.
+    // (issue #171, seen on q8_0). The default (no carve-out) quantizes 22/26
+    // pred.* tensors plus at_conn/tts_eos. Keep that trajectory/control stack —
+    // pred.*, at_conn.*, se_conn.*, tts_eos.*, tts_types.* — at source precision
+    // (all small: q8_0 grows ~40 MB, q4_k ~75 MB). The VAE decoder (at_dec.*,
+    // st_dec.*) is deliberately NOT protected: it is a large deterministic
+    // renderer, it commonly runs on CPU (VIBEVOICE_VAE_BACKEND), and the
+    // published q4_k that quantizes it round-trips ASR perfectly — protecting it
+    // would nearly double the q4_k size (its whole point is to be small) for no
+    // quality gain and without touching the music-onset cause. Force full quant
+    // with CRISPASR_VIBEVOICE_QUANT_ALL=1.
     const bool is_vibevoice = (arch.find("vibevoice") != std::string::npos);
     const char* env_vv_all = std::getenv("CRISPASR_VIBEVOICE_QUANT_ALL");
     const bool vibevoice_quant_all = is_vibevoice && env_vv_all && *env_vv_all && *env_vv_all != '0';
@@ -613,22 +616,14 @@ static bool crispasr_model_quantize(const std::string& fname_inp, const std::str
                                sname.find("talker.codec_bridge") == 0)) &&
             !(is_parler && sname.find("dac.") == 0) &&
             !(is_dia && (sname.find("embedding") != std::string::npos || sname.find("audio_encoder") == 0)) &&
-            // VibeVoice: always keep the trajectory-critical + control stack at
-            // source precision — the diffusion prediction head (pred.*), the
-            // acoustic/semantic connectors (at_conn.*, se_conn.*), the EOS
-            // classifier (tts_eos.*) and the speech-type table (tts_types.*).
-            // These are small and directly shape the CFG diffusion trajectory /
-            // stop decision (see is_vibevoice note). The VAE decoders (at_dec.*,
-            // st_dec.*) are a large, deterministic renderer that q8_0 quantizes
-            // near-losslessly and that often runs on CPU (VIBEVOICE_VAE_BACKEND),
-            // so protect them only for lossy sub-q8_0 quants (q4_k/q5_k/…) where
-            // conv quantization is audibly damaging — quantizing them at q8_0
-            // keeps the model lean without touching the music-onset cause.
+            // VibeVoice: keep the trajectory/control stack — diffusion head
+            // (pred.*), acoustic/semantic connectors (at_conn.*, se_conn.*), EOS
+            // classifier (tts_eos.*), speech-type table (tts_types.*) — at source
+            // precision (see is_vibevoice note). The VAE decoder (at_dec.*/st_dec.*)
+            // is intentionally left quantizable.
             !(is_vibevoice && !vibevoice_quant_all &&
               (sname.find("pred.") == 0 || sname.find("at_conn.") == 0 || sname.find("se_conn.") == 0 ||
                sname.find("tts_eos.") == 0 || sname.find("tts_types.") == 0)) &&
-            !(is_vibevoice && !vibevoice_quant_all && qtype != GGML_TYPE_Q8_0 &&
-              (sname.find("at_dec.") == 0 || sname.find("st_dec.") == 0)) &&
             !(is_zonos && (sname.find("heads.") == 0 || sname.find("embeddings.") == 0 ||
                            sname.find("prefix_conditioner.") == 0)) &&
             !(is_bark &&
