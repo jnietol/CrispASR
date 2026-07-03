@@ -13,6 +13,7 @@
 // across all four consumers above.
 
 #include "crispasr_session.h"
+#include "core/win_compat.h"
 #include "core/bpe.h"
 #include "core/gpu_backend_pref.h" // crispasr_set_gpu_backend_pref (#214)
 

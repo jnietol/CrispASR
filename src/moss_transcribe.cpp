@@ -11,6 +11,7 @@
 // LM retargeted to Qwen3-1.7B; lm_head tied to the token embedding table.
 
 #include "moss_transcribe.h"
+#include "core/win_compat.h"
 
 #include "core/beam_decode.h"
 

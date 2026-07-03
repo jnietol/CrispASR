@@ -5,6 +5,7 @@
 // See moss_audio.h for the full architecture description.
 
 #include "moss_audio.h"
+#include "core/win_compat.h"
 
 #include "core/beam_decode.h"
 

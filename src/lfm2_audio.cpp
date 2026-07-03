@@ -10,6 +10,7 @@
 // DRY: reuses core/gguf_loader.h, core/mel.h, core/fastconformer.h, core/attention.h
 
 #include "lfm2_audio.h"
+#include "core/win_compat.h"
 
 #include "ggml.h"
 #include "ggml-alloc.h"
