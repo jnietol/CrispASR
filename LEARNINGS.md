@@ -10,6 +10,30 @@ If a lesson is still "live" (affects current work), it's linked from
 
 ---
 
+## The Mimi codec transformer runs non-causal — a divergence from moshi's streaming architecture (gated, A/B-equal so far) (2026-07)
+
+Sweeping CrispASR for the CrispEmbed `deepseek_ocr2` bug class (a masked attention replaced by
+`ggml_flash_attn_ext` with `mask=nullptr` → every query attends to everything → garbage) surfaced the
+**Mimi (Kyutai) codec transformer** in `kyutai_stt.cpp:704` (STT encoder) and `csm_tts.cpp:923` (TTS
+decoder). Both run the transformer with **full non-causal attention** (`mask=nullptr` over the whole
+frame sequence), yet:
+- upstream moshi's Mimi is a **streaming causal** transformer with `sliding_window=250`,
+- the RoPE two lines up is literally commented "causal",
+- `mimi_context = 250` is **loaded from GGUF (`kyutai.mimi.encoder_context`) but never applied** — dead config,
+- every SEANet conv in the same files is `conv1d_causal`.
+
+So the transformer is the one non-causal island in an otherwise-causal codec. **This is a real
+divergence, but NOT a crash/garbage bug like deepseek_ocr2** — the models transcribe/synthesize fine
+today, so at most it's a quality question. Per the A/B mandate it must be proven before any default
+change, so it's implemented **opt-in** behind `CRISPASR_MIMI_CAUSAL` (default = today's non-causal;
+the flag builds a causal + sliding-window-250 F16 mask, filled after alloc: attend iff `k<=q && q-k<
+window`). **A/B (kyutai-stt-1b q4_k, jfk):** non-causal → "…do for you. Ask what you can do…", causal →
+"…do for you, ask what you can do…" — both correct, differ only by one downstream punctuation choice;
+the causal path neither asserts nor degrades. Note jfk is ~137 mimi frames < 250, so the *window*
+never engages here — this only exercised causal masking, and it came out **quality-equal, not a win**.
+Decision: **keep opt-in** (a proven win, not equality, is required to flip). To settle it, A/B on
+audio > 250 frames (window engages) and judge by WER, and add the symmetric gate to `csm_tts` decoder.
+
 ## Auditing CrispASR against CrispEmbed's bug classes: a weight reader with no quantized branch fails silently (2026-07)
 
 After CrispEmbed fixed three bugs (a `sched_reserve`→re-alloc-same-graph CUDA corruption in
