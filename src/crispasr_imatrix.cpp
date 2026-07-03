@@ -130,9 +130,21 @@ bool eval_cb(struct ggml_tensor* t, bool ask, void* /*ud*/) {
     if (nrows <= 0)
         return true;
 
-    const size_t nbytes = ggml_nbytes(a);
-    std::vector<uint8_t> buf(nbytes);
-    ggml_backend_tensor_get(a, buf.data(), 0, nbytes);
+    // Read the activation into a typed F32 buffer (dequantising F16 on the
+    // way) — read directly into the correctly-typed pointer rather than
+    // reinterpreting a byte buffer, so there is no cross-representation cast.
+    const int64_t nelem = ggml_nelements(a);
+    std::vector<float> fx((size_t)nelem);
+    if (a->type == GGML_TYPE_F32) {
+        ggml_backend_tensor_get(a, fx.data(), 0, ggml_nbytes(a));
+    } else if (a->type == GGML_TYPE_F16) {
+        std::vector<ggml_fp16_t> h((size_t)nelem);
+        ggml_backend_tensor_get(a, h.data(), 0, ggml_nbytes(a));
+        for (int64_t i = 0; i < nelem; i++)
+            fx[i] = ggml_fp16_to_fp32(h[i]);
+    } else {
+        return true; // unsupported activation type; skip
+    }
 
     std::lock_guard<std::mutex> lk(g_mu);
     auto& acc = g_sumsq[w->name];
@@ -140,25 +152,10 @@ bool eval_cb(struct ggml_tensor* t, bool ask, void* /*ud*/) {
         acc.assign((size_t)ne0, 0.0);
     if ((int64_t)acc.size() != ne0)
         return true; // shape drift; skip defensively
-
-    if (a->type == GGML_TYPE_F32) {
-        const float* x = (const float*)buf.data();
-        for (int64_t r = 0; r < nrows; r++) {
-            const float* row = x + r * ne0;
-            for (int64_t c = 0; c < ne0; c++)
-                acc[c] += (double)row[c] * (double)row[c];
-        }
-    } else if (a->type == GGML_TYPE_F16) {
-        const ggml_fp16_t* x = (const ggml_fp16_t*)buf.data();
-        for (int64_t r = 0; r < nrows; r++) {
-            const ggml_fp16_t* row = x + r * ne0;
-            for (int64_t c = 0; c < ne0; c++) {
-                const double v = ggml_fp16_to_fp32(row[c]);
-                acc[c] += v * v;
-            }
-        }
-    } else {
-        return true; // unsupported activation type; skip
+    for (int64_t r = 0; r < nrows; r++) {
+        const float* row = fx.data() + r * ne0;
+        for (int64_t c = 0; c < ne0; c++)
+            acc[c] += (double)row[c] * (double)row[c];
     }
     g_count[w->name] += (uint64_t)nrows;
     return true;

@@ -147,11 +147,6 @@ add_library(crispasr-lib
             # by the library's VAD / LID / diarize auto-download paths
             # and by the CLI's `-m auto` resolver.
             crispasr_cache.cpp
-            # Importance-matrix (imatrix) activation-stats collector. No-op
-            # unless CRISPASR_IMATRIX_OUT is set; installed on ASR decoder
-            # scheds so `crispasr-quantize --imatrix` can weight k-quant/IQ
-            # error by real activation energy (see docs/quantize.md).
-            crispasr_imatrix.cpp
             # Known-model registry lookup (backend → canonical GGUF URL).
             # CLI keeps the TTY prompting shim; the library does the
             # non-interactive resolve.
@@ -702,6 +697,13 @@ add_library(crispasr-core STATIC
             core/kaldi_fbank.cpp
             core/audio_resample.h
             core/audio_resample.cpp
+            # Importance-matrix (imatrix) activation-stats collector. Lives in
+            # crispasr-core because backends call crispasr_imatrix_install()
+            # from their decode-sched setup, so the symbol must resolve
+            # wherever a backend static lib is linked (not just crispasr-lib).
+            # No-op unless CRISPASR_IMATRIX_OUT is set (see docs/quantize.md).
+            crispasr_imatrix.h
+            crispasr_imatrix.cpp
             )
 target_include_directories(crispasr-core PUBLIC . ../include)
 # PLAN #51a: gguf_loader uses ggml_backend_buffer_init from
