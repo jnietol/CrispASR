@@ -10,6 +10,39 @@ If a lesson is still "live" (affects current work), it's linked from
 
 ---
 
+## Auditing CrispASR against CrispEmbed's bug classes: a weight reader with no quantized branch fails silently (2026-07)
+
+After CrispEmbed fixed three bugs (a `sched_reserve`→re-alloc-same-graph CUDA corruption in
+lfm2_colbert, a `clean_exit`/`atexit` imatrix-flush miss, and a quantized-weight read sized by
+`n_elem*sizeof(float)`), we swept CrispASR for the same shapes. Two were clean:
+
+- **`sched_reserve`→re-alloc-same-graph:** all sites are safe. `cohere.cpp` and `qwen3_tts.cpp`
+  each reserve a *dedicated* worst-case/measurement graph, then build a **fresh** graph for compute
+  (llama-style); `talk-llama` is vendored upstream. The trap is re-allocating the *same* `ggml_cgraph`
+  you passed to `ggml_backend_sched_reserve` — `sched_reset` doesn't null `tensor->buffer`, so the
+  reserve pass's stale buffers get reused (silent CUDA corruption). None of CrispASR's sites do that.
+- **`clean_exit`/`atexit`:** N/A — CrispASR has zero `atexit(` registrations and no imatrix collector,
+  so there's nothing for `_exit()` to skip.
+
+The third had a live lookalike: **`paraformer.cpp`'s `cif_predict` `read_f32` helper handled only
+F32 and F16 with no `else`** — a block-quantized tensor would leave the destination *uninitialized*
+(silent garbage, no assert), the same class as the pcs FC-head bug. Rewrote it to mirror
+`pcs_read_tensor_f32`: F32 fast-path, everything else dequantized per row via the type's `to_float`
+trait (native bytes sized by `ggml_nbytes`, row stride `ggml_row_size` — **never** `n_elem*4`, which
+reads garbage / asserts on quantized tensors).
+
+**Why it was inert (and the general rule).** Shipped paraformer GGUFs keep the CIF weights at F16/F32:
+the quantizer skips them because they're named `.w` (not `.weight`, so they miss the `is_weight` test)
+and are 3-D conv / 1-D vector (fail the 2-D `ok_dims` gate), and the biases are `force_f32` in the
+converter. So the bug couldn't trigger today — but "the quantizer happens to skip this tensor" is a
+fragile guarantee living in a *different* file. **Any helper that reads a weight tensor to a CPU F32
+buffer must handle F32, F16, *and* quantized via `to_float`/`ggml_nbytes`, not silently fall through.**
+
+**Runtime-verified (auto-download, 2026-07):** `crispasr --backend paraformer --auto-download` on
+`samples/jfk.mp3` (paraformer-zh q4_k, sha256-checked vs HF) → `CIF predicted 26 tokens from
+T_lfr=183` → *"and so my fellow americans ask not what your country can do for you ask what you can
+do for your country"* — correct, so the F16 CIF read path (`to_float`) is exercised and right.
+
 ## A persistent KV cache reused from a larger allocation makes local `max_ctx` the wrong stride (#171 VibeVoice server leak)
 
 A "server works for the first N requests then produces garbage, but the CLI is
