@@ -334,6 +334,23 @@ Override per-language dict paths with env vars:
 `CRISPASR_CMUDICT_PATH`, `CRISPASR_DE_DICT_PATH`,
 `CRISPASR_FR_DICT_PATH`, `CRISPASR_ES_DICT_PATH`.
 
+### Kokoro G2P strategy (`CRISPASR_KOKORO_G2P`)
+
+Kokoro's phonemization order can be controlled via the
+`CRISPASR_KOKORO_G2P` environment variable:
+
+| Value | Behavior |
+|-------|----------|
+| `builtin-first` | Built-in G2P first, espeak fallback (default) |
+| `espeak-first` | espeak-ng first, built-in fallback |
+| `espeak-only` | espeak-ng only, no built-in G2P |
+| `builtin-only` | Built-in G2P only, no espeak-ng |
+
+The built-in G2P includes text normalization for common technical tokens
+(`C++` → "C plus plus", `C#` → "C sharp", `.NET` → "dot net", etc.).
+If you encounter mispronunciations with the built-in path, try
+`CRISPASR_KOKORO_G2P=espeak-first` to prefer espeak-ng when available.
+
 Dictionary sources at [cstr/g2p-dicts](https://huggingface.co/datasets/cstr/g2p-dicts):
 - **Pre-generated IPA** (primary): piper-compatible phonetic transcriptions for EN/DE/FR/ES
 - **CMUdict** (BSD): [cmusphinx/cmudict](https://github.com/cmusphinx/cmudict), English ARPAbet

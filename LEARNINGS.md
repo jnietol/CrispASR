@@ -11544,3 +11544,27 @@ Process-global preference (set once, read everywhere) is the right pattern when
 the preference applies to the entire process, not per-model. Adding an `#include`
 to 60+ files invalidates the entire ccache — budget for a cold rebuild when
 touching shared headers.
+
+### §216 — Built-in G2P tokenizer eats symbols in technical tokens (#216)
+
+**Built-in G2P tokenizer splits on a fixed punctuation set and drops everything
+else.** The `tokenize()` function in `g2p_en.h` splits on `' ,.:;!?-\n'` and
+passes everything else as word characters. Tokens like `C++`, `C#`, `.NET`,
+`Node.js`, `CI/CD` are treated as single words. The `+`, `#`, `/` characters
+aren't in any CMUdict entry and the LTS letter-to-sound rules silently skip
+non-alpha characters, producing truncated output (`C++` → `k`).
+
+**Text normalization must run before tokenization, not inside it.** The fix is
+a `normalize_technical_tokens()` pass that expands compound tokens into natural
+English words (`C++` → `C plus plus`) before the tokenizer ever sees them. This
+is better than making the tokenizer symbol-aware because: (a) symbols have
+context-dependent pronunciations (`+` in `C++` is "plus" but `+` alone might be
+"positive" or silent), (b) downstream G2P tiers (CMUdict, neural, LTS) already
+handle normal English words well, and (c) the normalization table is easy to
+extend.
+
+**G2P strategy env var prevents vendor lock-in.** When built-in G2P is the
+only phonemizer (Windows, no espeak-ng), there's no fallback for edge cases.
+`CRISPASR_KOKORO_G2P=espeak-first` lets users with espeak-ng installed prefer
+it for higher-quality output, while `builtin-only` is useful for GPL-free
+deployments that want deterministic results.

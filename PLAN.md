@@ -422,6 +422,7 @@ work:
 | **DONE** | [§131 OuteTTS](#131-outetts--llm--wavtokenizer-codec-cc-by-40) | S-M | **WORKING — speech output confirmed via ASR roundtrip.** WavTokenizer decoder validated cos≥0.999 all stages. → see HISTORY |
 | **DONE** | [§139 Beam search — remaining ASR backends](#139-beam-search--remaining-asr-backends-issue-136-follow-up) | Phased | **18/24 done** (was 10). All feasible backends shipped 2026-06-01/02. → see HISTORY |
 | **DONE** | [#156 Permissive G2P phonemizer (replace espeak-ng GPL dep)](#156-permissive-g2p-phonemizer) | Phased | **DONE 2026-06-08**: Pre-generated IPA pronunciation dicts (EN 126K, DE 667K, FR 257K, ES 600K) at cstr/g2p-dicts — 99.5% piper-compatible. → see HISTORY |
+| **DONE** | [#216 Kokoro G2P technical token regression](#216-kokoro-g2p-technical-token-regression) | Small | **DONE 2026-07-03**: `C++`→`k` fixed — text normalization expands ~40 technical tokens before tokenization. `CRISPASR_KOKORO_G2P` env var for strategy selection. → see LEARNINGS |
 | **DONE** | [#155 CONV_TRANSPOSE_1D GPU optimization](#155-conv_transpose_1d-gpu-optimization-issue-155) | Small | **DONE 2026-06-10.** Crash fixed (`f8fc8b8e`); CUDA/HIP 9× speedup (1200→130 ms, `5f600f25`); Vulkan `col2im_1d` kernel ported (`cad7fbac`) — codec stays fully on-GPU. → see HISTORY |
 | **DONE** | [§WASM Browser build](#wasm-browser-build--all-backends-multithreaded) | Medium | **DONE 2026-06-10.** All backends, multithreaded (`-pthread` + `PTHREAD_POOL_SIZE=8`). → see HISTORY |
 | **LOW** | [#127 Coverage gaps from 2026-05-26 sweep close-out](#127-coverage-gaps-from-the-2026-05-26-overlap-save-sweep-close-out) | Small | Three loose ends: **(a) omniasr-llm DONE** — Kaggle P100 sweep v4: short=106 long=490 (4.6x scaling), correct JFK transcript, no timeout (was M1-only issue). **(b)** mimo-asr local test doesn't run in CI (4.2 GB Q4_K doesn't fit runner disk). **(c) cohere-asr-ja DONE** — correct repo is `CKHO/cohere-asr-ja-GGUF` (not `cstr/`); Kaggle P100: rc=0, 108 chars, perfect JFK: "And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country." Still needs JA fixture sweep for PERFORMANCE.md table. |
@@ -5732,6 +5733,31 @@ tests/test-g2p-es.cpp      — 21 assertions (seseo, lenition, yeísmo, jota)
 tests/test-espeak-phonemize.cpp — 30 assertions (piper synthesis)
 tests/test-piper-roundtrip.sh   — 4 live TTS→ASR tests
 ```
+
+---
+
+## 216. Kokoro G2P technical token regression
+
+**Issue:** [#216](https://github.com/CrispStrobe/CrispASR/issues/216) —
+`C++` phonemized as `k` instead of `see plus plus` with built-in G2P.
+
+**Root cause:** The `tokenize()` function in `core/g2p_en.h` splits on
+spaces and common punctuation but not `+`, `#`, `/`, `.` within compound
+tokens. `C++` stays as one token → `word_to_ipa` lowercases to `c++` →
+not in CMUdict/espeak dict → LTS rules map `c` to `k` and skip unknown
+`+` chars.
+
+**Fix (DONE 2026-07-03):**
+1. Added `normalize_technical_tokens()` in `core/g2p_en.h` — runs before
+   `tokenize()` in `text_to_ipa()`. Expands ~40 common technical tokens
+   (case-insensitive, word-boundary-aware): `C++`→`C plus plus`,
+   `C#`→`C sharp`, `.NET`→`dot net`, `Node.js`→`Node J S`,
+   `CI/CD`→`C I C D`, `TypeScript`→`Type Script`, etc.
+2. Added `CRISPASR_KOKORO_G2P` env var in `kokoro.cpp` for strategy
+   selection: `builtin-first` (default), `espeak-first`, `espeak-only`,
+   `builtin-only`. Replaces hardcoded builtin-then-espeak cascade with
+   configurable lambdas.
+3. 10 new unit test assertions in `tests/test-g2p-en.cpp`.
 
 ---
 

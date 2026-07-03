@@ -3195,35 +3195,60 @@ bool phonemize_cached(kokoro_context* ctx, const std::string& lang, const std::s
 
     // §156 permissive G2P dicts — try builtin phonemizers first (no GPL dep).
     // These auto-download IPA dicts from HuggingFace on first call.
-    bool builtin_ok = false;
-    if (lang == "en" || lang == "en-us" || lang == "en-gb")
-        builtin_ok = crispasr::phonemize_builtin_en(lang, text, out);
-    else if (lang == "de")
-        builtin_ok = crispasr::phonemize_builtin_de(lang, text, out);
-    else if (lang == "fr" || lang == "fr-fr")
-        builtin_ok = crispasr::phonemize_builtin_fr(lang, text, out);
-    else if (lang == "es" || lang == "es-es")
-        builtin_ok = crispasr::phonemize_builtin_es(lang, text, out);
-    if (builtin_ok && !out.empty()) {
-        if (is_cmn_lang(lang))
-            strip_cmn_tone_numbers(out);
-        ctx->phon_cache.insert(key, out);
-        return true;
+    //
+    // CRISPASR_KOKORO_G2P env var selects strategy (#216):
+    //   "builtin-first"  — builtin G2P, then espeak fallback (default)
+    //   "espeak-first"   — espeak first, then builtin fallback
+    //   "espeak-only"    — espeak only, no builtin
+    //   "builtin-only"   — builtin only, no espeak
+    static const char* g2p_strategy = std::getenv("CRISPASR_KOKORO_G2P");
+    static const bool espeak_first =
+        g2p_strategy && (strcmp(g2p_strategy, "espeak-first") == 0 || strcmp(g2p_strategy, "espeak-only") == 0);
+    static const bool skip_builtin = g2p_strategy && strcmp(g2p_strategy, "espeak-only") == 0;
+    static const bool skip_espeak = g2p_strategy && strcmp(g2p_strategy, "builtin-only") == 0;
+
+    // Lambda: try builtin phonemizers for the given language.
+    auto try_builtin = [&]() -> bool {
+        if (skip_builtin)
+            return false;
+        bool ok = false;
+        if (lang == "en" || lang == "en-us" || lang == "en-gb")
+            ok = crispasr::phonemize_builtin_en(lang, text, out);
+        else if (lang == "de")
+            ok = crispasr::phonemize_builtin_de(lang, text, out);
+        else if (lang == "fr" || lang == "fr-fr")
+            ok = crispasr::phonemize_builtin_fr(lang, text, out);
+        else if (lang == "es" || lang == "es-es")
+            ok = crispasr::phonemize_builtin_es(lang, text, out);
+        return ok && !out.empty();
+    };
+
+    // Lambda: try espeak phonemizers (lib then popen).
+    auto try_espeak = [&]() -> bool {
+        if (skip_espeak)
+            return false;
+#if defined(CRISPASR_HAVE_ESPEAK_NG) || defined(CRISPASR_ESPEAK_DLOPEN)
+        if (phonemize_espeak_lib(lang, effective_text, out)) {
+            crispasr::strip_espeak_lang_markers(out); // #169
+            return true;
+        }
+#endif
+        if (phonemize_popen(lang, effective_text, out)) {
+            crispasr::strip_espeak_lang_markers(out); // #169
+            return true;
+        }
+        return false;
+    };
+
+    // Apply the selected strategy.
+    bool ok = false;
+    if (espeak_first) {
+        ok = try_espeak() || try_builtin();
+    } else {
+        ok = try_builtin() || try_espeak();
     }
 
-    // Fallback: espeak-ng (GPL) — linked, dlopen'd, or popen'd.
-    // For JA, effective_text has kanji converted to kana via MeCab.
-#if defined(CRISPASR_HAVE_ESPEAK_NG) || defined(CRISPASR_ESPEAK_DLOPEN)
-    if (phonemize_espeak_lib(lang, effective_text, out)) {
-        crispasr::strip_espeak_lang_markers(out); // #169
-        if (is_cmn_lang(lang))
-            strip_cmn_tone_numbers(out);
-        ctx->phon_cache.insert(key, out);
-        return true;
-    }
-#endif
-    if (phonemize_popen(lang, effective_text, out)) {
-        crispasr::strip_espeak_lang_markers(out); // #169
+    if (ok && !out.empty()) {
         if (is_cmn_lang(lang))
             strip_cmn_tone_numbers(out);
         ctx->phon_cache.insert(key, out);

@@ -435,3 +435,59 @@ TEST_CASE("strip espeak language markers", "[phonemizer][espeak]") {
         CHECK(s.empty());
     }
 }
+
+// ── Technical token normalization (#216) ─────────────────────────────
+
+TEST_CASE("Technical token normalization", "[g2p][normalize]") {
+    SECTION("C++ expanded") {
+        auto r = g2p_en::normalize_technical_tokens("modern C++, Linux");
+        CHECK(r == "modern C plus plus, Linux");
+    }
+
+    SECTION("C# expanded") {
+        auto r = g2p_en::normalize_technical_tokens("wrote it in C# and F#");
+        CHECK(r == "wrote it in C sharp and F sharp");
+    }
+
+    SECTION(".NET expanded") {
+        auto r = g2p_en::normalize_technical_tokens("using .NET for web");
+        CHECK(r == "using dot net for web");
+    }
+
+    SECTION("Node.js expanded") {
+        auto r = g2p_en::normalize_technical_tokens("built with Node.js");
+        CHECK(r == "built with Node J S");
+    }
+
+    SECTION("case insensitive") {
+        auto r = g2p_en::normalize_technical_tokens("c++ and node.js");
+        CHECK(r == "C plus plus and Node J S");
+    }
+
+    SECTION("mid-word not matched") {
+        // "AC++" should not match — C++ must be at a word boundary
+        auto r = g2p_en::normalize_technical_tokens("AC++ test");
+        CHECK(r == "AC++ test");
+    }
+
+    SECTION("no technical tokens passes through") {
+        std::string input = "hello world, this is a test.";
+        auto r = g2p_en::normalize_technical_tokens(input);
+        CHECK(r == input);
+    }
+
+    SECTION("multiple tokens in one sentence") {
+        auto r = g2p_en::normalize_technical_tokens("C++ and C# with .NET on Node.js");
+        CHECK(r == "C plus plus and C sharp with dot net on Node J S");
+    }
+
+    SECTION("CI/CD expanded") {
+        auto r = g2p_en::normalize_technical_tokens("setup CI/CD pipeline");
+        CHECK(r == "setup C I C D pipeline");
+    }
+
+    SECTION("empty string") {
+        auto r = g2p_en::normalize_technical_tokens("");
+        CHECK(r.empty());
+    }
+}
