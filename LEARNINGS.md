@@ -10,6 +10,37 @@ If a lesson is still "live" (affects current work), it's linked from
 
 ---
 
+## A persistent KV cache reused from a larger allocation makes local `max_ctx` the wrong stride (#171 VibeVoice server leak)
+
+A "server works for the first N requests then produces garbage, but the CLI is
+always clean" bug is almost never the GPU kernel — it's **host state that survives
+between calls on the shared context.** In VibeVoice TTS the persistent
+`ctx->kv_k/kv_v` is only reallocated when it must **grow** (the
+`kv_max_ctx < max_ctx` guard). So after one long request bumps `kv_max_ctx`, every
+shorter request **reuses the larger buffer** — and its real `ne[1]` is now
+`ctx->kv_max_ctx`, *not* this call's local `max_ctx`. Any code that computes an
+offset into that tensor from the local `max_ctx` writes to the wrong place.
+`copy_voice_kv` did exactly this for the per-head destination stride
+(`hd*max_ctx*el`), so the voice prompt for heads ≥1 landed at wrong offsets and
+corrupted speaker conditioning. The server's startup **warmup** synth grows
+`kv_max_ctx` first, so even the first real short request was already corrupted —
+which is why the CLI (one fresh process, first alloc == exactly `max_ctx`) never
+showed it. **Rule: when writing into a persistent/reused ggml tensor, take strides
+from the tensor's own `nb[]`, never from a per-call size variable** — the read side
+(attention) already used `nb[2]`, so the write side disagreeing was the whole bug.
+
+Two diagnostic lessons that made this cheap to pin down:
+1. **Deterministic-seed byte-identity is a state-leak detector.** Every stochastic
+   knob here reseeds to 42 per call, so *correct* output for a fixed input is
+   bit-stable. Reproduce a "server degrades over time" report by sending the same
+   input at position #1 vs after other inputs and `cmp` the PCM — if they differ,
+   you have a host-side leak, no ears or ASR needed. It reproduced on **Metal**
+   even though the report was RDNA4, because the leak is backend-independent.
+2. **Rule out the "obvious" GPU cause from the report itself.** The reporter had
+   already shown `GGML_VK_DISABLE_COOPMAT2` + `VIBEVOICE_TTS_FLASH_ATTN=0` +
+   `VIBEVOICE_VAE_BACKEND=cpu` (all at once) didn't help — that triple-negative was
+   the signal to stop chasing the coopmat2 shader and look for pure host state.
+
 ## Two concurrent HuggingFace uploads from one machine cause spurious mid-batch failures — serialize them (#192 aligner re-ship)
 
 Uploading a batch of GGUFs while another `hf`/`upload_file` job runs on the same
