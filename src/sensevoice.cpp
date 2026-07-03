@@ -12,6 +12,7 @@
 #include "ggml.h"
 #include "gguf.h"
 
+#include "core/cpu_ops.h" // core_cpu::to_f32 (quantized-safe weight read)
 #include "core/ctc.h"
 #include "core/gguf_loader.h"
 #include "core/kaldi_fbank.h"
@@ -453,19 +454,12 @@ static std::vector<float> sensevoice_gather_query_rows(sensevoice_context* ctx, 
 
     std::vector<float> out((size_t)4 * (size_t)D_in, 0.0f);
     ggml_tensor* emb = ctx->model.query_embed_w;
-    // emb->type is F16, layout (D_in, 16). Read row by row.
-    const size_t row_bytes = (size_t)D_in * ggml_type_size(emb->type);
-    std::vector<uint8_t> tmp((size_t)D_in * sizeof(uint16_t));
+    // emb is tiny (D_in, 16); dequantize the whole table (F32/F16/quantized-safe)
+    // and gather the 4 query rows. ggml layout ne0=D_in → row rid at [rid*D_in ...].
+    std::vector<float> emb_f32 = core_cpu::to_f32(emb);
     for (int r = 0; r < 4; r++) {
         const int rid = row_ids[r];
-        ggml_backend_tensor_get(emb, tmp.data(), (size_t)rid * row_bytes, row_bytes);
-        if (emb->type == GGML_TYPE_F16) {
-            const ggml_fp16_t* src = (const ggml_fp16_t*)tmp.data();
-            for (int i = 0; i < D_in; i++)
-                out[(size_t)r * D_in + i] = ggml_fp16_to_fp32(src[i]);
-        } else if (emb->type == GGML_TYPE_F32) {
-            std::memcpy(out.data() + (size_t)r * D_in, tmp.data(), row_bytes);
-        }
+        std::memcpy(out.data() + (size_t)r * D_in, emb_f32.data() + (size_t)rid * D_in, (size_t)D_in * sizeof(float));
     }
     return out;
 }

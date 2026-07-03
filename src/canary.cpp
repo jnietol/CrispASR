@@ -34,6 +34,7 @@
 #define M_PI 3.14159265358979323846
 #endif
 #include "core/attention.h"
+#include "core/cpu_ops.h" // core_cpu::to_f32 (quantized-safe weight read)
 #include "core/beam_decode.h"
 #include "core/crispasr_lcs.h"
 #include "core/fastconformer.h"
@@ -1171,11 +1172,8 @@ static void canary_fold_batchnorm(canary_model& model) {
         for (int c = 0; c < d; c++)
             s[c] = bn_w[c] / sqrtf(bn_var[c] + eps);
 
-        std::vector<ggml_fp16_t> w_f16((size_t)K * d);
-        ggml_backend_tensor_get(e.conv_dw_w, w_f16.data(), 0, w_f16.size() * sizeof(ggml_fp16_t));
-        std::vector<float> w_f32((size_t)K * d);
-        for (size_t i = 0; i < w_f16.size(); i++)
-            w_f32[i] = ggml_fp16_to_fp32(w_f16[i]);
+        std::vector<float> w_f32 = core_cpu::to_f32(e.conv_dw_w); // F32/F16/quantized-safe read
+        std::vector<ggml_fp16_t> w_f16(w_f32.size());             // reused for the F16 write-back below
         for (int c = 0; c < d; c++)
             for (int ki = 0; ki < K; ki++)
                 w_f32[ki + c * K] *= s[c];

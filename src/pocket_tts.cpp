@@ -27,6 +27,7 @@
 #include "pocket_tts.h"
 
 #include "core/conv.h"
+#include "core/cpu_ops.h" // core_cpu::to_f32 (quantized-safe weight read)
 #include "core/gguf_loader.h"
 #include "core/sentencepiece.h"
 #include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
@@ -816,15 +817,8 @@ static inline float* tensor_f32_data(ggml_tensor* t) {
     if (it != g_f16_cache.end()) {
         return it->second.data();
     }
-    int64_t n = ggml_nelements(t);
     auto& buf = g_f16_cache[t->data];
-    buf.resize(n);
-    if (t->type == GGML_TYPE_F16) {
-        ggml_fp16_to_fp32_row((const ggml_fp16_t*)t->data, buf.data(), n);
-    } else {
-        // Unsupported type — zero-fill as fallback
-        memset(buf.data(), 0, n * sizeof(float));
-    }
+    buf = core_cpu::to_f32(t); // F32/F16/quantized-safe (no raw ->data read)
     return buf.data();
 }
 

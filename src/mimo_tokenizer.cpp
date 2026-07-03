@@ -34,6 +34,7 @@
 #include "mimo_tokenizer.h"
 
 #include "core/attention.h"
+#include "core/cpu_ops.h" // core_cpu::to_f32 (quantized-safe weight read)
 #include "core/ffn.h"
 #include "core/gguf_loader.h"
 #include "core/mel.h"
@@ -804,22 +805,9 @@ static void ensure_codebook_f32(mimo_tokenizer_context* ctx, int stage_idx) {
     cb.embed_f32.assign((size_t)K * d, 0.0f);
     // GGUF on-disk layout: ne[0]=d_model, ne[1]=codebook_size, F16.
     // We want row-major (K, d) for fast argmin.
-    if (cb.embed->type == GGML_TYPE_F16) {
-        std::vector<uint16_t> raw((size_t)K * d);
-        ggml_backend_tensor_get(cb.embed, raw.data(), 0, raw.size() * sizeof(uint16_t));
-        for (int k = 0; k < K; k++) {
-            for (int j = 0; j < d; j++) {
-                cb.embed_f32[(size_t)k * d + j] = ggml_fp16_to_fp32((ggml_fp16_t)raw[(size_t)k * d + j]);
-            }
-        }
-    } else if (cb.embed->type == GGML_TYPE_F32) {
-        std::vector<float> raw((size_t)K * d);
-        ggml_backend_tensor_get(cb.embed, raw.data(), 0, raw.size() * sizeof(float));
-        cb.embed_f32 = std::move(raw); // already (K, d)
-    } else {
-        fprintf(stderr, "mimo_tokenizer: unsupported codebook dtype %d for stage %d\n", (int)cb.embed->type, stage_idx);
-        return;
-    }
+    // F32/F16/quantized-safe. ggml layout ne0=d, ne1=K → flat storage is already
+    // row-major (K, d), matching cb.embed_f32[k*d + j].
+    cb.embed_f32 = core_cpu::to_f32(cb.embed);
     cb.embed_norm_sq.assign(K, 0.0f);
     for (int k = 0; k < K; k++) {
         float s = 0.0f;
