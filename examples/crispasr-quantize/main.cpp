@@ -92,10 +92,9 @@ static std::vector<std::string> g_type_override_src; // original "regex=type" te
 
 static ggml_type crispasr_parse_type_name(const std::string& s) {
     static const std::map<std::string, ggml_type> M = {
-        {"f32", GGML_TYPE_F32},     {"f16", GGML_TYPE_F16},     {"q4_0", GGML_TYPE_Q4_0},
-        {"q4_1", GGML_TYPE_Q4_1},   {"q5_0", GGML_TYPE_Q5_0},   {"q5_1", GGML_TYPE_Q5_1},
-        {"q8_0", GGML_TYPE_Q8_0},   {"q2_k", GGML_TYPE_Q2_K},   {"q3_k", GGML_TYPE_Q3_K},
-        {"q4_k", GGML_TYPE_Q4_K},   {"q5_k", GGML_TYPE_Q5_K},   {"q6_k", GGML_TYPE_Q6_K},
+        {"f32", GGML_TYPE_F32},       {"f16", GGML_TYPE_F16},       {"q4_0", GGML_TYPE_Q4_0}, {"q4_1", GGML_TYPE_Q4_1},
+        {"q5_0", GGML_TYPE_Q5_0},     {"q5_1", GGML_TYPE_Q5_1},     {"q8_0", GGML_TYPE_Q8_0}, {"q2_k", GGML_TYPE_Q2_K},
+        {"q3_k", GGML_TYPE_Q3_K},     {"q4_k", GGML_TYPE_Q4_K},     {"q5_k", GGML_TYPE_Q5_K}, {"q6_k", GGML_TYPE_Q6_K},
         {"iq4_nl", GGML_TYPE_IQ4_NL}, {"iq4_xs", GGML_TYPE_IQ4_XS},
     };
     auto it = M.find(s);
@@ -352,6 +351,27 @@ static bool crispasr_model_quantize(const std::string& fname_inp, const std::str
     // Keep embeddings, norms, and DAC codec at original precision.
     const bool is_dia = (arch.find("dia") != std::string::npos);
 
+    // VibeVoice TTS (arch "vibevoice-tts"): two Qwen2 backbones (lm.*, tts_lm.*)
+    // drive a diffusion prediction head (pred.*) that emits acoustic latents,
+    // which an acoustic connector (at_conn.*, semantic se_conn.*) feeds back
+    // into the LM, an EOS classifier (tts_eos.*) stops, and a VAE decoder
+    // (at_dec.*, st_dec.*) renders to waveform. The prediction head runs under
+    // Classifier-Free Guidance (cfg_scale=3.0 for the Realtime model) over 20
+    // DPM-Solver++ steps, so a small q8_0/q4 error in pred.* is amplified ~3×
+    // per step and compounds across steps and across the AR feedback loop —
+    // enough to push the first few frames onto a wrong diffusion trajectory
+    // that decodes as a hallucinated non-speech "music" onset before the voice
+    // (issue #171, seen on q8_0). The default (no vibevoice carve-out) quantizes
+    // 22/26 pred.* tensors plus at_conn/at_dec/tts_eos — exactly the synthesis
+    // stack every other TTS backend here keeps at original precision
+    // (chatterbox vocoder, dia DAC, tada acoustic head, zonos heads). Keep the
+    // whole non-transformer synthesis stack at source precision and quantize
+    // only the two backbones (which dominate the footprint) + the ASR-side
+    // encoders. Force full quant with CRISPASR_VIBEVOICE_QUANT_ALL=1.
+    const bool is_vibevoice = (arch.find("vibevoice") != std::string::npos);
+    const char* env_vv_all = std::getenv("CRISPASR_VIBEVOICE_QUANT_ALL");
+    const bool vibevoice_quant_all = is_vibevoice && env_vv_all && *env_vv_all && *env_vv_all != '0';
+
     // Zonos TTS: 26-layer GQA transformer + 9-codebook DAC heads.
     // Uniformly quantizing all tensors inflates the EOS logit at prefill
     // by ~0.9 units (−1.125 → −0.21 in Q4_K), pushing P(EOS) from ~38 %
@@ -554,11 +574,10 @@ static bool crispasr_model_quantize(const std::string& fname_inp, const std::str
         // ~lossless (cos ~0.9998) so q8→f32→q4 ≈ f32→q4, and the q8_0 is a
         // fraction of the download. Matters here because several backends
         // (ark-asr 3B, …) have F16 bases too large for the local disks.
-        const bool src_ok =
-            (t->type == GGML_TYPE_F32 || t->type == GGML_TYPE_F16 || ggml_is_quantized(t->type));
+        const bool src_ok = (t->type == GGML_TYPE_F32 || t->type == GGML_TYPE_F16 || ggml_is_quantized(t->type));
         bool should_quantize =
-            ggml_is_quantized(qtype) && src_ok && ok_dims &&
-            is_weight && (sname.find("norm") == std::string::npos) && (granite_quant_all || sname.find("proj.") != 0) &&
+            ggml_is_quantized(qtype) && src_ok && ok_dims && is_weight && (sname.find("norm") == std::string::npos) &&
+            (granite_quant_all || sname.find("proj.") != 0) &&
             !(is_granite_family && !granite_quant_all && sname.find("enc.") == 0) &&
             // MOSS-Audio: keep encoder + adapter + deepstack at F16
             !(arch == "moss_audio" &&
@@ -594,6 +613,22 @@ static bool crispasr_model_quantize(const std::string& fname_inp, const std::str
                                sname.find("talker.codec_bridge") == 0)) &&
             !(is_parler && sname.find("dac.") == 0) &&
             !(is_dia && (sname.find("embedding") != std::string::npos || sname.find("audio_encoder") == 0)) &&
+            // VibeVoice: always keep the trajectory-critical + control stack at
+            // source precision — the diffusion prediction head (pred.*), the
+            // acoustic/semantic connectors (at_conn.*, se_conn.*), the EOS
+            // classifier (tts_eos.*) and the speech-type table (tts_types.*).
+            // These are small and directly shape the CFG diffusion trajectory /
+            // stop decision (see is_vibevoice note). The VAE decoders (at_dec.*,
+            // st_dec.*) are a large, deterministic renderer that q8_0 quantizes
+            // near-losslessly and that often runs on CPU (VIBEVOICE_VAE_BACKEND),
+            // so protect them only for lossy sub-q8_0 quants (q4_k/q5_k/…) where
+            // conv quantization is audibly damaging — quantizing them at q8_0
+            // keeps the model lean without touching the music-onset cause.
+            !(is_vibevoice && !vibevoice_quant_all &&
+              (sname.find("pred.") == 0 || sname.find("at_conn.") == 0 || sname.find("se_conn.") == 0 ||
+               sname.find("tts_eos.") == 0 || sname.find("tts_types.") == 0)) &&
+            !(is_vibevoice && !vibevoice_quant_all && qtype != GGML_TYPE_Q8_0 &&
+              (sname.find("at_dec.") == 0 || sname.find("st_dec.") == 0)) &&
             !(is_zonos && (sname.find("heads.") == 0 || sname.find("embeddings.") == 0 ||
                            sname.find("prefix_conditioner.") == 0)) &&
             !(is_bark &&
@@ -1009,7 +1044,7 @@ int main(int argc, char** argv) {
     const ggml_ftype ftype = ggml_parse_ftype(pos[2].c_str());
 
     if (!imatrix_path.empty()) {
-        crispasr_load_imatrix(imatrix_path);  // non-fatal: falls back to unweighted if empty
+        crispasr_load_imatrix(imatrix_path); // non-fatal: falls back to unweighted if empty
     }
 
     if (!crispasr_model_quantize(fname_inp, fname_out, ftype)) {
