@@ -42,41 +42,18 @@ TEST_CASE("align-only: crispasr_aligner_free_cache does not crash when empty", "
     crispasr_aligner_free_cache(); // double-free safety
 }
 
-// SRT text extraction helper — matches the logic in crispasr_run.cpp --align-only.
-// Re-implemented here so we can unit test the parsing independently.
+// Join cue texts back into the flat transcript --align-only feeds the aligner.
 static std::string extract_srt_text(const std::string& raw) {
     std::string text_only;
-    enum { S_INDEX, S_TIME, S_TEXT } state = S_INDEX;
-    size_t i = 0;
-    while (i < raw.size()) {
-        size_t nl = raw.find('\n', i);
-        if (nl == std::string::npos)
-            nl = raw.size();
-        std::string line = raw.substr(i, nl - i);
-        if (!line.empty() && line.back() == '\r')
-            line.pop_back();
-        i = nl + 1;
-
-        if (state == S_INDEX) {
-            if (line.empty())
-                continue;
-            state = S_TIME;
-        } else if (state == S_TIME) {
-            state = S_TEXT;
-        } else {
-            if (line.empty()) {
-                state = S_INDEX;
-            } else {
-                if (!text_only.empty())
-                    text_only += ' ';
-                text_only += line;
-            }
-        }
+    for (const auto& cue : crispasr_parse_srt_cues(raw)) {
+        if (!text_only.empty())
+            text_only += ' ';
+        text_only += cue;
     }
     return text_only;
 }
 
-TEST_CASE("align-only: SRT text extraction", "[unit][align]") {
+TEST_CASE("align-only: SRT cue parsing", "[unit][align]") {
     SECTION("standard SRT") {
         const char* srt = "1\r\n"
                           "00:00:00,000 --> 00:00:02,500\r\n"
@@ -86,8 +63,11 @@ TEST_CASE("align-only: SRT text extraction", "[unit][align]") {
                           "00:00:02,500 --> 00:00:05,000\r\n"
                           "This is a test\r\n"
                           "\r\n";
-        std::string text = extract_srt_text(srt);
-        CHECK(text == "Hello world This is a test");
+        auto cues = crispasr_parse_srt_cues(srt);
+        REQUIRE(cues.size() == 2);
+        CHECK(cues[0] == "Hello world");
+        CHECK(cues[1] == "This is a test");
+        CHECK(extract_srt_text(srt) == "Hello world This is a test");
     }
 
     SECTION("SRT with multi-line subtitle text") {
@@ -100,11 +80,15 @@ TEST_CASE("align-only: SRT text extraction", "[unit][align]") {
                           "00:00:03,000 --> 00:00:05,000\n"
                           "Single line\n"
                           "\n";
-        std::string text = extract_srt_text(srt);
-        CHECK(text == "Line one Line two Single line");
+        auto cues = crispasr_parse_srt_cues(srt);
+        REQUIRE(cues.size() == 2);
+        CHECK(cues[0] == "Line one Line two");
+        CHECK(cues[1] == "Single line");
+        CHECK(extract_srt_text(srt) == "Line one Line two Single line");
     }
 
     SECTION("empty SRT") {
+        CHECK(crispasr_parse_srt_cues("").empty());
         CHECK(extract_srt_text("").empty());
     }
 
@@ -112,8 +96,100 @@ TEST_CASE("align-only: SRT text extraction", "[unit][align]") {
         const char* srt = "1\n"
                           "00:00:00,000 --> 00:00:01,000\n"
                           "No trailing blank";
-        std::string text = extract_srt_text(srt);
-        CHECK(text == "No trailing blank");
+        auto cues = crispasr_parse_srt_cues(srt);
+        REQUIRE(cues.size() == 1);
+        CHECK(cues[0] == "No trailing blank");
+    }
+
+    SECTION("whitespace-only cue is dropped") {
+        const char* srt = "1\n"
+                          "00:00:00,000 --> 00:00:01,000\n"
+                          "   \n"
+                          "\n"
+                          "2\n"
+                          "00:00:01,000 --> 00:00:02,000\n"
+                          "Real text\n"
+                          "\n";
+        auto cues = crispasr_parse_srt_cues(srt);
+        REQUIRE(cues.size() == 1);
+        CHECK(cues[0] == "Real text");
+    }
+}
+
+TEST_CASE("align-only: tokenise_align_words", "[unit][align]") {
+    SECTION("space-delimited") {
+        auto w = crispasr_tokenise_align_words("Hello  world\tfoo\nbar");
+        REQUIRE(w.size() == 4);
+        CHECK(w[0] == "Hello");
+        CHECK(w[3] == "bar");
+    }
+    SECTION("CJK splits per character") {
+        auto w = crispasr_tokenise_align_words("你好world");
+        REQUIRE(w.size() == 3);
+        CHECK(w[0] == "你");
+        CHECK(w[1] == "好");
+        CHECK(w[2] == "world");
+    }
+    SECTION("empty") {
+        CHECK(crispasr_tokenise_align_words("").empty());
+        CHECK(crispasr_tokenise_align_words("  \n\t").empty());
+    }
+}
+
+// Build a synthetic word alignment: word i spans [i*100, i*100+80) cs.
+static std::vector<CrispasrAlignedWord> make_words(const std::vector<std::string>& texts) {
+    std::vector<CrispasrAlignedWord> out;
+    for (size_t i = 0; i < texts.size(); i++)
+        out.push_back({texts[i], (int64_t)(i * 100), (int64_t)(i * 100 + 80)});
+    return out;
+}
+
+TEST_CASE("align-only: group aligned words into segments", "[unit][align]") {
+    SECTION("exact word counts") {
+        std::vector<std::string> segs = {"Hello world", "This is a test"};
+        auto words = make_words({"Hello", "world", "This", "is", "a", "test"});
+        auto grouped = crispasr_group_aligned_segments(segs, words);
+        REQUIRE(grouped.size() == 2);
+        CHECK(grouped[0].text == "Hello world");
+        CHECK(grouped[0].t0_cs == 0);
+        CHECK(grouped[0].t1_cs == 180);
+        CHECK(grouped[0].word_begin == 0);
+        CHECK(grouped[0].word_end == 2);
+        CHECK(grouped[1].t0_cs == 200);
+        CHECK(grouped[1].t1_cs == 580);
+        CHECK(grouped[1].word_begin == 2);
+        CHECK(grouped[1].word_end == 6);
+    }
+
+    SECTION("leftover words extend the last segment") {
+        std::vector<std::string> segs = {"one", "two three"};
+        auto words = make_words({"one", "two", "three", "extra"});
+        auto grouped = crispasr_group_aligned_segments(segs, words);
+        REQUIRE(grouped.size() == 2);
+        CHECK(grouped[1].word_end == 4);
+        CHECK(grouped[1].t1_cs == 380);
+    }
+
+    SECTION("alignment shorter than transcript drops uncovered tail") {
+        std::vector<std::string> segs = {"one two", "three four"};
+        auto words = make_words({"one", "two"});
+        auto grouped = crispasr_group_aligned_segments(segs, words);
+        REQUIRE(grouped.size() == 1);
+        CHECK(grouped[0].text == "one two");
+    }
+
+    SECTION("CJK segment consumes per-character words") {
+        std::vector<std::string> segs = {"你好", "world"};
+        auto words = make_words({"你", "好", "world"});
+        auto grouped = crispasr_group_aligned_segments(segs, words);
+        REQUIRE(grouped.size() == 2);
+        CHECK(grouped[0].word_end == 2);
+        CHECK(grouped[1].word_begin == 2);
+    }
+
+    SECTION("empty inputs") {
+        CHECK(crispasr_group_aligned_segments({}, {}).empty());
+        CHECK(crispasr_group_aligned_segments({"text"}, {}).empty());
     }
 }
 

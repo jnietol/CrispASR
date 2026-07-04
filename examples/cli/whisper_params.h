@@ -301,6 +301,10 @@ struct whisper_params {
     // requiring an ASR model or transcription step.
     bool align_only = false;
     std::string text_file; // path to .txt or .srt (text extracted, timestamps stripped)
+    // Output granularity: "word" = one entry per aligned word; "segment" =
+    // one entry per input SRT cue (or per non-empty .txt line), re-timed
+    // from the word alignment; "auto" = segment for .srt input, word otherwise.
+    std::string align_granularity = "auto"; // auto | word | segment
 
     // AudioSeal neural watermark model (optional upgrade from spread-spectrum).
     // When set, loads the GGUF and uses it for watermark embed/detect

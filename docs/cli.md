@@ -501,26 +501,44 @@ upstream tools like SubtitleEdit.
 
 Aligns pre-existing text against audio without running ASR first.
 Accepts plain text (via `--ref-text` or `--text-file file.txt`) or an
-unaligned `.srt` file (timestamps stripped, text extracted). Works with
-all three aligner families: canary-ctc, wav2vec2/hubert, qwen3-forced-aligner.
+unaligned `.srt` file. Works with all three aligner families:
+canary-ctc, wav2vec2/hubert, qwen3-forced-aligner.
+
+For `.srt` input the cue structure is preserved: the cue texts are
+aligned as one transcript and each cue is re-emitted with corrected
+timings (first/last aligned word of that cue). So a mistimed subtitle
+file goes in, and the same subtitles come out re-timed.
 
 ```bash
-# Align a transcript against audio, output SRT:
+# Re-time an unaligned/mistimed SRT (same cues, corrected timestamps):
+crispasr --align-only -am auto --auto-download -f audio.wav \
+    --text-file subtitles.srt --align-output retimed.srt
+
+# Align a transcript against audio, output word-level SRT:
 crispasr --align-only -am auto --auto-download -f audio.wav \
     --ref-text "And so my fellow Americans ask not what your country can do for you"
 
-# Align text from an unaligned SRT file, output JSON:
+# Align a plain .txt (one subtitle line per text line) into cue-level SRT:
+crispasr --align-only -am auto --auto-download -f audio.wav \
+    --text-file transcript.txt --align-granularity segment \
+    --align-output aligned.srt
+
+# JSON with per-segment + nested per-word timings:
 crispasr --align-only -am canary-ctc-aligner-q4_k.gguf -f audio.wav \
     --text-file subtitles.srt --align-format json
-
-# Align from a plain .txt file:
-crispasr --align-only -am auto --auto-download -f audio.wav \
-    --text-file transcript.txt --align-output aligned.srt
 ```
 
 No ASR model (`-m`) is required. Output formats: `srt` (default),
-`json` (word-level start/end), `plain` (tab-separated). Destination:
+`json` (start/end in seconds), `plain` (tab-separated). Destination:
 stdout (default) or `--align-output <path>`.
+
+Granularity is controlled by `--align-granularity`:
+
+| Value | Meaning |
+|---|---|
+| `auto` (default) | `segment` for `.srt` input, `word` otherwise |
+| `segment` | one output entry per input SRT cue / non-empty `.txt` line, re-timed from the word alignment; JSON nests the per-word timings under each segment |
+| `word` | one output entry per aligned word (the pre-0.8.9 behaviour, also for `.srt` input) |
 
 ### Granite word-level timestamps and `--max-len` (#205)
 

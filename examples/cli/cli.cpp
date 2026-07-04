@@ -582,6 +582,8 @@ static bool whisper_params_parse_arg_streaming_tts(int argc, char** argv, int& i
         params.align_format = ARGV_NEXT;
     } else if (arg == "--align-only") {
         params.align_only = true;
+    } else if (arg == "--align-granularity") {
+        params.align_granularity = ARGV_NEXT;
     } else if (arg == "--text-file") {
         params.text_file = ARGV_NEXT;
     } else if (arg == "--instruct") {
@@ -1156,7 +1158,10 @@ static void whisper_print_usage(int /*argc*/, char** argv, const whisper_params&
             "                                                 [--align-format srt|json|plain] [--align-output f])\n"
             "             --align-only              standalone CTC forced alignment (issue #217)\n"
             "                                                 (-am <aligner.gguf> -f <audio> --ref-text \"text\"\n"
-            "                                                 or --text-file <file.txt|file.srt>)\n");
+            "                                                 or --text-file <file.txt|file.srt>)\n"
+            "             --align-granularity G     [auto   ] align-only output units: auto|word|segment\n"
+            "                                                 (segment = re-timed input SRT cues / .txt lines;\n"
+            "                                                 auto = segment for .srt input, word otherwise)\n");
     fprintf(stderr,
             "             --codec-model FNAME      codec / companion GGUF (defaults to sibling/cache/registry)\n");
     fprintf(stderr, "             --codec-quant Q          [%-7s] preferred quant for registry companion resolution\n",

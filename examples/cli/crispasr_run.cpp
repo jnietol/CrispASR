@@ -1343,8 +1343,27 @@ int crispasr_run_backend(const whisper_params& params_in) {
             return 10;
         }
 
-        // Read transcript text.
-        std::string transcript;
+        // Validate output granularity.
+        const std::string& gran = params.align_granularity;
+        if (gran != "auto" && gran != "word" && gran != "segment") {
+            fprintf(stderr, "crispasr[align-only]: invalid --align-granularity '%s' (auto|word|segment)\n",
+                    gran.c_str());
+            return 10;
+        }
+
+        // Read transcript text as segments: SRT cues, non-empty .txt lines,
+        // or the --ref-text string as a single segment. The flat transcript
+        // fed to the aligner is the segments joined with spaces, so aligned
+        // words can be re-grouped per segment afterwards.
+        std::vector<std::string> segment_texts;
+        bool is_srt_input = false;
+        auto trim = [](std::string s) {
+            while (!s.empty() && (s.front() == ' ' || s.front() == '\t'))
+                s.erase(s.begin());
+            while (!s.empty() && (s.back() == ' ' || s.back() == '\t'))
+                s.pop_back();
+            return s;
+        };
         if (!params.text_file.empty()) {
             FILE* tf = fopen(params.text_file.c_str(), "rb");
             if (!tf) {
@@ -1362,70 +1381,51 @@ int crispasr_run_backend(const whisper_params& params_in) {
             }
             fclose(tf);
 
-            // Detect .srt by extension and strip timestamps/indices.
+            // Detect .srt by extension: cue texts kept, timestamps/indices stripped.
             const std::string& p = params.text_file;
-            bool is_srt = (p.size() >= 4 && (p.substr(p.size() - 4) == ".srt" || p.substr(p.size() - 4) == ".SRT"));
-            if (is_srt) {
-                // SRT parsing: extract only text lines (skip indices + timestamps).
-                std::string text_only;
-                enum { S_INDEX, S_TIME, S_TEXT } state = S_INDEX;
+            is_srt_input = (p.size() >= 4 && (p.substr(p.size() - 4) == ".srt" || p.substr(p.size() - 4) == ".SRT"));
+            if (is_srt_input) {
+                for (auto& cue : crispasr_parse_srt_cues(raw))
+                    segment_texts.push_back(trim(std::move(cue)));
+            } else {
+                // Plain .txt: each non-empty line is one segment.
                 size_t i = 0;
                 while (i < raw.size()) {
-                    // Read one line.
                     size_t nl = raw.find('\n', i);
                     if (nl == std::string::npos)
                         nl = raw.size();
                     std::string line = raw.substr(i, nl - i);
-                    // Strip \r
                     if (!line.empty() && line.back() == '\r')
                         line.pop_back();
                     i = nl + 1;
-
-                    if (state == S_INDEX) {
-                        // Expect a numeric index line (or blank between entries).
-                        if (line.empty())
-                            continue;
-                        // Advance to timestamp line.
-                        state = S_TIME;
-                    } else if (state == S_TIME) {
-                        // Timestamp line: contains "-->".
-                        state = S_TEXT;
-                    } else { // S_TEXT
-                        if (line.empty()) {
-                            state = S_INDEX;
-                        } else {
-                            if (!text_only.empty())
-                                text_only += ' ';
-                            text_only += line;
-                        }
-                    }
+                    line = trim(std::move(line));
+                    if (!line.empty())
+                        segment_texts.push_back(std::move(line));
                 }
-                transcript = text_only;
-            } else {
-                // Plain .txt: use as-is, collapse newlines to spaces.
-                for (char& c : raw) {
-                    if (c == '\n' || c == '\r')
-                        c = ' ';
-                }
-                transcript = raw;
             }
         } else if (!params.tts_ref_text.empty()) {
-            transcript = params.tts_ref_text;
+            std::string t = trim(params.tts_ref_text);
+            if (!t.empty())
+                segment_texts.push_back(std::move(t));
         } else {
             fprintf(stderr, "crispasr[align-only]: requires --ref-text or --text-file.\n");
             return 10;
         }
 
-        // Trim leading/trailing whitespace.
-        while (!transcript.empty() && (transcript.front() == ' ' || transcript.front() == '\t'))
-            transcript.erase(transcript.begin());
-        while (!transcript.empty() && (transcript.back() == ' ' || transcript.back() == '\t'))
-            transcript.pop_back();
+        std::string transcript;
+        for (const auto& s : segment_texts) {
+            if (!transcript.empty())
+                transcript += ' ';
+            transcript += s;
+        }
 
         if (transcript.empty()) {
             fprintf(stderr, "crispasr[align-only]: transcript is empty.\n");
             return 10;
         }
+
+        // segment output: explicit, or auto for .srt input (re-timed cues).
+        const bool segment_mode = gran == "segment" || (gran == "auto" && is_srt_input);
 
         // Load audio.
         if (params.fname_inp.empty()) {
@@ -1454,6 +1454,16 @@ int crispasr_run_backend(const whisper_params& params_in) {
             return 10;
         }
 
+        // Group words back into the input segments when requested.
+        std::vector<CrispasrAlignedSegment> segments;
+        if (segment_mode) {
+            segments = crispasr_group_aligned_segments(segment_texts, aligned);
+            if (segments.empty()) {
+                fprintf(stderr, "crispasr[align-only]: segment grouping produced no segments.\n");
+                return 10;
+            }
+        }
+
         // Format output.
         const double clip_end = (double)samples.size() / 16000.0;
         auto ts = [](double s, bool comma) -> std::string {
@@ -1467,36 +1477,69 @@ int crispasr_run_backend(const whisper_params& params_in) {
             snprintf(buf, sizeof(buf), "%02d:%02d:%02d%c%03d", h, m, sec, comma ? ',' : '.', ms);
             return buf;
         };
+        auto json_esc = [](const std::string& s) {
+            std::string esc;
+            for (char c : s) {
+                if (c == '"' || c == '\\')
+                    esc += '\\';
+                esc += c;
+            }
+            return esc;
+        };
         std::string out;
         const std::string& fmt = params.align_format;
         if (fmt == "json") {
+            char num[96];
             out = "[\n";
-            for (size_t i = 0; i < aligned.size(); i++) {
-                double t0 = aligned[i].t0_cs / 100.0;
-                double t1 = aligned[i].t1_cs / 100.0;
-                std::string esc;
-                for (char c : aligned[i].text) {
-                    if (c == '"' || c == '\\')
-                        esc += '\\';
-                    esc += c;
+            if (segment_mode) {
+                for (size_t i = 0; i < segments.size(); i++) {
+                    const auto& seg = segments[i];
+                    snprintf(num, sizeof(num), "\"start\": %.3f, \"end\": %.3f, \"words\": [", seg.t0_cs / 100.0,
+                             seg.t1_cs / 100.0);
+                    out += "  {\"text\": \"" + json_esc(seg.text) + "\", " + num;
+                    for (size_t w = seg.word_begin; w < seg.word_end; w++) {
+                        snprintf(num, sizeof(num), "\"start\": %.3f, \"end\": %.3f}", aligned[w].t0_cs / 100.0,
+                                 aligned[w].t1_cs / 100.0);
+                        out += std::string(w > seg.word_begin ? ", " : "") + "{\"word\": \"" +
+                               json_esc(aligned[w].text) + "\", " + num;
+                    }
+                    out += std::string("]}") + (i + 1 < segments.size() ? "," : "") + "\n";
                 }
-                char line[256];
-                snprintf(line, sizeof(line), "  {\"word\": \"%s\", \"start\": %.3f, \"end\": %.3f}%s\n", esc.c_str(),
-                         t0, t1, i + 1 < aligned.size() ? "," : "");
-                out += line;
+            } else {
+                for (size_t i = 0; i < aligned.size(); i++) {
+                    snprintf(num, sizeof(num), "\"start\": %.3f, \"end\": %.3f}%s\n", aligned[i].t0_cs / 100.0,
+                             aligned[i].t1_cs / 100.0, i + 1 < aligned.size() ? "," : "");
+                    out += "  {\"word\": \"" + json_esc(aligned[i].text) + "\", " + num;
+                }
             }
             out += "]\n";
         } else if (fmt == "plain") {
-            for (auto& w : aligned)
-                out += ts(w.t0_cs / 100.0, false) + "\t" + w.text + "\n";
+            if (segment_mode) {
+                for (auto& seg : segments)
+                    out += ts(seg.t0_cs / 100.0, false) + "\t" + seg.text + "\n";
+            } else {
+                for (auto& w : aligned)
+                    out += ts(w.t0_cs / 100.0, false) + "\t" + w.text + "\n";
+            }
         } else { // srt (default)
-            for (size_t i = 0; i < aligned.size(); i++) {
-                double t0 = aligned[i].t0_cs / 100.0;
-                double t1 = aligned[i].t1_cs / 100.0;
-                if (t1 <= t0)
-                    t1 = (i + 1 < aligned.size()) ? aligned[i + 1].t0_cs / 100.0 : clip_end;
-                out += std::to_string(i + 1) + "\n" + ts(t0, true) + " --> " + ts(t1, true) + "\n" + aligned[i].text +
-                       "\n\n";
+            if (segment_mode) {
+                for (size_t i = 0; i < segments.size(); i++) {
+                    double t0 = segments[i].t0_cs / 100.0;
+                    double t1 = segments[i].t1_cs / 100.0;
+                    if (t1 <= t0)
+                        t1 = (i + 1 < segments.size()) ? segments[i + 1].t0_cs / 100.0 : clip_end;
+                    out += std::to_string(i + 1) + "\n" + ts(t0, true) + " --> " + ts(t1, true) + "\n" +
+                           segments[i].text + "\n\n";
+                }
+            } else {
+                for (size_t i = 0; i < aligned.size(); i++) {
+                    double t0 = aligned[i].t0_cs / 100.0;
+                    double t1 = aligned[i].t1_cs / 100.0;
+                    if (t1 <= t0)
+                        t1 = (i + 1 < aligned.size()) ? aligned[i + 1].t0_cs / 100.0 : clip_end;
+                    out += std::to_string(i + 1) + "\n" + ts(t0, true) + " --> " + ts(t1, true) + "\n" +
+                           aligned[i].text + "\n\n";
+                }
             }
         }
 
@@ -1510,8 +1553,14 @@ int crispasr_run_backend(const whisper_params& params_in) {
             }
             fwrite(out.data(), 1, out.size(), f);
             fclose(f);
-            if (!params.no_prints)
-                fprintf(stderr, "crispasr[align-only]: %zu words → %s\n", aligned.size(), params.align_output.c_str());
+            if (!params.no_prints) {
+                if (segment_mode)
+                    fprintf(stderr, "crispasr[align-only]: %zu words in %zu segments → %s\n", aligned.size(),
+                            segments.size(), params.align_output.c_str());
+                else
+                    fprintf(stderr, "crispasr[align-only]: %zu words → %s\n", aligned.size(),
+                            params.align_output.c_str());
+            }
         }
         crispasr_aligner_free_cache();
         return 0;

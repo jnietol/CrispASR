@@ -12,6 +12,7 @@
 #include "qwen3_asr.h"
 #include "wav2vec2-ggml.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -257,6 +258,78 @@ std::vector<CrispasrAlignedWord> align_wav2vec2_ctc(const std::string& model_pat
 }
 
 } // namespace
+
+std::vector<std::string> crispasr_tokenise_align_words(const std::string& text) {
+    return tokenise_words(text);
+}
+
+std::vector<std::string> crispasr_parse_srt_cues(const std::string& raw) {
+    std::vector<std::string> cues;
+    std::string cue;
+    enum { S_INDEX, S_TIME, S_TEXT } state = S_INDEX;
+    auto flush = [&]() {
+        // Drop whitespace-only cues so every emitted cue tokenises to >= 1 word.
+        if (cue.find_first_not_of(" \t") != std::string::npos)
+            cues.push_back(cue);
+        cue.clear();
+    };
+    size_t i = 0;
+    while (i < raw.size()) {
+        size_t nl = raw.find('\n', i);
+        if (nl == std::string::npos)
+            nl = raw.size();
+        std::string line = raw.substr(i, nl - i);
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        i = nl + 1;
+
+        if (state == S_INDEX) {
+            if (line.empty())
+                continue;
+            state = S_TIME;
+        } else if (state == S_TIME) {
+            state = S_TEXT;
+        } else { // S_TEXT
+            if (line.empty()) {
+                flush();
+                state = S_INDEX;
+            } else {
+                if (!cue.empty())
+                    cue += ' ';
+                cue += line;
+            }
+        }
+    }
+    flush();
+    return cues;
+}
+
+std::vector<CrispasrAlignedSegment> crispasr_group_aligned_segments(const std::vector<std::string>& segment_texts,
+                                                                    const std::vector<CrispasrAlignedWord>& words) {
+    std::vector<CrispasrAlignedSegment> out;
+    size_t w = 0;
+    for (size_t s = 0; s < segment_texts.size(); s++) {
+        const size_t n = tokenise_words(segment_texts[s]).size();
+        if (n == 0)
+            continue;
+        if (w >= words.size())
+            break; // alignment ended early — drop the uncovered tail
+        CrispasrAlignedSegment seg;
+        seg.text = segment_texts[s];
+        seg.word_begin = w;
+        seg.word_end = std::min(w + n, words.size());
+        // Leftover words (count mismatch) extend the last segment.
+        if (s + 1 == segment_texts.size())
+            seg.word_end = words.size();
+        seg.t0_cs = words[seg.word_begin].t0_cs;
+        seg.t1_cs = words[seg.word_end - 1].t1_cs;
+        if (seg.t1_cs < seg.t0_cs)
+            seg.t1_cs = seg.t0_cs;
+        out.push_back(std::move(seg));
+        w = out.back().word_end;
+    }
+    return out;
+}
 
 std::vector<CrispasrAlignedWord> crispasr_align_words(const std::string& aligner_model, const std::string& transcript,
                                                       const float* samples, int n_samples, int64_t t_offset_cs,
