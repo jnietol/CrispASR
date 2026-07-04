@@ -6969,11 +6969,26 @@ are CC-BY-NC-4.0 → excluded; verified 2026-07-04 via the HF API).
   against canary-ctc-aligner, agreement ≤0.2 s once speech starts).
   Registry: `fastconformer-aligner-de` / `fastconformer-ctc-de`.
 
-**Remaining fleet (each ≈30 min: download .nemo → convert → q4_k/q8_0 →
-validate ASR + align on a FLEURS sample → upload + registry entry):**
-`stt_{es,fr,it,pt,nl,pl,ru,ua,hr,be,ar,fa,ka,hy,uz}_fastconformer_hybrid_large_pc`
-and `stt_kk_ru_fastconformer_hybrid_large` — all CC-BY-4.0 (de/ar
-spot-checked). Batch on Kaggle if local bandwidth is the bottleneck.
+**Fleet SHIPPED (2026-07-04):** all 16 remaining members converted,
+FLEURS-validated (per-language test clip vs reference transcript, plus an
+--align-only smoke test) and uploaded: en-pc, es, fr, it, nl, pl, ru, ua,
+hr, be, ar, fa, ka, hy, uz, kk-ru → `cstr/stt-<lang>-fastconformer-hybrid-
+ctc-large-GGUF`, registry aliases `fastconformer-{ctc,aligner}-<lang>`.
+Notes from the batch:
+- **pt is excluded**: `stt_pt_fastconformer_hybrid_large_pc` is
+  CC-BY-NC-4.0 — the only NC release in the fleet (checked per-repo).
+- **kk-ru needed a runtime fix**: it is the one model with
+  `conv_norm_type: layer_norm` (v2.0.0 recipe). NeMo names the module
+  `batch_norm` either way, so conversion succeeded but the runtime's BN
+  fold silently skipped (no running stats) → garbage ASR. Fixed by a
+  `canary_ctc.conv_norm_layer` GGUF flag + in-graph `ggml_norm_affine`
+  after the depthwise conv (core/fastconformer.h, nullable — BN models
+  unaffected, verified bit-identical timings on the canary aligner).
+- **fa** (non-pc, older release) transcribes with visibly more character
+  noise than the pc models — usable, but the weakest of the fleet.
+- Validation gate hardened lesson: "ASR output non-empty" let broken
+  kk-ru ship briefly; transcripts must be eyeballed against the FLEURS
+  reference (they were, which is how it was caught same-day).
 
 **Also open:**
 - parakeet-tdt-0.6b-ja CTC head upload (#89 leftover) → Japanese

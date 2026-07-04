@@ -875,7 +875,7 @@ downloads (in that order).
 
 - **[whisper.cpp](https://github.com/ggml-org/whisper.cpp)** — the original ggml inference engine and Whisper runtime this fork is built on
 - **[ggml](https://github.com/ggml-org/ggml)** — the tensor library everything runs on
-- **NVIDIA NeMo** — parakeet-tdt-{0.6b-v2,0.6b-v3,1.1b}, parakeet-tdt_ctc-{110m,1.1b,0.6b-ja}, parakeet-ctc-{0.6b,1.1b}, canary-1b-v2, canary-ctc aligner, and the FastConformer-CTC family (stt_en_fastconformer_ctc_{large,xlarge,xxlarge} plus CTC branches of the stt_*_fastconformer_hybrid_large_pc hybrids, e.g. de — all usable both as ASR backends and as compact `-am` forced aligners)
+- **NVIDIA NeMo** — parakeet-tdt-{0.6b-v2,0.6b-v3,1.1b}, parakeet-tdt_ctc-{110m,1.1b,0.6b-ja}, parakeet-ctc-{0.6b,1.1b}, canary-1b-v2, canary-ctc aligner, and the FastConformer-CTC family (stt_en_fastconformer_ctc_{large,xlarge,xxlarge} plus CTC branches of the stt_*_fastconformer_hybrid_large[_pc] fleet: en-pc, de, es, fr, it, nl, pl, ru, ua, hr, be, ar, fa, ka, hy, uz, kk-ru — all usable both as ASR backends and as compact ~82 MB `-am` forced aligners)
 - **Cohere** — cohere-transcribe-03-2026
 - **Qwen team (Alibaba)** — Qwen3-ASR-0.6B, Qwen3-ASR-1.7B, Qwen3-ForcedAligner-0.6B
 - **Mistral AI** — Voxtral Mini 3B and 4B Realtime

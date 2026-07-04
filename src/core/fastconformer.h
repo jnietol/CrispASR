@@ -224,6 +224,10 @@ struct BlockWeights {
     ggml_tensor *conv_pw1_w = nullptr, *conv_pw1_b = nullptr; // (2d, d)
     ggml_tensor *conv_dw_w = nullptr, *conv_dw_b = nullptr;   // (d, 1, K)
     ggml_tensor *conv_pw2_w = nullptr, *conv_pw2_b = nullptr; // (d, d)
+    // Post-dw-conv LayerNorm affine (NeMo conv_norm_type=layer_norm, e.g.
+    // stt_kk_ru hybrid). nullptr for the common batch_norm models, whose
+    // BN is folded into conv_dw_w/b at load instead.
+    ggml_tensor *conv_ln_w = nullptr, *conv_ln_b = nullptr;
 
     // ---- FFN2 (macaron) ----
     ggml_tensor *norm_ff2_w = nullptr, *norm_ff2_b = nullptr;
@@ -349,6 +353,8 @@ static inline ggml_tensor* build_block(ggml_context* ctx0, ggml_tensor* cur, ggm
     cnv = ggml_reshape_2d(ctx0, cnv, d, T);
 
     cnv = ggml_add(ctx0, cnv, ggml_reshape_2d(ctx0, e.conv_dw_b, d, 1));
+    if (e.conv_ln_w) // conv_norm_type=layer_norm: LN over channels per frame
+        cnv = ggml_norm_affine(ctx0, cnv, e.conv_ln_w, e.conv_ln_b, eps);
     cnv = ggml_silu(ctx0, cnv);
 
     // pw2: (d → d)

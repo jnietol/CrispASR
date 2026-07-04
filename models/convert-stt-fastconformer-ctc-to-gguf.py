@@ -171,6 +171,8 @@ def parse_yaml_hparams(yaml_path: Path) -> dict:
                     pass
             elif v.lower() in ("true", "false"):
                 hp.setdefault(k, v.lower() == "true")
+            elif k == "conv_norm_type":
+                hp.setdefault(k, v)  # batch_norm | layer_norm
     return hp
 
 
@@ -264,6 +266,11 @@ def convert(nemo_path: Path, out_path: Path, extract_dir: Path | None = None) ->
     # NeMo ConformerEncoder xscaling (default true for the stt_* releases;
     # honour an explicit `xscaling: false` in model_config.yaml).
     writer.add_uint32("canary_ctc.xscaling", 1 if hp.get("xscaling", True) else 0)
+    # conv_norm_type=layer_norm (e.g. stt_kk_ru hybrid): the conv-module norm
+    # has no running stats and must be applied in-graph, not BN-folded.
+    conv_norm = hp.get("conv_norm_type", "batch_norm")
+    writer.add_uint32("canary_ctc.conv_norm_layer", 1 if conv_norm == "layer_norm" else 0)
+    print(f"  conv_norm_type: {conv_norm}")
 
     writer.add_array("tokenizer.ggml.tokens", vocab)
 

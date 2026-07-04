@@ -101,6 +101,9 @@ struct canary_ctc_hparams {
     // xscaling=false. Default false preserves canary_ctc's existing
     // bit-identical path; the stt converter sets this to 1 in the GGUF.
     uint32_t xscaling = 0;
+    // NeMo conv_norm_type: 0 = batch_norm (folded into conv_dw at load),
+    // 1 = layer_norm (applied in-graph after the depthwise conv).
+    uint32_t conv_norm_layer = 0;
 };
 
 // ===========================================================================
@@ -326,6 +329,10 @@ static ggml_cgraph* cc_build_graph(canary_ctc_context* ctx, int T_mel) {
 // ===========================================================================
 
 static void cc_fold_batchnorm(cc_model& model) {
+    if (model.hparams.conv_norm_layer) {
+        fprintf(stderr, "canary_ctc: conv norm is layer_norm — applied in-graph, no BN folding\n");
+        return;
+    }
     const int d = (int)model.hparams.d_model;
     const int K = (int)model.hparams.conv_kernel;
     const float eps = 1e-5f;
@@ -411,6 +418,7 @@ static bool cc_load_model(cc_model& model, canary_ctc_vocab& vocab, const char* 
         hp.blank_id = core_gguf::kv_u32(gctx, "canary_ctc.blank_id", hp.blank_id);
         hp.frame_dur_cs = core_gguf::kv_u32(gctx, "canary_ctc.frame_dur_cs", hp.frame_dur_cs);
         hp.xscaling = core_gguf::kv_u32(gctx, "canary_ctc.xscaling", hp.xscaling);
+        hp.conv_norm_layer = core_gguf::kv_u32(gctx, "canary_ctc.conv_norm_layer", hp.conv_norm_layer);
 
         auto tokens = core_gguf::kv_str_array(gctx, "tokenizer.ggml.tokens");
         if (!tokens.empty()) {
@@ -490,8 +498,15 @@ static bool cc_load_model(cc_model& model, canary_ctc_vocab& vocab, const char* 
         e.conv_pw2_b = get_opt("conv.pw2.bias");
         e.conv_bn_w = get("conv.bn.weight");
         e.conv_bn_b = get("conv.bn.bias");
-        e.conv_bn_rm = get("conv.bn.running_mean");
-        e.conv_bn_rv = get("conv.bn.running_var");
+        if (model.hparams.conv_norm_layer) {
+            // conv_norm_type=layer_norm: the "bn" tensors are the LN affine
+            // params (no running stats exist); apply in-graph, no folding.
+            e.conv_ln_w = e.conv_bn_w;
+            e.conv_ln_b = e.conv_bn_b;
+        } else {
+            e.conv_bn_rm = get("conv.bn.running_mean");
+            e.conv_bn_rv = get("conv.bn.running_var");
+        }
         e.norm_ff2_w = get("norm_ff2.weight");
         e.norm_ff2_b = get("norm_ff2.bias");
         e.ff2_l1_w = get("ff2.linear1.weight");

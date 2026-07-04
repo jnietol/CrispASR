@@ -549,7 +549,7 @@ permissively licensed (no NC restriction):
 |---|---|---|---|---|
 | `canary-ctc-aligner` (= `auto`) | FastConformer-CTC (canary-1b-v2 aux) | ~442 MB | 25 European | CC-BY-4.0 |
 | `fastconformer-aligner[-en]` / `fastconformer-ctc` | FastConformer-CTC standalone | ~83 MB | en | CC-BY-4.0 |
-| `fastconformer-aligner-de` / `fastconformer-ctc-de` | FastConformer hybrid CTC branch | ~78 MB | de (+punct/caps) | CC-BY-4.0 |
+| `fastconformer-{aligner,ctc}-{en-pc,es,fr,it,nl,pl,ru,ua,hr,be,ar,fa,ka,hy,uz,kk-ru,de}` | FastConformer hybrid CTC branch | ~82 MB | per-language (+punct/caps except fa, kk-ru) | CC-BY-4.0 |
 | `parakeet-ctc-0.6b` / `parakeet-ctc-1.1b` | FastConformer-CTC | ~455 / ~795 MB | en | CC-BY-4.0 |
 | `wav2vec2-aligner-{en,de,fr,es,it,ja,zh,nl,uk,…}` | wav2vec2/XLSR CTC | ~212–300 MB | per-language (incl. CJK) | Apache-2.0 |
 | `qwen3-forced-aligner` / `qwen3-fa` | Qwen3 timestamp head | ~500 MB | multilingual | Apache-2.0 |
@@ -560,7 +560,9 @@ extracted from the `stt_*_fastconformer_hybrid_large_pc` hybrids via
 `models/convert-stt-fastconformer-ctc-to-gguf.py`) loads through the
 default aligner dispatch — the ~80 MB FastConformer models are the
 smallest/fastest aligner option. The popular MMS-based aligners are
-deliberately absent: their weights are CC-BY-**NC**-4.0.
+deliberately absent (weights CC-BY-**NC**-4.0), as is the Portuguese
+hybrid `stt_pt_fastconformer_hybrid_large_pc` — the only NC release in
+NVIDIA's per-language hybrid fleet.
 
 ### Granite word-level timestamps and `--max-len` (#205)
 
