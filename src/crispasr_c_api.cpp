@@ -1751,7 +1751,8 @@ CA_EXPORT int crispasr_get_streamed_segment_count(void) {
 
 CA_EXPORT crispasr_session_result* crispasr_drain_streamed_segments(void) {
     std::lock_guard<std::mutex> lk(g_seg_mutex);
-    if (g_streamed_segments.empty()) return nullptr;
+    if (g_streamed_segments.empty())
+        return nullptr;
     auto* r = new crispasr_session_result;
     r->segments = std::move(g_streamed_segments);
     g_streamed_segments.clear();
@@ -1768,7 +1769,8 @@ CA_EXPORT void crispasr_reset_streamed_segments(void) {
 // Fire the session's segment callback for every segment in `r`.
 // Called from the public transcribe entry points after the result is built.
 static void _fire_segment_callbacks(crispasr_session* s, crispasr_session_result* r) {
-    if (!s || !r || !s->segment_cb) return;
+    if (!s || !r || !s->segment_cb)
+        return;
     for (int i = 0; i < (int)r->segments.size(); ++i) {
         const auto& seg = r->segments[i];
         s->segment_cb(seg.text.c_str(), seg.t0, seg.t1, i, s->segment_ud);
@@ -3774,11 +3776,10 @@ CA_EXPORT void crispasr_session_set_progress_callback(crispasr_session* s, crisp
     s->progress_ud = cb ? user_data : nullptr;
 }
 
-CA_EXPORT void crispasr_session_set_segment_callback(
-    crispasr_session* s,
-    crispasr_segment_callback cb,
-    void* user_data) {
-    if (!s) return;
+CA_EXPORT void crispasr_session_set_segment_callback(crispasr_session* s, crispasr_segment_callback cb,
+                                                     void* user_data) {
+    if (!s)
+        return;
     s->segment_cb = cb ? cb : _default_segment_cb;
     s->segment_ud = cb ? user_data : nullptr;
 }

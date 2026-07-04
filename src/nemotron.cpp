@@ -131,8 +131,11 @@ struct nemotron_hparams {
 using nemotron_pre_encode = core_conformer::PreEncodeWeights;
 
 struct nemotron_enc_layer : core_conformer::BlockWeights {
-    // LayerNorm in conv module (used instead of BatchNorm)
-    ggml_tensor *conv_ln_w = nullptr, *conv_ln_b = nullptr;
+    // conv-module LayerNorm (conv_ln_w/conv_ln_b, used instead of BatchNorm) is
+    // inherited from BlockWeights (§222 added it there for the shared conformer
+    // core). Do not redeclare it here — a derived copy shadows the parent field
+    // (cppcheck duplInheritedMember) while every access site resolves to the
+    // same name anyway.
 };
 
 struct nemotron_predictor {
