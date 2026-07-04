@@ -1555,6 +1555,8 @@ plain transcribe 11 %, local-attn [128,128] 46 % (both char-identical to our
 port — bit-faithfulness check), buffered BatchedFrameASRTDT 15-51 %.
 Gap-fill cost: one extra short encode per recovered gap (~1.3-2× wall on
 gap-heavy clips); `CRISPASR_GAP_FILL=0` restores single-pass-per-slice.
+Reproduce: `tools/asr_coverage_score.py <whisper-ref> <hyp> --strip-latin
+--reading` (scorer) and `tools/nemo_parakeet_blueprint.py` (NeMo modes).
 
 ## Long-audio coverage benchmark — 2026-05-21 (issue #89, historical)
 

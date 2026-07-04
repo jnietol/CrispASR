@@ -11777,6 +11777,12 @@ Verify each hit against the model's real `config.json`, not intuition.
 
 ## Issue #89 close-out: four transferable lessons (2026-07-04)
 
+(Reusable tooling from this audit lives in-tree:
+`tools/asr_coverage_score.py` — the char-bigram recall/precision scorer with
+`--strip-latin` / `--reading` normalization and `--per-line` loss
+localization; `tools/nemo_parakeet_blueprint.py` — the NeMo blueprint-parity
+benchmark covering plain / CTC / local-attention / buffered modes.)
+
 ### 1. FastConformer-JA blanks a whole utterance whenever enough context *follows* it — test the missing span in isolation before blaming chunking
 
 The reporter's clip's first 4.6 s ("皆さんこんにちは…") transcribes **verbatim
