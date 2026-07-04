@@ -693,6 +693,7 @@ crispasr -m auto --backend parakeet -f audio.wav --vad -osrt --split-on-punct
 | `--vad` | Silero VAD chunking — strongly recommended for multi-minute audio |
 | `-osrt` / `-ovtt` / `-otxt` / `-oj` / `-ojf` | Output formats (also `-ocsv`, `-olrc`) |
 | `-am FNAME` | CTC aligner GGUF for word-level timestamps on LLM backends |
+| `--align-only` | Standalone forced alignment: text + audio → timestamped SRT/JSON (no ASR needed) |
 | `-tp F` / `-bs N` | Sampling temperature / beam search width |
 | `-n N` / `--frequency-penalty F` | Generated-token cap / opt-in repeated-token penalty for supported autoregressive ASR backends |
 | `-l auto` / `--detect-language` | LID pre-step for backends without native lang detect |

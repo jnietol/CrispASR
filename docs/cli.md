@@ -12,7 +12,7 @@ when you don't pass `--backend`, whisper is the default.
   - [TTS-specific flags](#tts-specific-flags) — voice, instruct, codec, steps, trim
 - [Output formats](#output) — txt / srt / vtt / json / csv / lrc
 - [Segmentation & chunking](#segmentation--chunking) — VAD, fixed chunks
-- [Word-level timestamps via CTC alignment](#word-level-timestamps-via-ctc-alignment)
+- [Word-level timestamps via CTC alignment](#word-level-timestamps-via-ctc-alignment) — incl. standalone `--align-only`
 - [Sampling / decoding](#sampling--decoding-whisper--llm-backends) — temperature, beam, grammar
 - [Language detection (LID)](#language-detection-lid)
 - [Diarization](#diarization) — `--diarize`, pyannote, embedder-based clustering
@@ -478,6 +478,31 @@ the ~442 MB download or the second forward pass), add
 The implicit-enable line goes to stderr (suppressed under
 `--no-prints`) so it doesn't perturb stdout subtitle parsing in
 upstream tools like SubtitleEdit.
+
+### Standalone alignment — `--align-only` (issue #217)
+
+Aligns pre-existing text against audio without running ASR first.
+Accepts plain text (via `--ref-text` or `--text-file file.txt`) or an
+unaligned `.srt` file (timestamps stripped, text extracted). Works with
+all three aligner families: canary-ctc, wav2vec2/hubert, qwen3-forced-aligner.
+
+```bash
+# Align a transcript against audio, output SRT:
+crispasr --align-only -am auto --auto-download -f audio.wav \
+    --ref-text "And so my fellow Americans ask not what your country can do for you"
+
+# Align text from an unaligned SRT file, output JSON:
+crispasr --align-only -am canary-ctc-aligner-q4_k.gguf -f audio.wav \
+    --text-file subtitles.srt --align-format json
+
+# Align from a plain .txt file:
+crispasr --align-only -am auto --auto-download -f audio.wav \
+    --text-file transcript.txt --align-output aligned.srt
+```
+
+No ASR model (`-m`) is required. Output formats: `srt` (default),
+`json` (word-level start/end), `plain` (tab-separated). Destination:
+stdout (default) or `--align-output <path>`.
 
 ### Granite word-level timestamps and `--max-len` (#205)
 
