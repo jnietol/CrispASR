@@ -38,6 +38,12 @@ export CRISPASR_MODEL_DOTS_TTS="${CRISPASR_MODEL_DOTS_TTS:-$CRISPASR_MODELS_DIR/
 export CRISPASR_MODEL_DOTS_TTS_VOCODER="${CRISPASR_MODEL_DOTS_TTS_VOCODER:-$CRISPASR_MODELS_DIR/dots-tts-soar-vocoder-f16.gguf}"
 export CRISPASR_MODEL_COHERE="${CRISPASR_MODEL_COHERE:-$CRISPASR_MODELS_DIR/cohere-transcribe.gguf}"
 
+# ── Parakeet JA long-form regression guard (issue #89) ──
+# Fixture: hf download cstr/crispasr-regression-fixtures \
+#     parakeet-tdt-0.6b-ja/reazon_baseball_14s/audio.wav --local-dir <dir>
+export CRISPASR_MODEL_PARAKEET_JA="${CRISPASR_MODEL_PARAKEET_JA:-$CRISPASR_MODELS_DIR/parakeet-tdt-0.6b-ja.gguf}"
+export CRISPASR_FIXTURE_PARAKEET_JA="${CRISPASR_FIXTURE_PARAKEET_JA:-$CRISPASR_MODELS_DIR/fixtures/reazon_baseball_14s.wav}"
+
 # ── Paraformer ──
 export PARAFORMER_MODEL="${PARAFORMER_MODEL:-$CRISPASR_MODELS_DIR/paraformer-zh-f16.gguf}"
 export PARAFORMER_MODEL_Q4K="${PARAFORMER_MODEL_Q4K:-$CRISPASR_MODELS_DIR/paraformer-zh-q4_k.gguf}"

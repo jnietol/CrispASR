@@ -451,6 +451,7 @@ work:
 
 | Priority | Item | Effort | Status |
 |---|---|---|---|
+| **HIGH** | [#221 Issue #89 hardening + v0.8.8](#221-issue-89-hardening--v088-release) | Medium | 5 steps: CI regression guard (a), server-path mirror (b), Vulkan sanity (c), q4_k registry/UX (d), release (e). |
 | **DONE** | CPU weight-read hardening + Mimi codec causal default | Medium | **DONE 2026-07.** Routed ~14 CPU-side weight readers through the quantized-safe `core_cpu::to_f32` (`src/core/cpu_ops.h`); unit (`test-cpu-ops-to-f32`) + live tested on Metal + CUDA. wav2vec2 conv_w left as-is (zero-copy hot path, never quantized). **Mimi codec:** `kyutai_stt` now **defaults to causal+sliding-window** — a >250-frame WER A/B (3× jfk ≈412 frames) showed the old full non-causal attention truncates long audio ~25%; opt out with **`CRISPASR_MIMI_NONCAUSAL=1`**. `csm_tts` **also defaults to causal** (opt out `CRISPASR_MIMI_NONCAUSAL=1`) after a TTS→ASR A/B (~256 dec frames) gave causal 9.3% vs non-causal 12.0% WER (a modest single-sample win — non-causal TTS stayed intelligible rather than truncating like STT). → HISTORY, LEARNINGS. |
 | **HIGH** | [§176 Runtime optimization pass](#176-runtime-optimization-pass--2026-06-20-audit) | Phased | 20 sub-items (§176a–§176t). **16 DONE or MOSTLY DONE**: §176a (flash-attn via core_attn), §176b (bucket cache 8 backends), §176d (BLAS 9 backends), §176e (context cache all support runtimes), §176f (mel BLAS+OMP), §176g (embd cache 3 backends), §176h (F5-TTS fused graph), §176i (cross-KV F16, 5 backends), §176j (iterative FFT), §176m (nemotron memmove), §176o (embed fast path), §176p (MOSS flash), §176q (greedy alloc), §176r (beam top-K), §176s (encoder cache 16/17), §176t (weight pre-cache). **4 OPEN**: §176c (device-resident KV), §176k (FireRed KV), §176l (Kyutai RVQ), §176n (VoxCPM2 Metal). |
 | **MEDIUM** | [#52 Qwen3-TTS](#52-qwen3-tts) — perf pass | Medium | talker + code_predictor + codec + ECAPA + codec_encoder all done; step-4 perf pass open (~137 ms/frame → real-time). **O15 broken on CUDA and default-OFF** (`61c42bfb`) — main perf lever disabled. **2026-06-13 Kaggle P100:** dedicated-sched fix (`baef21aa`) didn't help — O15=ON still rc=-6 SIGABRT at 6.0s. Crash is on the *first* code_pred call (not cached reuse), so root cause is `ggml_set_rows`-based KV scatter or the fixed-Lk causal mask on CUDA, not sched sharing. Baseline O15=OFF: 27.4 ms/frame, WAV OK. |
@@ -6886,3 +6887,62 @@ diarization, voice cloning, single-file arch-autodetect UX.
 - mtmd mel preprocessing params (128 HTK bins) + LFM2-Audio/MiniCPM-o audio
   status are DeepWiki-sourced, not quoted from `clip.cpp` — confirm if
   load-bearing.
+
+---
+
+## 221. Issue #89 hardening + v0.8.8 release
+
+Follow-through on the 2026-07-04 #89 close-out (VAD slice cap + per-slice
+single-pass + gap-fill; see HISTORY + LEARNINGS). The fix is shipped and
+verified manually; this section makes it durable and gets it released.
+
+### 221a. CI regression guard for the JA long-form path — HIGH, small
+
+The shipped 97/97/96 % coverage is protected only by manual runs; the next
+parakeet refactor could silently re-break #89. The YouTube reproducers can't
+be committed, but the reazon baseball fixture
+(`cstr/crispasr-regression-fixtures` →
+`parakeet-tdt-0.6b-ja/reazon_baseball_14s/audio.wav`) can drive a live test:
+concatenate ×3 (42.2 s — crosses the 30 s auto-chunk threshold and the 12 s
+slice cap), transcribe via the **session ABI** (the library-level entry that
+carries the cap + gap-fill), assert (a) 岡本 appears ≥3×, (b) last timestamp
+reaches the third repetition, (c) a byte floor. Wire into `tests/` +
+`tests/env-live-tests.sh` (`CRISPASR_MODEL_PARAKEET_JA`,
+`CRISPASR_FIXTURE_PARAKEET_JA`).
+
+### 221b. HTTP server path audit + mirror — HIGH, small-medium
+
+`crispasr_server.cpp` has its own slice loop (`crispasr_compute_audio_slices`
+at ~line 410) separate from both the CLI dispatcher and the session ABI.
+Audit whether a JA parakeet request through `/v1/audio/transcriptions` gets
+the slice cap + gap-fill; if not (expected), mirror the same policy —
+either by consulting the backend's `vad_slice_cap_seconds()` like
+`crispasr_run.cpp` does, or by routing the server's parakeet handling
+through the session-ABI code path.
+
+### 221c. Vulkan sanity run — MEDIUM, small
+
+The #89 reporter is on AMD/Vulkan where the encoder instability was
+originally worse. The fix is policy-level (slicing) so it should transfer,
+but confirm once via MoltenVK on the M1 (`GGML_VULKAN=ON` build,
+`VK_ICD_FILENAMES` gotcha — see LEARNINGS/reference notes): yt_60s default
+run should land ≈97 % recall like Metal.
+
+### 221d. q4_k registry/UX guard — MEDIUM, small
+
+parakeet-ja q4_k TDT decode is degenerate (repetition loop; pre-existing,
+same in the old upload) while CTC decode over the same file is clean.
+Two guards: (1) check what `-m auto --model-name parakeet-ja` resolves to in
+`src/crispasr_model_registry.cpp` — if q4_k, point it at the q8_0 (TDT
+byte-identical to F16); (2) stderr hint when a JA parakeet GGUF with
+quantized (≤q4) weights loads in TDT mode: suggest `--parakeet-decoder ctc`
+or the q8_0 file.
+
+### 221e. v0.8.8 release — after a-d
+
+Everything since v0.8.7: the #89 series (slice cap, gap-fill, session
+mirror, tools, CTC-head GGUFs), #218 moss fixes, #217 --align-only docs.
+Follow the release process in the dev guide: notes from
+`git log v0.8.7..HEAD --oneline --no-merges` into RELEASE_NOTES_v0.8.8.md,
+`scripts/bump-version.sh 0.8.8`, push main, wait for green CI, push tag,
+`gh release create` with notes, then remove the repo-root notes file.

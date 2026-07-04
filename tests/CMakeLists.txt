@@ -749,6 +749,26 @@ catch_discover_tests(test-moss-transcribe
         WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
+# ─── test - parakeet-ja-longform — issue #89 regression guard (session ABI coverage)
+add_executable(test-parakeet-ja-longform
+    test_parakeet_ja_longform_live.cpp
+)
+target_include_directories(test-parakeet-ja-longform PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(test-parakeet-ja-longform PRIVATE
+    Catch2::Catch2WithMain
+    crispasr-lib
+)
+catch_discover_tests(test-parakeet-ja-longform
+    TEST_SPEC "[parakeet-ja-longform]"
+    PROPERTIES
+        LABELS live
+        SKIP_RETURN_CODE 4
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
 # ─── test - context - bias — Catch2 unit tests for CTC-WS phrase-boost trie (PLAN #98)
 add_executable(test-context-bias
     test_context_bias.cpp

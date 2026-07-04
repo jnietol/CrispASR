@@ -23,6 +23,7 @@
 
 #include "crispasr_backend.h"
 #include "crispasr_diarize_cli.h"
+#include "crispasr_gap_fill.h"
 #include "crispasr_speaker_embedder.h"
 #include "crispasr_lid.h"
 #include "crispasr_lid_cli.h"
@@ -407,6 +408,15 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
     int effective_chunk_seconds = rp.chunk_seconds;
     if (rp.vad && !rp.chunk_seconds_explicit && (backend->capabilities() & CAP_UNBOUNDED_INPUT))
         effective_chunk_seconds = 0;
+    // Issue #89: backends with a bounded safe decode window (parakeet-ja,
+    // ~12 s) get their slices capped — with VAD this re-splits merged
+    // continuous-speech slices at energy minima, without it the fixed
+    // chunking drops from 30 s to the cap. Mirrors crispasr_run.cpp.
+    const int vad_cap = backend->vad_slice_cap_seconds();
+    if (vad_cap > 0 && !rp.chunk_seconds_explicit &&
+        (effective_chunk_seconds == 0 || effective_chunk_seconds > vad_cap)) {
+        effective_chunk_seconds = vad_cap;
+    }
     const auto slices = crispasr_compute_audio_slices(pcmf32.data(), n_samples, SR, effective_chunk_seconds, rp);
     if (slices.empty()) {
         result.ok = true;
@@ -469,6 +479,14 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
             const auto& sl = slices[i];
             auto tc0 = std::chrono::steady_clock::now();
             auto segs = backend->transcribe(pcmf32.data() + sl.start, sl.end - sl.start, sl.t0_cs, rp);
+
+            // Issue #89 gap-fill second pass (bounded-window backends only) —
+            // same policy as the CLI dispatcher (crispasr_gap_fill.h).
+            if (vad_cap > 0) {
+                const char* gf = getenv("CRISPASR_GAP_FILL");
+                if (!gf || atoi(gf) != 0)
+                    crispasr_gap_fill_slice(*backend, rp, pcmf32.data(), n_samples, SR, sl, segs);
+            }
 
             if (want_align) {
                 for (auto& seg : segs) {
