@@ -1,6 +1,6 @@
 {
-  "id": "chr1s4/crispasr-irodori-tts-gguf-convert",
-  "title": "CrispASR Irodori-TTS GGUF Conversion",
+  "id": "chr1s4/crispasr-irodori-tts-gguf-conversion",
+  "title": "crispasr-irodori-tts-gguf-conversion",
   "code_file": "irodori_tts_convert.py",
   "language": "python",
   "kernel_type": "script",
