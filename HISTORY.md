@@ -6,6 +6,34 @@ technical deep-dives are in `LEARNINGS.md`.
 
 ---
 
+## 2026-07-04 #221 issue #89 hardening (regression guard, server mirror, Vulkan, q4 guard)
+
+Follow-through batch (PLAN #221) making the #89 fix durable:
+
+- **221a regression guard** — `tests/test_parakeet_ja_longform_live.cpp`
+  (label `live`): reazon baseball fixture ×3 (42.2 s) through the session ABI
+  must keep 3× 岡本, reach the third repetition, and clear a byte floor.
+  `CRISPASR_MODEL_PARAKEET_JA` + `CRISPASR_FIXTURE_PARAKEET_JA` in
+  env-live-tests.sh.
+- **221b server mirror** — the OpenAI-compatible server's own slice loop had
+  neither the 12 s cap nor gap-fill (JA → 30 s chunks → streamed, ~58 %).
+  Gap-fill extracted to `examples/cli/crispasr_gap_fill.h` (shared with the
+  CLI dispatcher, code unchanged); server applies the backend slice cap +
+  per-slice gap-fill. E2E: `/v1/audio/transcriptions` with baseball ×3 → 3/3.
+- **221c Vulkan sanity** — MoltenVK build, yt_60s default flags: **95.1 %
+  recall / 94.2 % precision** vs whisper GT (Metal: 97.2) — the fix transfers
+  to the reporter's AMD/Vulkan backend class.
+- **221d q4 guard** — load-time warning when the JA model has q4-class joint
+  weights (TDT repetition loop; suggests `--parakeet-decoder ctc` or q8_0);
+  registry `parakeet-ja` auto-download now fetches the **q8_0** (TDT
+  byte-identical to F16, half the size).
+
+Operational note: the external SSD died mid-work (I/O errors); everything
+committed was already on origin, the model/fixtures were re-fetched from HF
+and the VPS (`/mnt/akademie_storage/test-audio/ja/`), and work moved to an
+internal worktree. The old audit artifacts under
+`/Volumes/backups/code/issue89-parakeet-stash/.local/` are gone with the disk.
+
 ## 2026-07-04 #89 parakeet-ja long-form — VAD slice cap + per-slice single-pass (56 % → 80 % recall)
 
 Issue #89 audit: the reporter's default run (`parakeet-tdt-0.6b-ja`, no flags)
