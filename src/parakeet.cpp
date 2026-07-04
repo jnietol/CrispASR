@@ -506,6 +506,20 @@ static bool parakeet_load_model(parakeet_model& model, parakeet_vocab& vocab, co
     fprintf(stderr, "parakeet: vocab=%u  d_model=%u  n_layers=%u  n_heads=%u  ff=%u  pred=%u  joint=%u\n",
             model.hparams.vocab_size, model.hparams.d_model, model.hparams.n_layers, model.hparams.n_heads,
             model.hparams.ff_dim, model.hparams.pred_hidden, model.hparams.joint_hidden);
+
+    // Issue #89 follow-up (#221d): the JA model's TDT decode is degenerate at
+    // q4-class quantisation (joint.pred / decoder.embed fall back to q4_0
+    // inside q4_k mode and the autoregressive decode compounds the noise into
+    // a fixed-point repetition loop) — while CTC decode over the same
+    // quantised encoder is clean, and q8_0 TDT is byte-identical to F16.
+    // Warn so q4_k users don't ship garbage silently.
+    if (model.hparams.vocab_size <= 4096 && j.out_w && ggml_is_quantized(j.out_w->type) &&
+        j.out_w->type != GGML_TYPE_Q8_0) {
+        fprintf(stderr,
+                "parakeet: WARNING: JA model with %s weights — TDT decode degrades to repetition "
+                "loops at this quantisation. Use %sthe q8_0/F16 file for reliable TDT output.\n",
+                ggml_type_name(j.out_w->type), model.has_ctc ? "--parakeet-decoder ctc (clean at q4) or " : "");
+    }
     return true;
 }
 

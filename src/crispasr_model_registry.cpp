@@ -334,15 +334,16 @@ constexpr Entry k_registry[] = {
     {"titanet", "titanet-large.gguf",
      "https://huggingface.co/cstr/titanet-large-GGUF/resolve/main/titanet-large.gguf",
      "~45 MB", nullptr, nullptr},
-    // parakeet-ja: F16 is the auto-download default — Q4_K of this
+    // parakeet-ja: Q8_0 is the auto-download default — its TDT output is
+    // byte-identical to F16 in our tests at half the size. Q4_K of this
     // model is quantisation-sensitive (joint.pred / decoder.embed
-    // dimensions fall back to q4_0 inside q4_k mode) and the talker
-    // enters a fixed-point loop after ~8 tokens. The Q4_K file is
-    // available at the same repo for users who pin disk space, but
-    // we'd rather have correct output by default.
-    {"parakeet-ja", "parakeet-tdt-0.6b-ja.gguf",
-     "https://huggingface.co/cstr/parakeet-tdt-0.6b-ja-GGUF/resolve/main/parakeet-tdt-0.6b-ja.gguf",
-     "~1.24 GB", nullptr, nullptr},
+    // dimensions fall back to q4_0 inside q4_k mode) and the TDT decode
+    // enters a fixed-point repetition loop; CTC decode over the same q4_k
+    // file is clean (--parakeet-decoder ctc). All files at the repo carry
+    // the hybrid model's CTC head since 2026-07 (#89 / #221d).
+    {"parakeet-ja", "parakeet-tdt-0.6b-ja-q8_0.gguf",
+     "https://huggingface.co/cstr/parakeet-tdt-0.6b-ja-GGUF/resolve/main/parakeet-tdt-0.6b-ja-q8_0.gguf",
+     "~710 MB", nullptr, nullptr},
     // parakeet-v2 — English-only TDT (1024-vocab BPE, pred_layers=2).
     // The original Open ASR Leaderboard topper before v3 spread capacity
     // to 25 languages; often stronger on plain English. Same FastConformer
