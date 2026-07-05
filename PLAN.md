@@ -7032,3 +7032,35 @@ right after `CUDA Graph id N reused`. CPU works.
   extra aggravator. Fix confirmed on hardware. Both Metal + forced-CUDA branches
   also compile clean. (Nice-to-have: an sm_80+ run to also exercise the
   capture-replay path, but the fix is already proven end-to-end.)
+
+## §224 Issue #222 follow-ups — silero LID ggml graph (DONE) + diarize/firered CPU perf (OPEN)
+
+Issue #222 (silero LID Vulkan segfault) fixed in `222b6781` (weights were
+GPU-loaded but the forward dereferenced `tensor->data`). Follow-up shipped in
+`a5b780f8`: the silero LID forward is now a ggml graph — CPU frontend
+(log-magnitude precision) + sched encoder (GPU on Metal/CUDA), 30 s slice cap
+(O(T²) attention; uncapped 10-min file = ~19 GB score alloc). Legacy scalar
+path gated `CRISPASR_SILERO_LID_LEGACY=1`. M1: 103 ms Metal / 183 ms CPU-ggml
+vs 241 ms Accelerate / 1014 ms scalar. A/B logit-matched on en/zh/multispeaker.
+
+**Vulkan (OPEN):** ggml-vulkan miscomputes one FFN MUL_MAT (f32 128×128×1101)
+in this graph on MoltenVK — allocation-layout dependent, identical-shape
+matmuls pass and fail in the same graph (TADA #192 class). Found with
+`-DGGML_VULKAN_CHECK_RESULTS=ON` (vendored CMakeLists now links ggml-cpu for
+that option). LID graph auto-routes to CPU on Vulkan;
+`CRISPASR_SILERO_LID_VULKAN=1` opts back in. TODO: verify on conformant RADV
+(reporter has RX 9070 XT) — may be MoltenVK-only; if it reproduces, minimal
+upstream repro.
+
+**Diarization CPU perf (OPEN, measured M1, 31.5 s multispeaker.wav):**
+`--diarize-speakers` = pyannote seg **4.39 s** (scalar SincNet + serial biLSTM)
++ TitaNet **0.70 s per speaker turn** (all-scalar forward). Long multi-turn
+audio → minutes (matches #222 reporter's complaint). Cure = same ggml-graph
+port as silero LID: (a) pyannote_seg (SincNet convs + biLSTM via core/lstm.h);
+(b) titanet (conv trunk + SE + ASP; segments batchable). Also: pyannote is
+re-initialized per call (PERFORMANCE.md), fix alongside.
+
+**FireRed ASR CPU perf (ANALYSIS):** 0.5–0.6× realtime is model-size bound
+(900M encoder-AED, already Q4_K SIMD, 60 ms/decode step, no exposed KV to
+cache further per PERFORMANCE.md). No quick win; levers = GPU decode path or
+recommending a smaller backend for CPU-only users.
