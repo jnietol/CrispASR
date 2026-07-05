@@ -1273,9 +1273,15 @@ int irodori_tts_synthesize(struct irodori_tts_context* ctx, const char* text, fl
 
     IRODORI_DBG("[irodori] text tokens: %d\n", T_text);
 
-    // Determine output length (heuristic: ~6.3 frames per token)
-    float frames_per_token = 6.3f;
-    int latent_steps = (int)(T_text * frames_per_token * ctx->duration_scale / ctx->speed);
+    // Determine output length (heuristic: ~6.3 frames per token, or override)
+    const char* t_lat_override = std::getenv("CRISPASR_IRODORI_T_LATENT");
+    int latent_steps;
+    if (t_lat_override && std::atoi(t_lat_override) > 0) {
+        latent_steps = std::atoi(t_lat_override);
+    } else {
+        float frames_per_token = 6.3f;
+        latent_steps = (int)(T_text * frames_per_token * ctx->duration_scale / ctx->speed);
+    }
     int max_steps = (int)(ctx->max_seconds * hp.sample_rate / hp.codec_hop_length);
     latent_steps = std::min(latent_steps, max_steps);
     latent_steps = std::max(latent_steps, 1);
@@ -1369,10 +1375,23 @@ int irodori_tts_synthesize(struct irodori_tts_context* ctx, const char* text, fl
         IRODORI_DBG("[irodori]   step %d: running DiT forward...\n", step);
         // DiT forward: conditioned pass
         auto v_cond = run_dit_forward(ctx, x_t.data(), patched_steps, cond_embed.data(), text_state.data(), T_text,
-                                      spk_state.empty() ? nullptr : spk_state.data(), T_ref);
+                                      spk_state.data(), T_ref);
         if (v_cond.empty()) {
             std::fprintf(stderr, "[irodori] DiT forward failed at step %d\n", step);
             return 0;
+        }
+
+        // Dump step-0 v_pred for parity comparison
+        if (step == 0) {
+            const char* dump_v0 = std::getenv("CRISPASR_IRODORI_DUMP_V_PRED0");
+            if (dump_v0 && *dump_v0) {
+                FILE* f = std::fopen(dump_v0, "wb");
+                if (f) {
+                    std::fwrite(v_cond.data(), sizeof(float), v_cond.size(), f);
+                    std::fclose(f);
+                    std::fprintf(stderr, "[irodori] v_pred step0 dumped to '%s'\n", dump_v0);
+                }
+            }
         }
 
         // CFG: independent text guidance
