@@ -40,6 +40,7 @@ DEFAULT_STAGES = [
     "spk_state_zeros",
     "timestep_embed",
     "cond_embed",
+    "init_noise",
     "dit_in_proj",
     "dit_block_0",
     "v_pred_step0",
@@ -181,6 +182,9 @@ def dump(*, model_dir: Path, audio: np.ndarray, stages: Set[str],
 
         torch.manual_seed(seed)
         x_t = torch.randn(1, T_latent, latent_d, dtype=model.dtype)
+        if "init_noise" in stages:
+            results["init_noise"] = x_t[0].float().numpy()
+            print(f"  init_noise: {x_t.shape}")
         cond_1d = cond_embed[:, None, :]  # (1, 1, D*3) broadcast
 
         # Prepare speaker state (zeros = unconditional, but must not be None
