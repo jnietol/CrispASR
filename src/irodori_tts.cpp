@@ -444,10 +444,10 @@ static ggml_tensor* build_text_encoder_graph(ggml_context* ctx, const irodori_tt
         ggml_tensor* residual = x;
         ggml_tensor* h = rms_norm(ctx, x, blk.attn_norm, hp.norm_eps);
 
-        // Q, K, V projections
-        ggml_tensor* q = ggml_mul_mat(ctx, blk.wq, h);
-        ggml_tensor* k = ggml_mul_mat(ctx, blk.wk, h);
-        ggml_tensor* v = ggml_mul_mat(ctx, blk.wv, h);
+        // Q, K, V projections (F32 output for element-wise ops)
+        ggml_tensor* q = mul_mat_f32(ctx, blk.wq, h);
+        ggml_tensor* k = mul_mat_f32(ctx, blk.wk, h);
+        ggml_tensor* v = mul_mat_f32(ctx, blk.wv, h);
 
         // Reshape to (head_dim, heads, T)
         int hd = hp.text_head_dim();
@@ -456,36 +456,44 @@ static ggml_tensor* build_text_encoder_graph(ggml_context* ctx, const irodori_tt
         k = ggml_reshape_3d(ctx, k, hd, nh, T_text);
         v = ggml_reshape_3d(ctx, v, hd, nh, T_text);
 
-        // QK norm (per-head RMSNorm)
+        // QK norm (per-head RMSNorm) — cast norms to F32 if F16
         q = ggml_rms_norm(ctx, q, hp.norm_eps);
-        q = ggml_mul(ctx, q, blk.q_norm);
+        q = ggml_mul(ctx, q, ggml_cast(ctx, blk.q_norm, GGML_TYPE_F32));
         k = ggml_rms_norm(ctx, k, hp.norm_eps);
-        k = ggml_mul(ctx, k, blk.k_norm);
+        k = ggml_mul(ctx, k, ggml_cast(ctx, blk.k_norm, GGML_TYPE_F32));
 
-        // RoPE (standard interleaved, mode=0)
+        // RoPE in (hd, nh, T) layout — ne[2]=T matches pos_ids length
         q = ggml_rope_ext(ctx, q, pos_ids, nullptr, hd, 0, 0, 10000.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
         k = ggml_rope_ext(ctx, k, pos_ids, nullptr, hd, 0, 0, 10000.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
 
-        // Permute for flash attention: (head_dim, T, heads) -> SDPA expects (T, head_dim, heads)
-        // ggml_flash_attn_ext expects Q(hd, T, nh), K(hd, T_kv, nh), V(hd, T_kv, nh)
+        // Permute to (hd, T, nh) for flash_attn_ext
+        q = ggml_cont(ctx, ggml_permute(ctx, q, 0, 2, 1, 3));
+        k = ggml_cont(ctx, ggml_permute(ctx, k, 0, 2, 1, 3));
+        v = ggml_reshape_3d(ctx, v, hd, nh, T_text);
+        v = ggml_cont(ctx, ggml_permute(ctx, v, 0, 2, 1, 3));
+
+        // Flash attention: Q(hd, T, nh), K(hd, T, nh), V(hd, T, nh)
         ggml_tensor* attn_out =
             ggml_flash_attn_ext(ctx, q, k, v, /*mask=*/nullptr, 1.0f / std::sqrt((float)hd), 0.0f, 0.0f);
-        // Output: (hd, T, nh)
+        attn_out = ggml_cast(ctx, attn_out, GGML_TYPE_F32);
         attn_out = ggml_reshape_2d(ctx, attn_out, hp.text_dim, T_text);
 
         // Gated attention: y = y * sigmoid(gate(h))
-        ggml_tensor* g = ggml_mul_mat(ctx, blk.gate, h);
+        ggml_tensor* g = mul_mat_f32(ctx, blk.gate, h);
         g = ggml_sigmoid(ctx, g);
         attn_out = ggml_mul(ctx, attn_out, g);
 
         // Output projection
-        attn_out = ggml_mul_mat(ctx, blk.wo, attn_out);
+        attn_out = mul_mat_f32(ctx, blk.wo, attn_out);
         x = ggml_add(ctx, residual, attn_out);
 
-        // FFN with pre-norm
+        // FFN with pre-norm (use mul_mat_f32 for F16/Q4K weight safety)
         residual = x;
         h = rms_norm(ctx, x, blk.mlp_norm, hp.norm_eps);
-        ggml_tensor* mlp_out = core_ffn::swiglu(ctx, h, blk.mlp_w1, blk.mlp_w3, blk.mlp_w2);
+        ggml_tensor* gate_proj = mul_mat_f32(ctx, blk.mlp_w1, h);
+        ggml_tensor* up_proj = mul_mat_f32(ctx, blk.mlp_w3, h);
+        ggml_tensor* mlp_out = ggml_mul(ctx, ggml_silu(ctx, gate_proj), up_proj);
+        mlp_out = mul_mat_f32(ctx, blk.mlp_w2, mlp_out);
         x = ggml_add(ctx, residual, mlp_out);
 
         // Re-apply mask
@@ -765,6 +773,24 @@ static ggml_tensor* build_dit_block_graph(ggml_context* ctx, const irodori_tts_c
 // ── Tokenizer ───────────────────────────────────────────────────────
 
 static std::vector<int32_t> tokenize_text(const irodori_tts_context* ctx, const char* text) {
+    // Override token IDs from env var for parity testing:
+    //   CRISPASR_IRODORI_TOKEN_IDS="1,19144,52839,302,275"
+    const char* override_ids = std::getenv("CRISPASR_IRODORI_TOKEN_IDS");
+    if (override_ids && *override_ids) {
+        std::vector<int32_t> tokens;
+        std::string s(override_ids);
+        size_t pos = 0;
+        while (pos < s.size()) {
+            size_t end = s.find(',', pos);
+            if (end == std::string::npos)
+                end = s.size();
+            tokens.push_back(std::atoi(s.substr(pos, end - pos).c_str()));
+            pos = end + 1;
+        }
+        IRODORI_DBG("[irodori] using override token IDs (%d tokens)\n", (int)tokens.size());
+        return tokens;
+    }
+
     std::vector<int32_t> tokens;
 
     // Prepend BOS if configured
@@ -1005,8 +1031,8 @@ static std::vector<float> run_text_encoder(irodori_tts_context* ctx, const int32
     const auto& hp = ctx->hparams;
     const int D = hp.text_dim;
 
-    // Estimate tensor count: embedding + per-block (Q,K,V,O,gate,norms,mlp) + overhead
-    const int n_tensors = 256 + hp.text_layers * 40;
+    // Tensor count: embedding + per-block (Q,K,V,O,gate,norms,mlp,permute,cast) + overhead
+    const int n_tensors = 512 + hp.text_layers * 80;
     size_t ctx_size = n_tensors * ggml_tensor_overhead() + ggml_graph_overhead_custom(n_tensors, false);
     ggml_init_params ip = {ctx_size, nullptr, true};
     ggml_context* g = ggml_init(ip);
@@ -1260,6 +1286,22 @@ int irodori_tts_synthesize(struct irodori_tts_context* ctx, const char* text, fl
     }
     IRODORI_DBG("[irodori] text_state: %d x %d (first 4: %.4f %.4f %.4f %.4f)\n", T_text, hp.text_dim, text_state[0],
                 text_state[1], text_state[2], text_state[3]);
+
+    // Dump text_state for parity comparison
+    {
+        const char* dump_ts = std::getenv("CRISPASR_IRODORI_DUMP_TEXT_STATE");
+        if (dump_ts && *dump_ts && *dump_ts != '0') {
+            std::string path = dump_ts;
+            if (path == "1")
+                path = "irodori_text_state.bin";
+            FILE* f = std::fopen(path.c_str(), "wb");
+            if (f) {
+                std::fwrite(text_state.data(), sizeof(float), text_state.size(), f);
+                std::fclose(f);
+                std::fprintf(stderr, "[irodori] text_state dumped to '%s'\n", path.c_str());
+            }
+        }
+    }
 
     // ── Step 2: Encode speaker reference (or zeros) ──
     std::vector<float> spk_state;
