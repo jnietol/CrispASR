@@ -18,7 +18,6 @@
 #include "gguf.h"
 
 #include "core/gguf_loader.h"
-#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 
 #if defined(HAVE_ACCELERATE)
 #include <Accelerate/Accelerate.h>
@@ -410,19 +409,18 @@ static void ffn_residual(float* x, int D, int T, const float* ff1_w, const float
 extern "C" struct silero_lid_context* silero_lid_init(const char* gguf_path, int n_threads) {
     auto* ctx = new silero_lid_context();
     ctx->n_threads = n_threads > 0 ? n_threads : 4;
-    ctx->backend = crispasr_init_gpu_backend();
-    if (!ctx->backend)
-        ctx->backend = ggml_backend_cpu_init();
+    // The whole forward pass is hand-rolled CPU code that dereferences
+    // tensor->data directly — it never runs a ggml graph, so weights must
+    // live in host memory (same constraint as pyannote_seg). Loading them
+    // on a discrete-GPU backend (Vulkan/CUDA) makes tensor->data a device
+    // address and the first weight read segfaults (#222); Metal only worked
+    // by accident (UMA host-mapped buffers).
+    ctx->backend = ggml_backend_cpu_init();
     if (!ctx->backend) {
         delete ctx;
         return nullptr;
     }
-    // crispasr_init_gpu_backend() returns the best available backend (Metal on
-    // Apple Silicon, CUDA on NVIDIA, …). ggml_backend_cpu_set_n_threads asserts
-    // the backend is CPU, so only call it on the CPU backend — otherwise this
-    // aborted on every silero-LID load on a GPU build (#165).
-    if (ggml_backend_is_cpu(ctx->backend))
-        ggml_backend_cpu_set_n_threads(ctx->backend, ctx->n_threads);
+    ggml_backend_cpu_set_n_threads(ctx->backend, ctx->n_threads);
 
     if (!lid_load(ctx->model, gguf_path, ctx->backend)) {
         delete ctx;
