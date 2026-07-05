@@ -23,6 +23,7 @@
 
 #include "core/ffn.h"
 #include "core/gguf_loader.h"
+#include "core/sentencepiece.h"
 
 #include <algorithm>
 #include <cassert>
@@ -207,8 +208,10 @@ struct irodori_tts_context {
     ggml_backend_buffer_t buf_weights = nullptr;
     ggml_context* w_ctx = nullptr; // weight tensor context (kept alive)
 
-    // Tokenizer
+    // Tokenizer (SentencePiece unigram)
     std::vector<std::string> vocab;
+    std::unordered_map<std::string, int32_t> token_to_id;
+    std::vector<float> token_scores;
     int bos_token_id = -1;
     int pad_token_id = -1;
 
@@ -739,21 +742,31 @@ static ggml_tensor* build_dit_block_graph(ggml_context* ctx, const irodori_tts_c
 // ── Tokenizer ───────────────────────────────────────────────────────
 
 static std::vector<int32_t> tokenize_text(const irodori_tts_context* ctx, const char* text) {
-    // For the initial implementation, use byte-level tokenization as fallback.
-    // The full sarashina2.2 SentencePiece tokenizer integration would require
-    // loading the SPM model from GGUF or external file.
-    // TODO: integrate proper SentencePiece tokenizer from core/sentencepiece.h
     std::vector<int32_t> tokens;
+
+    // Prepend BOS if configured
     if (ctx->bos_token_id >= 0) {
         tokens.push_back(ctx->bos_token_id);
     }
 
-    // UTF-8 byte fallback encoding (works but suboptimal vs SentencePiece)
-    const uint8_t* p = (const uint8_t*)text;
-    while (*p) {
-        tokens.push_back((int32_t)*p);
-        p++;
+    if (!ctx->token_to_id.empty() && !ctx->token_scores.empty()) {
+        // Use SentencePiece Viterbi tokenizer from core/sentencepiece.h
+        core_spm::Config cfg;
+        cfg.unk_id = 0;
+        cfg.utf8_aligned = true;
+        cfg.merge_consecutive_unk = true;
+        auto sp_tokens = core_spm::tokenize(text, ctx->token_to_id, ctx->token_scores, cfg, true);
+        tokens.insert(tokens.end(), sp_tokens.begin(), sp_tokens.end());
+    } else {
+        // Byte-level fallback (works but suboptimal)
+        IRODORI_DBG("[irodori] WARNING: no SentencePiece vocab loaded, using byte fallback\n");
+        const uint8_t* p = (const uint8_t*)text;
+        while (*p) {
+            tokens.push_back((int32_t)*p);
+            p++;
+        }
     }
+
     return tokens;
 }
 
@@ -842,6 +855,34 @@ struct irodori_tts_context* irodori_tts_init_from_file(const char* path_model, s
     hp.cfg_scale_speaker = core_gguf::kv_f32(meta, "irodori.cfg_scale_speaker", hp.cfg_scale_speaker);
     hp.sample_rate = core_gguf::kv_i32(meta, "irodori.sample_rate", hp.sample_rate);
     hp.codec_hop_length = core_gguf::kv_i32(meta, "irodori.codec_hop_length", hp.codec_hop_length);
+
+    // Load tokenizer from GGUF metadata
+    {
+        auto vocab_strs = core_gguf::kv_str_array(meta, "tokenizer.ggml.tokens");
+        ctx->bos_token_id = core_gguf::kv_i32(meta, "tokenizer.ggml.bos_token_id", -1);
+        ctx->pad_token_id = core_gguf::kv_i32(meta, "tokenizer.ggml.pad_token_id", -1);
+
+        if (!vocab_strs.empty()) {
+            ctx->vocab.resize(vocab_strs.size());
+            for (size_t i = 0; i < vocab_strs.size(); i++) {
+                ctx->vocab[i] = vocab_strs[i];
+                ctx->token_to_id[vocab_strs[i]] = (int32_t)i;
+            }
+            // Load scores
+            auto scores = core_gguf::kv_f32_array(meta, "tokenizer.ggml.scores");
+            if (!scores.empty()) {
+                ctx->token_scores = scores;
+            }
+            if (ctx->verbosity >= 1) {
+                std::fprintf(stderr, "[irodori] tokenizer: %zu tokens, %zu scores, bos=%d, pad=%d\n", ctx->vocab.size(),
+                             ctx->token_scores.size(), ctx->bos_token_id, ctx->pad_token_id);
+            }
+        } else {
+            if (ctx->verbosity >= 1) {
+                std::fprintf(stderr, "[irodori] WARNING: no tokenizer in GGUF, using byte fallback\n");
+            }
+        }
+    }
 
     core_gguf::free_metadata(meta);
 
