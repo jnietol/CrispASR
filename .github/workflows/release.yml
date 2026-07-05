@@ -343,6 +343,12 @@ jobs:
           cmake --build build-libs --config Release -j $(nproc) --target crispasr-lib
 
       - name: Package
+        # This job runs inside the rocm/dev-ubuntu-22.04 container, where GitHub
+        # Actions defaults `run:` to `sh` (dash). `set -o pipefail` is a bashism
+        # that dash rejects on line 1 ("Illegal option -o pipefail" → exit 2),
+        # which is what kept this HIP libs asset persistently failing to package
+        # even though the build succeeds. Pin bash (present in the image).
+        shell: bash
         run: |
           set -euo pipefail
           OUT=release/libcrispasr-linux-x86_64-hip
