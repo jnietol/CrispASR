@@ -10,6 +10,17 @@ If a lesson is still "live" (affects current work), it's linked from
 
 ---
 
+## Flow-matching DiT with JointAttention REQUIRES attention masking even for unconditional generation — skipping masked KV tokens silently corrupts output (2026-07)
+
+Porting Irodori-TTS (RF-DiT flow-matching TTS with JointAttention over self + text + speaker context), the text encoder reached cos=0.9995 parity and single-step DiT v_pred reached cos=0.9984, yet the 40-step ODE produced garbage audio (random language hallucinations on ASR roundtrip). The root cause: **the Python model always includes speaker KV in the JointAttention, even when unconditional (no speaker reference), with an attention mask that has -inf for speaker positions**. The C++ initially skipped speaker KV entirely (no speaker state → don't concat), which changed the KV sequence length and thus the softmax distribution. Even though masked tokens get zero attention weight in Python, their presence in the denominator affects all other weights.
+
+**Fix:** pass `mask` to `ggml_flash_attn_ext` (F16 tensor with 0.0 for attend, -inf for masked positions). Must be `GGML_TYPE_F16` — F32 asserts. Shape `(n_kv, n_batch)` matching the KV sequence length including masked positions.
+
+**Lesson:** when porting a model that uses attention masking, you CANNOT skip masked tokens as an optimization — you must include them with proper masking. `ggml_flash_attn_ext(q, k, v, nullptr, ...)` does NOT mean "no masking needed" — it means "full bidirectional attention over all KV positions". If the upstream model uses `attn_mask` to selectively ignore positions, the C++ must replicate this exactly.
+
+**Corollary:** single-step parity (cos≈0.999) is NECESSARY but NOT SUFFICIENT for flow-matching models. The ODE trajectory is exponentially sensitive to attention distribution differences. A per-step cos of 0.9984 sounds high but accumulates to cos≈0.94 over 40 steps, which is fatal for flow-matching TTS. The ASR roundtrip is the true test, not the per-step cosine.
+
+
 ## The Mimi codec transformer must be causal — non-causal silently truncates long audio; the >250-frame WER A/B settled it (2026-07)
 
 Sweeping CrispASR for the CrispEmbed `deepseek_ocr2` bug class (a masked attention replaced by
