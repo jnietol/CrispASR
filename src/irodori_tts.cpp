@@ -622,7 +622,7 @@ static void apply_low_rank_adaln(ggml_context* ctx, const irodori_low_rank_adaln
 static ggml_tensor* build_dit_block_graph(ggml_context* ctx, const irodori_tts_context* model,
                                           const irodori_dit_block_weights& blk, ggml_tensor* x, ggml_tensor* cond_embed,
                                           ggml_tensor* text_state, int T_text, ggml_tensor* spk_state, int T_ref,
-                                          int T_latent, ggml_tensor* pos_ids) {
+                                          int T_latent, ggml_tensor* pos_ids, ggml_tensor* attn_mask) {
     const auto& hp = model->hparams;
     int hd = hp.head_dim();
     int nh = hp.num_heads;
@@ -735,7 +735,8 @@ static ggml_tensor* build_dit_block_graph(ggml_context* ctx, const irodori_tts_c
     // Concatenate K and V along sequence dim (dim=1): (hd, T_total, nh)
     ggml_tensor* k_cat = ggml_concat(ctx, k_self, k_text, 1);
     ggml_tensor* v_cat = ggml_concat(ctx, v_self, v_text, 1);
-    if (k_spk && v_spk) {
+
+    if (k_spk && v_spk && T_ref > 0) {
         k_spk = ggml_reshape_3d(ctx, k_spk, hd, nh, T_ref);
         k_spk = ggml_rms_norm(ctx, k_spk, hp.norm_eps);
         k_spk = ggml_mul(ctx, k_spk, ggml_cast(ctx, blk.k_norm, GGML_TYPE_F32));
@@ -746,8 +747,10 @@ static ggml_tensor* build_dit_block_graph(ggml_context* ctx, const irodori_tts_c
         v_cat = ggml_concat(ctx, v_cat, v_spk, 1);
     }
 
-    // Flash attention: Q(hd, T_q, nh), K(hd, T_kv, nh), V(hd, T_kv, nh)
-    ggml_tensor* attn_out = ggml_flash_attn_ext(ctx, q, k_cat, v_cat, nullptr, 1.0f / std::sqrt((float)hd), 0.0f, 0.0f);
+    // Flash attention with mask (mask passed from run_dit_forward)
+    // mask: (T_kv, T_q) — 0.0 for attend, -inf for masked speaker positions
+    ggml_tensor* attn_out =
+        ggml_flash_attn_ext(ctx, q, k_cat, v_cat, attn_mask, 1.0f / std::sqrt((float)hd), 0.0f, 0.0f);
     attn_out = ggml_cast(ctx, attn_out, GGML_TYPE_F32);
     attn_out = ggml_reshape_2d(ctx, attn_out, D, T_latent);
 
@@ -1129,10 +1132,18 @@ static std::vector<float> run_dit_forward(irodori_tts_context* ctx, const float*
     ggml_set_input(pos_latent);
 
     ggml_tensor* spk_in = nullptr;
+    ggml_tensor* attn_mask_in = nullptr;
     if (spk_state_data && T_ref > 0) {
         spk_in = ggml_new_tensor_2d(g, GGML_TYPE_F32, hp.speaker_dim, T_ref);
         ggml_set_name(spk_in, "spk_state");
         ggml_set_input(spk_in);
+
+        // Attention mask: (T_kv, T_latent) where T_kv = T_latent + T_text + T_ref
+        // Values: 0.0 for attend, -inf for masked positions. Must be F16!
+        int T_kv = T_latent + T_text + T_ref;
+        attn_mask_in = ggml_new_tensor_2d(g, GGML_TYPE_F16, T_kv, T_latent);
+        ggml_set_name(attn_mask_in, "attn_mask");
+        ggml_set_input(attn_mask_in);
     }
 
     // Build graph: in_proj → DiT blocks → out_norm → out_proj
@@ -1150,7 +1161,7 @@ static std::vector<float> run_dit_forward(irodori_tts_context* ctx, const float*
     for (int i = 0; i < n_build_layers; i++) {
         IRODORI_DBG("[irodori]     building DiT block %d...\n", i);
         x = build_dit_block_graph(g, ctx, w.dit_blocks[i], x, cond_in, text_in, T_text, spk_in, T_ref, T_latent,
-                                  pos_latent);
+                                  pos_latent, attn_mask_in);
         IRODORI_DBG("[irodori]     DiT block %d built OK\n", i);
     }
 
@@ -1193,6 +1204,20 @@ static std::vector<float> run_dit_forward(irodori_tts_context* ctx, const float*
         for (int i = 0; i < T_latent; i++)
             pos_data[i] = i;
         ggml_backend_tensor_set(pos_latent, pos_data.data(), 0, T_latent * sizeof(int32_t));
+    }
+    if (attn_mask_in && attn_mask_in->buffer) {
+        // Build mask (F16): 0.0 for self+text (attend), -inf for speaker (mask out)
+        int T_kv = T_latent + T_text + T_ref;
+        std::vector<ggml_fp16_t> mask_data(T_kv * T_latent);
+        ggml_fp16_t zero_f16 = ggml_fp32_to_fp16(0.0f);
+        ggml_fp16_t neginf_f16 = ggml_fp32_to_fp16(-INFINITY);
+        for (int q = 0; q < T_latent; q++) {
+            for (int k = 0; k < T_kv; k++) {
+                bool is_speaker = (k >= T_latent + T_text);
+                mask_data[q * T_kv + k] = is_speaker ? neginf_f16 : zero_f16;
+            }
+        }
+        ggml_backend_tensor_set(attn_mask_in, mask_data.data(), 0, mask_data.size() * sizeof(ggml_fp16_t));
     }
 
     ggml_backend_graph_compute(ctx->backend, gf);
@@ -1322,13 +1347,14 @@ int irodori_tts_synthesize(struct irodori_tts_context* ctx, const char* text, fl
     }
 
     // ── Step 2: Encode speaker reference ──
-    // For unconditional generation (no reference), don't pass speaker state.
-    // Python masks it with attn_mask=False; since C++ flash_attn doesn't
-    // support masking, we skip speaker KV entirely (equivalent when mask is
-    // all-False: attention doesn't attend to speaker positions).
-    // TODO: when ref_latent is set, run speaker encoder and pass it.
-    int T_ref = 0;
-    std::vector<float> spk_state;
+    // For unconditional (no_ref), pass 1-frame zeroed speaker with all-False mask.
+    // The Python always runs speaker encoder on zeros and masks via attn_mask.
+    // We pass zeros (speaker encoder output doesn't matter since mask is -inf)
+    // but MUST include it in KV so attention shape matches Python.
+    int T_ref = 1;
+    std::vector<float> spk_state(T_ref * hp.speaker_dim, 0.0f);
+    bool spk_mask_all_false = true; // all speaker positions masked out
+    // TODO: when ref_latent is set, run speaker encoder and set spk_mask_all_false=false
 
     // ── Step 3: Euler RF ODE solver ──
     IRODORI_DBG("[irodori] ODE solver: %d steps\n", ctx->ode_steps);
