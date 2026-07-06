@@ -61,6 +61,7 @@ public:
         fp.n_threads = p.n_threads;
         fp.verbosity = p.no_prints ? 0 : 1;
         fp.seed = p.seed;
+        fp.use_gpu = p.use_gpu;
 
         ctx_ = irodori_tts_init_from_file(p.model.c_str(), fp);
         if (!ctx_) {

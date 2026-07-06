@@ -24,6 +24,7 @@
 #include "core/dac_decoder.h"
 #include "core/ffn.h"
 #include "core/gguf_loader.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
 #include "core/sentencepiece.h"
 
 #include <algorithm>
@@ -204,8 +205,14 @@ struct irodori_tts_context {
     irodori_hparams hparams;
     irodori_weights weights;
 
-    // ggml state
+    // ggml state. `backend` runs the encoders/DiT/ODE graphs (GPU when
+    // use_gpu); `codec_backend` runs the DAC-VAE decode — same as `backend`
+    // except on Vulkan, where conv-heavy codec graphs have a history of
+    // gallocr corruption (TADA #192) and default to CPU. All graphs are
+    // single-backend gallocr, weights resident on their graph's backend.
     ggml_backend_t backend = nullptr;
+    ggml_backend_t backend_cpu = nullptr;
+    ggml_backend_t codec_backend = nullptr;
     ggml_backend_buffer_t buf_weights = nullptr;
     ggml_context* w_ctx = nullptr; // weight tensor context (kept alive)
 
@@ -872,14 +879,46 @@ struct irodori_tts_context* irodori_tts_init_from_file(const char* path_model, s
     ctx->duration_scale = params.duration_scale > 0 ? params.duration_scale : 1.0f;
     ctx->max_seconds = params.max_seconds > 0 ? params.max_seconds : 30.0f;
 
-    // Initialize CPU backend
-    ctx->backend = ggml_backend_cpu_init();
-    if (!ctx->backend) {
+    // Initialize backends. use_gpu picks the best GPU (Metal/CUDA/Vulkan);
+    // graphs are single-backend gallocr, so weights load onto the compute
+    // backend directly. CRISPASR_IRODORI_CPU=1 forces CPU regardless.
+    ctx->backend_cpu = ggml_backend_cpu_init();
+    if (!ctx->backend_cpu) {
         std::fprintf(stderr, "[irodori] failed to init CPU backend\n");
         delete ctx;
         return nullptr;
     }
-    ggml_backend_cpu_set_n_threads(ctx->backend, ctx->n_threads);
+    ggml_backend_cpu_set_n_threads(ctx->backend_cpu, ctx->n_threads);
+
+    const bool force_cpu = [] {
+        const char* e = std::getenv("CRISPASR_IRODORI_CPU");
+        return e && *e && *e != '0';
+    }();
+    ctx->backend = (params.use_gpu && !force_cpu) ? crispasr_init_gpu_backend() : nullptr;
+    if (ctx->backend && ggml_backend_is_cpu(ctx->backend)) {
+        ggml_backend_free(ctx->backend); // CPU-only build: keep the threaded instance
+        ctx->backend = nullptr;
+    }
+    if (!ctx->backend)
+        ctx->backend = ctx->backend_cpu;
+
+    // Codec backend: GPU except on Vulkan (conv-heavy codec graphs have a
+    // history of gallocr corruption there — TADA #192); CRISPASR_IRODORI_
+    // CODEC_GPU=1 / CRISPASR_IRODORI_CODEC_CPU=1 force either way.
+    ctx->codec_backend = ctx->backend;
+    if (ctx->backend != ctx->backend_cpu) {
+        ggml_backend_dev_t dev = ggml_backend_get_device(ctx->backend);
+        ggml_backend_reg_t reg = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;
+        const bool is_vulkan = reg && std::strcmp(ggml_backend_reg_name(reg), "Vulkan") == 0;
+        const char* cg = std::getenv("CRISPASR_IRODORI_CODEC_GPU");
+        const char* cc = std::getenv("CRISPASR_IRODORI_CODEC_CPU");
+        const bool codec_gpu = (cg && *cg && *cg != '0') || (!is_vulkan && !(cc && *cc && *cc != '0'));
+        if (!codec_gpu)
+            ctx->codec_backend = ctx->backend_cpu;
+    }
+    if (ctx->verbosity >= 1 && ctx->backend != ctx->backend_cpu)
+        std::fprintf(stderr, "[irodori] backend: %s (codec on %s)\n", ggml_backend_name(ctx->backend),
+                     ctx->codec_backend == ctx->backend_cpu ? "CPU" : ggml_backend_name(ctx->codec_backend));
 
     // Load GGUF
     if (ctx->verbosity >= 1) {
@@ -1013,8 +1052,10 @@ void irodori_tts_free(struct irodori_tts_context* ctx) {
         ggml_backend_buffer_free(ctx->buf_weights);
     if (ctx->w_ctx)
         ggml_free(ctx->w_ctx);
-    if (ctx->backend)
+    if (ctx->backend && ctx->backend != ctx->backend_cpu)
         ggml_backend_free(ctx->backend);
+    if (ctx->backend_cpu)
+        ggml_backend_free(ctx->backend_cpu);
     delete ctx;
 }
 
@@ -1063,9 +1104,10 @@ int irodori_tts_set_codec_path(struct irodori_tts_context* ctx, const char* code
     for (int i = 0; i < 5; i++)
         dac.config.decoder_channels[i] = dacvae_channels[i];
 
-    // Load weights
+    // Load weights onto the codec's compute backend (see init for the
+    // GPU/CPU choice).
     core_gguf::WeightLoad wl;
-    if (!core_gguf::load_weights(codec_gguf_path, ctx->backend, "dacvae_codec", wl)) {
+    if (!core_gguf::load_weights(codec_gguf_path, ctx->codec_backend, "dacvae_codec", wl)) {
         std::fprintf(stderr, "[irodori] failed to load codec weights\n");
         return -1;
     }
@@ -1691,7 +1733,7 @@ int irodori_tts_synthesize(struct irodori_tts_context* ctx, const char* text, fl
         ggml_cgraph* gf = ggml_new_graph_custom(g, n_dec_tensors, false);
         ggml_build_forward_expand(gf, h);
 
-        ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(ctx->backend));
+        ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(ctx->codec_backend));
         if (!ggml_gallocr_reserve(galloc, gf) || !ggml_gallocr_alloc_graph(galloc, gf)) {
             std::fprintf(stderr, "[irodori] ERROR: DAC-VAE decode graph alloc failed\n");
             ggml_gallocr_free(galloc);
@@ -1708,7 +1750,7 @@ int irodori_tts_synthesize(struct irodori_tts_context* ctx, const char* text, fl
         // Set latent input (x_t after ODE is in ggml (D, T) layout)
         ggml_backend_tensor_set(lat_in, x_t.data(), 0, x_t.size() * sizeof(float));
 
-        ggml_backend_graph_compute(ctx->backend, gf);
+        ggml_backend_graph_compute(ctx->codec_backend, gf);
 
         // Read PCM output
         int n_pcm = (int)h->ne[0];
