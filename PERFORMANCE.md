@@ -2932,9 +2932,12 @@ core infrastructure.
   mel filterbank recomputed per call
 
 **Pyannote** (`pyannote_seg.cpp`):
-- Has: direct tensor pointer access (correct for tiny model), CPU-forced
-- Gap: forward/backward LSTM serial (could parallel), SincNet conv scalar,
-  no context caching
+- Has: ggml-graph forward (§224, default): SincNet + classifier as CPU-backend
+  graphs, LSTM input projections batched per layer/dir as one mul_mat, the
+  sequential recurrence dual-threaded (one thread per direction). 4.38 s →
+  0.55 s on 31.5 s audio (M1), output frame-identical.
+  `CRISPASR_PYANNOTE_LEGACY=1` restores the scalar path (A/B ground truth).
+- Gap: no context caching; recurrence R@h still plain (autovec) loops
 
 #### LID
 
@@ -2943,9 +2946,12 @@ core infrastructure.
 - Gap: ASP + FC layers scalar CPU (9216×T dominant), BN not pre-folded
 
 **Silero LID** (`silero_lid.cpp`):
-- Has: GPU weight loading, learned STFT front-end
-- Gap: **entire forward pass is scalar CPU** despite GPU init — 8 stages
-  × O(T²) attention loops
+- Has: ggml-graph forward (§224, default): CPU frontend (log-mag precision) +
+  sched encoder (GPU on Metal/CUDA; auto-routed to CPU on Vulkan pending an
+  upstream mul_mat fix), 30 s slice cap. 103 ms Metal / 183 ms CPU-ggml vs
+  241 ms Accelerate / 1014 ms scalar legacy (11 s audio, M1).
+  `CRISPASR_SILERO_LID_LEGACY=1` restores the scalar path.
+- Gap: Vulkan GPU blocked on the ggml-vulkan FFN MUL_MAT miscompute
 
 **FireRed LID** (`firered_lid.cpp`):
 - Has: reuses full firered_asr runtime
@@ -2954,9 +2960,14 @@ core infrastructure.
 #### Speaker
 
 **TitaNet** (`titanet.cpp`):
-- Has: BN pre-folding at init, pre-emphasis, L2 normalization
-- Gap: **all inference is scalar CPU loops** (depthwise conv, pointwise
-  conv, SE, ASP TDNN 9216×T — no ggml graph, no GPU despite init_best)
+- Has: BN pre-folding at init, pre-emphasis, L2 normalization; ggml-graph
+  forward (§224): full encoder + ASP as one CPU-backend graph, embeddings
+  cos=1.000000 vs legacy. Inverse-default: ggml is default WITHOUT Accelerate
+  (scalar was 106–131 s/embed on M1 → 3.4 s ggml, ~35×); WITH Accelerate the
+  legacy AMX GEMM path stays default (0.7 s vs 3.4 s ggml).
+  `CRISPASR_TITANET_GGML=1` / `CRISPASR_TITANET_LEGACY=1` force either way.
+- Gap: ggml F32 matmul ≪ AMX on Apple (F16 weights would halve bandwidth);
+  segments not batched
 
 #### Translation
 
