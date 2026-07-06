@@ -809,37 +809,44 @@ Not candidates: `crispasr_strip_ascii_punctuation` / `crispasr_lowercase_ascii`
 
 ---
 
-## §177 VibeVoice #171 — remaining layers after the chunking fix (OPEN)
+## §177 VibeVoice #171 — remaining layer: RDNA4/RADV quantized-matmul path (OPEN)
 
-The server/CLI chunking divergence is fixed (§176, `crispasr_tts_chunking.cpp`
-prefix guard). Two layers from GH #171 remain, both needing the reporter's
-RDNA4 box (AMD RX 9070 XT, gfx1201) — we get clean audio on Metal +
-Vulkan/MoltenVK and cannot reproduce locally.
+Fixed so far: server/CLI chunking divergence (§176 prefix guard), the
+voice-prompt KV stride leak (server multi-request degradation — reporter
+confirmed gone at 71f0639), and the quant recipe (pred./at_conn./tts_eos.
+protected, b36248c1+5c8add40, all three HF repos regenerated). The reporter
+retested the regenerated q8_0 (sha256 confirmed = current HF file):
+**still broken, "identical result"** — the recipe was a real hardening but not
+his root cause. Superseded theory: item 1's "coopmat2 flash-attn" — his device
+line says `matrix cores: KHR_coopmat`, i.e. NV_coopmat2 is absent on RADV, so
+`GGML_VK_DISABLE_COOPMAT2=1` was always a no-op there (his earlier "COOPMAT2=1
+fixes it" observations were confounded by the then-unfixed server state leak).
 
-1. **RDNA4 coopmat2 flash-attn garbage.** Confirmed by the reporter:
-   `GGML_VK_DISABLE_COOPMAT2=1` fixes every broken sample. This is the
-   upstream ggml coopmat2 shader on RDNA4 (already filed upstream — see
-   `docs/prompts`/upstream-PR notes #19). **Action:** once upstream lands, or
-   as a stopgap, auto-disable coopmat2 flash-attn for the vibevoice TTS graph
-   on gfx12xx (the `VIBEVOICE_TTS_FLASH_ATTN=0` knob already bisects LM
-   attention; `VIBEVOICE_VAE_BACKEND=cpu` isolates the decoder). Set a safe
-   RDNA4 default rather than relying on the user-set env var.
+Current evidence (2026-07-06):
+- Failure signature: q8_0 breaks, f16 clean, same GPU (RX 9070 XT, RADV
+  GFX1201, `int dot: 1`); Metal + MoltenVK clean on the exact same q8_0 file
+  (fr voice, seed 42, all repro texts, ASR-roundtrip verbatim).
+- The only GPU code paths a q8_0 model takes that an f16 model never touches
+  are the quantized-matmul paths: int-dot MMQ / MMVQ (activations quantized to
+  q8_1) and the KHR_coopmat/scalar dequant matmul variants.
+- Disproof of "q8_1 activation-quant noise" as inherent cause: shipped
+  `GGML_VK_FORCE_INTEGER_DOT_PRODUCT=1` (e2da0d6e, CrispASR patch in vendored
+  ggml-vulkan) which enables int-dot on MoltenVK (extension present, only the
+  "accelerated" bit missing). Forced int-dot + `GGML_VK_FORCE_MMVQ=1` on M1:
+  clean, roundtrips verbatim. So the shader *logic* is fine; suspicion is a
+  RADV GFX1201 shader miscompile (his log: "radv is not a conformant Vulkan
+  implementation, testing use only" — early RDNA4 Mesa support). Vendored ggml
+  base 2026-05-05; no matching upstream correctness fix found since.
 
-2. **Cross-request statefulness** ("1st request correct; after N different
-   sentences the same input gives garbage" — server only, CLI is one
-   synthesize per process). The §176 chunking fix only *de-amplifies* this
-   (removes the 2-calls-per-request multiplier); it is not the root cause.
-   Suspect a scratch / cached voice-prompt KV buffer reused across
-   `vibevoice_synthesize()` calls that a numerically-bad request (RDNA4
-   coopmat2) poisons for subsequent ones — the logs show pos resets to 309
-   and "pre-filled KV from voice prompt" every request, so the leak is likely
-   in a *shared buffer behind* that refill, not the position counter.
-   **Action:** audit `vibevoice_synthesize` for state that survives between
-   calls (voice-KV cache tensors, compute scratch); add a session-level
-   "synthesize is idempotent across calls" test (synthesize A, then B×5, then
-   A again → byte-identical to the first A) on a reproducible backend. Ask the
-   reporter to re-test multi-request after §176 + `GGML_VK_DISABLE_COOPMAT2=1`
-   to see whether a residual leak remains once the numerics are clean.
+**Action:** reporter runs the knob matrix one-at-a-time on a broken sample
+(all env-only, no rebuild): `GGML_VK_DISABLE_INTEGER_DOT_PRODUCT=1`,
+`GGML_VK_DISABLE_MMVQ=1`, `GGML_VK_DISABLE_COOPMAT=1`, `GGML_VK_DISABLE_F16=1`,
+anchor `CRISPASR_N_GPU_LAYERS=0` (TTS LM layers → CPU). Also: Mesa upgrade /
+AMDVLK cross-check. Once one knob is confirmed → device-targeted safe default
+(RADV GFX12xx) in vendored ggml-vulkan + upstream report to ggml-org/llama.cpp
+with the minimal repro. Side note for the thread: his old
+`vibevoice-1.5b-bf16.gguf` predates `--include-decoder`; the current f16 on
+cstr/vibevoice-1.5b-GGUF has the decoder tensors.
 
 ---
 
