@@ -11916,3 +11916,75 @@ keeps the alloc-once reuse; old path stays available for A/B via
 that is allocated once and reused across steps is unsafe on CUDA (and Vulkan) —
 reset+alloc per step; granite_speech is the reference implementation.**
 
+
+## A cached cgraph is invalidated by ANY other graph on its scheduler — reset+alloc per step is NOT enough (#171, 2026-07-06)
+
+The #171 "TTS regression" saga (RDNA4 driver theories, quant-recipe
+hardening, knob matrices — none of it moved the symptom) ended as an
+ASan-proven **heap-use-after-free** reproducible on the first try with a
+CPU-only Debug+ASan build: vibevoice's cached diffusion pred-head graph
+kept `tensor->buffer` pointers into `ctx->sched`'s gallocr compute buffer;
+a mid-generation text-window LM graph on the *same* scheduler grew the
+gallocr (`reallocating CPU buffer from 0.36 MiB to 0.37 MiB` — free + new
+alloc); the next DPM step's `ggml_backend_sched_alloc_graph` of the cached
+graph then read the freed `ggml_backend_buffer` inside
+`ggml_backend_sched_split_graph` (before realloc could have fixed anything).
+Debug builds segfault; **Release builds often survive the stale read and
+silently corrupt activations instead** — same bug, presenting as "broken
+audio", which is why it masqueraded as a model/driver problem for weeks.
+The #184 CUDA "illegal memory access" was the same class via the LM bucket
+graphs (pos/neg CFG steps alternating two cached graphs of different Lk on
+one shared `lm_step_sched`).
+
+**The invariant: only the graph most recently allocated on a scheduler has
+valid buffer pointers.** This *sharpens* the #220 rule ("reset+alloc the
+sched every step"): per-step reset+alloc of the *same* graph is fine, but
+it does NOT protect a cached graph from *other* graphs allocated on the
+same scheduler in between — the UAF read happens during split_graph inside
+the very alloc that would re-set the pointers. Fixes that satisfy the
+invariant (c96c4997): give each cached graph a **dedicated scheduler**
+(fixed topology → its gallocr never reallocs under it), and when several
+cached graphs must share one sched, rebuild the incoming graph whenever it
+was not the last one allocated there.
+
+**But measure before keeping any graph cache at all.** A same-seed 4-way
+A/B (CPU Release, short + 58-token synthesis) showed the vibevoice pred +
+bucket caches were worth **0% end-to-end** (diffusion compute dominates
+graph build ~100×) and all four on/off combinations produced
+**byte-identical WAVs** — the entire bug class (#171 segfault, #184 CUDA,
+#47 Metal/Vulkan asserts) guarded an optimization worth nothing, exactly
+like the chatterbox CFM graph cache (§208 dud). Deleting the caches
+outright is the recorded follow-up; until then, `CRISPASR_VIBEVOICE_
+REUSE_PRED_GRAPH=0/1` and `CRISPASR_VIBEVOICE_LM_BUCKETS=0/1` A/B them.
+
+## ASR roundtrip does not validate audio ONSETS; reproduce with the original pipeline before debugging your runtime (#171, 2026-07-06)
+
+The residual #171 complaint ("music plays before the voice") survived every
+runtime theory because our acceptance tests could not see it: the vibevoice
+output opened with ~1 s of BGM, yet **whisper roundtripped the full text
+perfectly** (ASR skips non-speech prefixes) and spectral heuristics
+(RMS/centroid/syllabic modulation) also read as speech. Only a human
+listening caught it — on outputs we had repeatedly declared "clean".
+When a report says "noise/music at the start or end", roundtrip is
+necessary but proves nothing about prefixes/suffixes: have a human listen,
+or ASR/classify the first second in isolation. (This is also how the
+at_dec quant-protection call (5c8add40) was mis-validated: "roundtrips
+perfectly" hid the same artifact.)
+
+What actually closed the case, in one evening, was the blueprint rule
+applied to *behavior* instead of tensors: run **the original pipeline**
+(`microsoft/VibeVoice` `demo/realtime_model_inference_from_file.py`, their
+`fr-Spk1_woman.pt`, same text, MPS) — it produced the **same music**,
+proving the runtime faithful and the artifact inherent model behavior
+(documented by the maintainers: spontaneous BGM from short inputs, small
+models, intro-style text, BGM-carrying voice prompts; BGM in training data
+is intentional per the paper). Two supporting checks worth reusing:
+(a) verify reporter "regression" claims with FIXED files — a v0.7.1 binary
+on today's files produced the same audio as main (corr 0.84 at the trim
+lag), so "worked before v0.7.2" was a different-files effect; (b) when the
+official pipeline needs to run locally: `USE_TF=0` (miniconda TF import is
+broken), `HF_HOME` override (`~/.cache/huggingface` is a dangling SSD
+symlink on the M1), venv at `~/code/VibeVoice/.venv`. Mitigation shipped as
+knobs, not fixes: `--tts-cfg-scale` (5f3046a7) + existing `--seed`; the
+dominant lever is the voice prompt itself (official fr prompts are
+BGM-prone; emma was clean).
