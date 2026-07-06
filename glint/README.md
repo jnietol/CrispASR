@@ -34,4 +34,4 @@ is behind glint main. To sync by hand, run `tools/sync-glint.sh` —
 never `cp` from a glint working tree (it may hold another session's
 WIP; the script always takes a committed state).
 
-Synced at upstream commit: `6ae5a8910ea6da66f079c04b2e0c856f463254e9` (ci: notify CrispASR on push to main (repository_dispatch glint-push)).
+Synced at upstream commit: `ed237edf485a11e7e91ef8865482be0075ce213d` (docs: README AAC feature bullet reflects psy shaping + per-band M/S).
