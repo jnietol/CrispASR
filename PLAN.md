@@ -7100,3 +7100,41 @@ CPU-pinning after ggml removed sched auto-copy of CPU weights):
 - Healthy: mimo_asr (proper split-load with embed carve-out), fireredpunc,
   ecapa trunk, firered_vad/titanet weight READS (tensor_get, device-safe),
   lid_cld3/lid_fasttext (tiny text models).
+
+## §225 glint encoder in-tree — TTS/S2S MP3 + AAC output everywhere (DONE)
+
+Integrated our clean-room MP3 + AAC-LC encoder (sibling `glint` repo) as an
+in-tree copy at `glint/` (encoder core only, ~25 files; same
+develop-there/sync-here relationship as `ggml/`). Static lib, linked into `crispasr-cli`; SIMD
+kernels compile-time guarded + runtime dispatched, so no special flags.
+
+- `examples/cli/crispasr_mp3_writer.h` — header-only `crispasr_make_mp3()`:
+  mono CBR 128 kbps, `GLINT_QUALITY_NORMAL`, ID3v2 AI-provenance tag
+  prepended (`crispasr_make_id3v2_ai_tag`), non-MP3 rates linearly
+  resampled to nearest native rate (all TTS backends emit native rates).
+- Server `response_format=mp3` no longer needs libmp3lame — the 400
+  `codec_not_available` path is gone; both /v1/audio/speech and S2S routes
+  use the shared helper.
+- CLI: `--tts-output out.mp3` / `--s2s-output out.mp3` dispatch on
+  extension (`crispasr_write_synth_audio`); C2PA signing stays WAV-only
+  (warns on .mp3 instead of silently dropping the manifest).
+- libmp3lame kept as optional fallback: auto-used if glint fails, forced
+  via `CRISPASR_MP3_ENCODER=lame` (A/B); forced-lame failure falls back to
+  glint.
+- Verified: unit tests (`test_tts_provenance` `[mp3]` — ID3 prefix, frame
+  sync, CBR size, resample, invalid input), ffmpeg decode roundtrip of a
+  440 Hz sine (peak 440.0 Hz, RMS/duration exact), live pocket-tts →
+  `.mp3` → moonshine ASR roundtrip returns the input text verbatim, and
+  forced-lame path.
+- **AAC-LC (experimental)** also in: upstream's phase-1 AAC encoder
+  (long blocks, CBR-average, ADTS) shipped while this landed, so the
+  in-tree copy carries it — `response_format=aac` (audio/aac) and
+  `--tts-output out.aac` via `crispasr_aac_writer.h` (mono, 96 kbps
+  default, ID3v2 provenance tag prefixed — decoders skip it). Verified:
+  ADTS syncword unit tests, ffmpeg decode (LC profile, 440 Hz exact),
+  live pocket-tts → .aac → ffmpeg-decode → moonshine ASR verbatim.
+  Note: crispasr's *reader* can't ingest .aac without the libav
+  transcode build (pre-existing; plain ffmpeg .aac fails identically).
+- Streaming TTS still rejects mp3/aac (full-file encoding); glint has a
+  callback streaming API — chunked `audio/mpeg` streaming is a natural
+  follow-up if wanted.

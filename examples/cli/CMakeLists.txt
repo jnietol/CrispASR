@@ -351,16 +351,20 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/crispasr_backend_parler.cpp")
     target_link_libraries(${TARGET} PRIVATE parler-tts)
 endif()
 
-# Optional MP3 output (libmp3lame)
+# MP3 output — in-tree glint encoder (glint/), always available.
+target_link_libraries(${TARGET} PRIVATE glint)
+
+# Optional libmp3lame fallback (used if glint fails, or forced with
+# CRISPASR_MP3_ENCODER=lame for A/B comparisons)
 find_library(LAME_LIBRARY NAMES mp3lame)
 find_path(LAME_INCLUDE_DIR lame/lame.h)
 if (LAME_LIBRARY AND LAME_INCLUDE_DIR)
     target_link_libraries(${TARGET} PRIVATE ${LAME_LIBRARY})
     target_include_directories(${TARGET} PRIVATE ${LAME_INCLUDE_DIR})
     target_compile_definitions(${TARGET} PRIVATE CRISPASR_HAVE_LAME=1)
-    message(STATUS "MP3 output enabled (libmp3lame)")
+    message(STATUS "MP3 output: glint + libmp3lame fallback")
 else()
-    message(STATUS "MP3 output disabled (libmp3lame-dev not found)")
+    message(STATUS "MP3 output: glint (libmp3lame fallback not found)")
 endif()
 
 # Optional Opus output (libopus + libogg for OGG container)

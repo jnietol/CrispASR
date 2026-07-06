@@ -1128,13 +1128,13 @@ static void whisper_print_usage(int /*argc*/, char** argv, const whisper_params&
     fprintf(stderr, "\nSpeech-to-speech (S2S) options:\n");
     fprintf(stderr, "             --s2s                   [%-7s] speech-to-speech mode: audio input → audio output\n",
             params.s2s ? "true" : "false");
-    fprintf(stderr, "             --s2s-output FNAME      [%-7s] output WAV path (default: s2s_output.wav)\n",
+    fprintf(stderr, "             --s2s-output FNAME      [%-7s] output path: .wav, .mp3, .aac (default: s2s_output.wav)\n",
             params.s2s_output.c_str());
 
     fprintf(stderr, "\nText-to-speech (TTS) options:\n");
     fprintf(stderr,
-            "             --tts \"TEXT\"            synthesise TEXT and write WAV to --tts-output (24 kHz mono)\n");
-    fprintf(stderr, "             --tts-output FNAME      [%-7s] output WAV path (default: tts_output.wav)\n",
+            "             --tts \"TEXT\"            synthesise TEXT and write audio to --tts-output (24 kHz mono)\n");
+    fprintf(stderr, "             --tts-output FNAME      [%-7s] output path: .wav, .mp3, .aac (default: tts_output.wav)\n",
             params.tts_output.c_str());
     fprintf(stderr,
             "             --voice PATH            [%-7s] voice prompt: GGUF voice pack or reference WAV\n"

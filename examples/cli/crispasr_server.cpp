@@ -50,6 +50,8 @@
 #include "crispasr_watermark.h"
 #include "crispasr_watermark_dispatch.h"
 #include "crispasr_wav_writer.h"
+#include "crispasr_mp3_writer.h" // MP3 output via in-tree glint encoder
+#include "crispasr_aac_writer.h" // AAC-LC (ADTS) output via in-tree glint encoder
 #include "../server/httplib.h"
 #include "../json.hpp"
 
@@ -83,10 +85,9 @@
 #include <unistd.h> // mkstemp, close, unlink
 #endif
 
-// 75e: optional MP3/Opus output encoding (compile-time gated)
-#ifdef CRISPASR_HAVE_LAME
-#include <lame/lame.h>
-#endif
+// 75e: optional Opus output encoding (compile-time gated). MP3 is
+// always available via the in-tree glint encoder (crispasr_mp3_writer.h,
+// with an optional libmp3lame fallback behind CRISPASR_HAVE_LAME).
 #ifdef CRISPASR_HAVE_OPUS
 #include <opus/opus.h>
 #endif
@@ -623,57 +624,10 @@ static transcription_result do_transcribe(const httplib::MultipartFormData& audi
 // tests can exercise it without linking the server translation unit.
 
 // ---------------------------------------------------------------------------
-// 75e: MP3 / Opus encoding helpers (compile-time gated)
+// 75e: MP3 / Opus encoding helpers. MP3 (crispasr_make_mp3, glint) lives
+// in crispasr_mp3_writer.h and is always available; Opus stays gated on
+// libopus.
 // ---------------------------------------------------------------------------
-
-#ifdef CRISPASR_HAVE_LAME
-// Encode float32 mono PCM to MP3 via libmp3lame. Returns empty on failure.
-static std::string crispasr_encode_mp3(const float* pcm, int n_samples, int sample_rate, int bitrate_kbps = 128) {
-    lame_t lame = lame_init();
-    if (!lame)
-        return {};
-    lame_set_in_samplerate(lame, sample_rate);
-    lame_set_num_channels(lame, 1);
-    lame_set_out_samplerate(lame, sample_rate);
-    lame_set_brate(lame, bitrate_kbps);
-    lame_set_quality(lame, 2); // 2 = high quality
-    lame_set_mode(lame, MONO);
-    if (lame_init_params(lame) < 0) {
-        lame_close(lame);
-        return {};
-    }
-
-    // Convert float [-1,1] → int16
-    std::vector<short> s16(n_samples);
-    for (int i = 0; i < n_samples; i++) {
-        float v = pcm[i];
-        if (v > 1.0f)
-            v = 1.0f;
-        else if (v < -1.0f)
-            v = -1.0f;
-        s16[i] = (short)(v * 32767.0f);
-    }
-
-    // Worst-case: 1.25 * n + 7200 (lame docs)
-    size_t mp3_buf_size = (size_t)(1.25f * (float)n_samples) + 7200;
-    std::vector<unsigned char> mp3_buf(mp3_buf_size);
-
-    int written = lame_encode_buffer(lame, s16.data(), nullptr, n_samples, mp3_buf.data(), (int)mp3_buf_size);
-    if (written < 0) {
-        lame_close(lame);
-        return {};
-    }
-    int flushed = lame_encode_flush(lame, mp3_buf.data() + written, (int)(mp3_buf_size - (size_t)written));
-    lame_close(lame);
-    if (flushed < 0)
-        return {};
-
-    // Prepend ID3v2 tag with AI-provenance metadata (TXXX frames)
-    std::string id3 = crispasr_make_id3v2_ai_tag();
-    id3.append((const char*)mp3_buf.data(), (size_t)(written + flushed));
-    return id3;
-}
-#endif // CRISPASR_HAVE_LAME
 
 #ifdef CRISPASR_HAVE_OPUS
 // Encode float32 mono PCM to raw Opus frames concatenated with 2-byte
@@ -1427,7 +1381,7 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
     //     "voice":           "<name in --voice-dir>",    (optional)
     //     "instructions":    "<voice direction prose>",  (optional, applied via params.tts_instruct)
     //     "speed":           0.25 .. 4.0,                (optional, default 1.0)
-    //     "response_format": "wav"|"pcm"|"f32"|"mp3"|"opus" (optional, default "wav")
+    //     "response_format": "wav"|"pcm"|"f32"|"mp3"|"aac"|"opus" (optional, default "wav")
     //   }
     //
     // Returns:
@@ -1534,20 +1488,11 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
         }
         std::string response_format = body.value("response_format", std::string("wav"));
         if (response_format != "wav" && response_format != "pcm" && response_format != "f32" &&
-            response_format != "mp3" && response_format != "opus") {
-            json_error(res, 400, "response_format must be one of 'wav', 'pcm', 'f32', 'mp3', or 'opus'",
+            response_format != "mp3" && response_format != "aac" && response_format != "opus") {
+            json_error(res, 400, "response_format must be one of 'wav', 'pcm', 'f32', 'mp3', 'aac', or 'opus'",
                        "unsupported_response_format", "response_format");
             return;
         }
-#ifndef CRISPASR_HAVE_LAME
-        if (response_format == "mp3") {
-            json_error(res, 400,
-                       "mp3 output requires libmp3lame; rebuild with -DCMAKE_PREFIX_PATH pointing at lame, "
-                       "or install libmp3lame-dev",
-                       "codec_not_available", "response_format");
-            return;
-        }
-#endif
 #ifndef CRISPASR_HAVE_OPUS
         if (response_format == "opus") {
             json_error(res, 400,
@@ -1653,8 +1598,8 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
         // incrementally. Speed resampling is still applied per-chunk.
         if (stream) {
             // Streaming only supports PCM formats (wav/pcm/f32).
-            // mp3/opus require full-file encoding — reject with 400.
-            if (response_format == "mp3" || response_format == "opus") {
+            // mp3/aac/opus require full-file encoding — reject with 400.
+            if (response_format == "mp3" || response_format == "aac" || response_format == "opus") {
                 json_error(res, 400,
                            "streaming is not supported with response_format='" + response_format +
                                "'; use 'pcm', 'wav', or 'f32', or set stream=false",
@@ -1898,15 +1843,20 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
             // a self-describing container.
             std::string raw = crispasr_make_pcm_int16_le(pcm.data(), (int)pcm.size());
             res.set_content(std::move(raw), "audio/pcm");
-#ifdef CRISPASR_HAVE_LAME
         } else if (response_format == "mp3") {
-            std::string mp3 = crispasr_encode_mp3(pcm.data(), (int)pcm.size(), sr_out);
+            std::string mp3 = crispasr_make_mp3(pcm.data(), (int)pcm.size(), sr_out);
             if (mp3.empty()) {
                 json_error(res, 500, "MP3 encoding failed", "encoding_failed");
                 return;
             }
             res.set_content(std::move(mp3), "audio/mpeg");
-#endif
+        } else if (response_format == "aac") {
+            std::string aac = crispasr_make_aac(pcm.data(), (int)pcm.size(), sr_out);
+            if (aac.empty()) {
+                json_error(res, 500, "AAC encoding failed", "encoding_failed");
+                return;
+            }
+            res.set_content(std::move(aac), "audio/aac");
 #ifdef CRISPASR_HAVE_OPUS
         } else if (response_format == "opus") {
             std::string opus = crispasr_encode_opus(pcm.data(), (int)pcm.size(), sr_out);
@@ -2039,15 +1989,20 @@ int crispasr_run_server(whisper_params& params, const std::string& host, int por
         } else if (response_format == "pcm") {
             std::string raw = crispasr_make_pcm_int16_le(pcm.data(), (int)pcm.size());
             res.set_content(std::move(raw), "audio/pcm");
-#ifdef CRISPASR_HAVE_LAME
         } else if (response_format == "mp3") {
-            std::string mp3 = crispasr_encode_mp3(pcm.data(), (int)pcm.size(), sr_out);
+            std::string mp3 = crispasr_make_mp3(pcm.data(), (int)pcm.size(), sr_out);
             if (mp3.empty()) {
                 json_error(res, 500, "MP3 encoding failed", "encoding_failed");
                 return;
             }
             res.set_content(std::move(mp3), "audio/mpeg");
-#endif
+        } else if (response_format == "aac") {
+            std::string aac = crispasr_make_aac(pcm.data(), (int)pcm.size(), sr_out);
+            if (aac.empty()) {
+                json_error(res, 500, "AAC encoding failed", "encoding_failed");
+                return;
+            }
+            res.set_content(std::move(aac), "audio/aac");
 #ifdef CRISPASR_HAVE_OPUS
         } else if (response_format == "opus") {
             std::string opus = crispasr_encode_opus(pcm.data(), (int)pcm.size(), sr_out);

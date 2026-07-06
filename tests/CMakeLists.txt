@@ -2035,14 +2035,15 @@ catch_discover_tests(test_watermark
 )
 
 # ─── test_tts_provenance — Catch2 unit tests for TTS AI-provenance
-#compliance (WAV LIST/INFO, ID3v2, C2PA, consent gate, watermark edge cases).
-#Pure CPU, no model dependencies.
+#compliance (WAV LIST/INFO, ID3v2, MP3/glint encode, C2PA, consent gate,
+#watermark edge cases). Pure CPU, no model dependencies.
 add_executable(test_tts_provenance test_tts_provenance.cpp)
 target_include_directories(test_tts_provenance PRIVATE
     ${PROJECT_SOURCE_DIR}/examples/cli
 )
 target_link_libraries(test_tts_provenance PRIVATE
     Catch2::Catch2WithMain
+    glint
 )
 catch_discover_tests(test_tts_provenance
     TEST_SPEC "[unit]"
