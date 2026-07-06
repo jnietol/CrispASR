@@ -7067,5 +7067,9 @@ fbank 0.08 s + subsample 0.16 s + **encoder 11.3 s** + decoder ~0.5 s/step
 the sched auto-copying CPU weights to GPU, which ggml removed → silent
 regression. Fix: CRISPASR_FIRERED_ENC_GPU=1 split-loads enc.* to GPU —
 transcript-identical, encoder 2.3× on Metal, 2.1× on Vulkan/MoltenVK. OPEN:
-CUDA A/B on Kaggle, then flip default; decoder beam path (~0.5 s/step vs
-60 ms/step greedy) is the next lever — profile the beam batching.
+CUDA A/B on Kaggle, then flip default. Decoder beam path DONE (bc8a599a):
+the beam loop was dequantizing all decoder weights to F32 and running
+scalar dots (8× the bytes of greedy's Q4_K kernels); now batched through
+ggml_matmat on the quantized weights — beam=3 16.8 s → 3.1 s (~70 ms/step,
+≈1.5× greedy as expected), transcript-identical en+zh; F32 fallback gated
+CRISPASR_FIRERED_BEAM_F32=1. Full 11 s-jfk pipeline: 36 s → ~8.5 s (M1).
