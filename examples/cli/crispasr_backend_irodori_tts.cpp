@@ -1,12 +1,14 @@
 // crispasr_backend_irodori_tts.cpp — adapter for Aratako/Irodori-TTS.
 //
 // Flow-matching RF-DiT TTS with zero-shot voice cloning via DAC-VAE latents.
-// Japanese-focused, 48 kHz output.
+// Japanese-focused, 48 kHz output. Requires DAC-VAE decoder companion GGUF.
 //
 // Usage:
-//   crispasr --tts irodori-tts --voice ref.wav -t "こんにちは" -o out.wav
+//   crispasr --backend irodori-tts -m auto --tts "こんにちは" -o out.wav
 
 #include "crispasr_backend.h"
+#include "crispasr_model_mgr_cli.h"
+#include "crispasr_model_registry.h"
 #include "whisper_params.h"
 
 #include "irodori_tts.h"
@@ -15,9 +17,30 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <sys/stat.h>
 #include <vector>
 
 namespace {
+
+static bool file_exists(const std::string& path) {
+    struct stat st;
+    return stat(path.c_str(), &st) == 0;
+}
+
+// Look for dacvae GGUF next to the model.
+static std::string discover_dacvae(const std::string& model_path) {
+    auto dir_of = [](const std::string& p) -> std::string {
+        auto pos = p.find_last_of("/\\");
+        return (pos != std::string::npos) ? p.substr(0, pos) : ".";
+    };
+    std::string dir = dir_of(model_path);
+    for (const char* name : {"dacvae-ja-32dim-f16.gguf", "dacvae-ja-32dim-q8_0.gguf"}) {
+        std::string candidate = dir + "/" + name;
+        if (file_exists(candidate))
+            return candidate;
+    }
+    return {};
+}
 
 class IrodoriTTSBackend : public CrispasrBackend {
 public:
@@ -26,7 +49,7 @@ public:
 
     const char* name() const override { return "irodori-tts"; }
 
-    uint32_t capabilities() const override { return CAP_TTS | CAP_VOICE_CLONING; }
+    uint32_t capabilities() const override { return CAP_TTS | CAP_VOICE_CLONING | CAP_AUTO_DOWNLOAD; }
 
     std::vector<crispasr_segment> transcribe(const float* /*samples*/, int /*n_samples*/, int64_t /*t_offset_cs*/,
                                              const whisper_params& /*params*/) override {
@@ -45,26 +68,33 @@ public:
             return false;
         }
 
-        // Load DAC-VAE codec (companion model for audio decode)
-        // Try --codec-model first, then look next to the model, then auto-download
+        // ── Codec companion loading (3-tier: --codec-model → sibling → registry auto-download) ──
         std::string codec_path = p.tts_codec_model;
+        if (!codec_path.empty() && codec_path != "auto" && codec_path != "default") {
+            codec_path = crispasr_resolve_model_cli(codec_path, p.backend, p.no_prints, p.cache_dir, p.auto_download,
+                                                    p.tts_codec_quant);
+        } else {
+            codec_path.clear();
+        }
         if (codec_path.empty()) {
-            // Look for dacvae GGUF next to the model
-            std::string model_dir = p.model.substr(0, p.model.find_last_of("/\\"));
-            std::string candidate = model_dir + "/dacvae-ja-32dim-f16.gguf";
-            FILE* f = std::fopen(candidate.c_str(), "rb");
-            if (f) {
-                std::fclose(f);
-                codec_path = candidate;
+            codec_path = discover_dacvae(p.model);
+        }
+        if (codec_path.empty()) {
+            CrispasrRegistryEntry entry;
+            std::string quant;
+            if (crispasr_registry_lookup(p.backend, entry, quant) && !entry.companion_filename.empty()) {
+                codec_path = crispasr_resolve_model_cli(entry.companion_filename, p.backend, p.no_prints, p.cache_dir,
+                                                        p.auto_download, p.tts_codec_quant);
             }
         }
         if (!codec_path.empty()) {
-            if (irodori_tts_set_codec_path(ctx_, codec_path.c_str()) != 0) {
-                std::fprintf(stderr, "crispasr[irodori-tts]: warning: codec load failed, output will be silent\n");
+            irodori_tts_set_codec_path(ctx_, codec_path.c_str());
+            if (!p.no_prints) {
+                std::fprintf(stderr, "crispasr[irodori-tts]: codec path = '%s'\n", codec_path.c_str());
             }
-        } else {
-            std::fprintf(stderr, "crispasr[irodori-tts]: no DAC-VAE codec found. "
-                                 "Use --codec-model <dacvae.gguf> for audio output.\n");
+        } else if (!p.no_prints) {
+            std::fprintf(stderr, "crispasr[irodori-tts]: no DAC-VAE codec found. Pass --codec-model PATH or place "
+                                 "dacvae-ja-32dim-f16.gguf next to the model. (output will be silent)\n");
         }
 
         return true;
