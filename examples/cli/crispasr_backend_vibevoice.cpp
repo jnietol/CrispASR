@@ -113,13 +113,14 @@ public:
     }
 
     std::vector<crispasr_segment> transcribe(const float* samples, int n_samples, int64_t t_offset_cs,
-                                             const whisper_params& /*params*/) override {
+                                             const whisper_params& params) override {
         std::vector<crispasr_segment> out;
         if (!ctx_ || !samples || n_samples <= 0)
             return out;
 
         const std::vector<float> pcm24 = resample_16k_to_24k(samples, n_samples);
-        char* text = vibevoice_transcribe(ctx_, pcm24.data(), (int)pcm24.size());
+        const char* context = params.context.empty() ? nullptr : params.context.c_str();
+        char* text = vibevoice_transcribe_with_context(ctx_, pcm24.data(), (int)pcm24.size(), context);
         if (!text)
             return out;
 

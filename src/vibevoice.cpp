@@ -920,12 +920,19 @@ extern "C" float* vibevoice_encode_speech(struct vibevoice_context* ctx, const f
 // Transcribe
 // ===========================================================================
 
+// Defined later in this file (Qwen2 tokenizer encode section); forward
+// declared so vibevoice_transcribe_impl can use it for --context injection.
+static std::vector<int32_t> tokenize_text_bpe_vocab_rank(const vibevoice_model& m, const std::string& text);
+
 // Internal: shared implementation for `vibevoice_transcribe` and
 // `vibevoice_transcribe_with_probs`. When `out_token_ids` and
 // `out_token_probs` are non-null, both are populated in lock-step with the
-// emitted (non-stop) tokens. Returns malloc'd UTF-8 transcript.
+// emitted (non-stop) tokens. `context` is optional hotword/metadata text
+// (NULL/empty/whitespace-only falls back to the default prompt). Returns
+// malloc'd UTF-8 transcript.
 static char* vibevoice_transcribe_impl(struct vibevoice_context* ctx, const float* samples, int n_samples,
-                                       std::vector<int32_t>* out_token_ids, std::vector<float>* out_token_probs) {
+                                       std::vector<int32_t>* out_token_ids, std::vector<float>* out_token_probs,
+                                       const char* context) {
     if (!ctx || !samples || n_samples <= 0)
         return nullptr;
 
@@ -1097,30 +1104,95 @@ static char* vibevoice_transcribe_impl(struct vibevoice_context* ctx, const floa
         7699,     1946,   1119, 1467,     2550,  304, 4718, 3561,  13, // audio input into text output in JSON format.
         198,      IM_END, 198,  IM_START, 872,   198                   // \n<|im_end|>\n<|im_start|>user\n
     };
-    // After audio placeholder tokens:
+    // After audio placeholder tokens, no --context:
     // "\nThis is a XX.XX seconds audio, please transcribe it with these keys: Start time, End time, Speaker ID, Content<|im_end|>\n"
+    // With --context (matches microsoft/VibeVoice's `context_info` handling in
+    // vibevoice_asr_processor.py):
+    // "\nThis is a XX.XX seconds audio, with extra info: {context}\n\nPlease transcribe it with these keys: ...<|im_end|>\n"
     float dur = n_samples / 24000.0f;
     // Duration is inserted as plain text before tokenization by the HF
     // processor. For Qwen2.5 digits and '.' map to stable single-char ids.
     char dur_str[16];
     snprintf(dur_str, sizeof(dur_str), "%.2f", dur);
-    std::vector<int> dur_tokens;
-    for (const char* p = dur_str; *p; p++) {
-        if (*p >= '0' && *p <= '9')
-            dur_tokens.push_back(15 + (*p - '0'));
-        else if (*p == '.')
-            dur_tokens.push_back(13);
+
+    // Match Python's `context_info and context_info.strip()` truthiness check.
+    std::string context_trimmed;
+    if (context) {
+        const char* b = context;
+        const char* e = context + strlen(context);
+        auto is_ws = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
+        while (b < e && is_ws(*b))
+            b++;
+        while (e > b && is_ws(*(e - 1)))
+            e--;
+        context_trimmed.assign(b, e);
     }
-    std::vector<int> suffix_tokens = {
-        198,                 // \n
-        1986, 374, 264, 220, // This is a<space>
-    };
-    suffix_tokens.insert(suffix_tokens.end(), dur_tokens.begin(), dur_tokens.end());
+
+    std::vector<int> suffix_tokens;
+    if (!context_trimmed.empty()) {
+        // No hardcoded token array for arbitrary context text — tokenize at
+        // runtime with the same dual-path (real BPE merges if the GGUF has
+        // `tokenizer.ggml.merges`, else the vocab-rank approximation) already
+        // used for VibeVoice TTS text (see vibevoice_synthesize()).
+        //
+        // The two text lines are tokenized separately (rather than one string
+        // with embedded "\n"/"\n\n") because tokenize_simple()/
+        // tokenize_text_bpe_vocab_rank() treat space/tab/newline runs purely
+        // as word separators and never emit a newline token — feeding it the
+        // whole string with embedded newlines silently drops the leading \n
+        // (matching the no-context path's token 198) and the blank line
+        // before "Please transcribe" (PR #223 review). The structural
+        // newlines are inserted explicitly below instead.
+        auto tokenize_line = [&](const std::string& s) {
+            return !m.merge_rank.empty() ? core_bpe::tokenize_simple(m.token_to_id, m.merge_rank, s)
+                                         : tokenize_text_bpe_vocab_rank(m, s);
+        };
+        std::string line1 = "This is a " + std::string(dur_str) + " seconds audio, with extra info: " + context_trimmed;
+        std::string line2 = "Please transcribe it with these keys: Start time, End time, Speaker ID, Content";
+
+        suffix_tokens.push_back(198); // \n
+        auto line1_tokens = tokenize_line(line1);
+        suffix_tokens.insert(suffix_tokens.end(), line1_tokens.begin(), line1_tokens.end());
+
+        // Blank line ("\n\n"): use the vocab's single merged double-newline
+        // token if present (real BPE would likely merge it), else two \n.
+        std::string double_nl = core_bpe::bytes_to_unicode("\n\n", 2);
+        auto dnl_it = m.token_to_id.find(double_nl);
+        if (dnl_it != m.token_to_id.end())
+            suffix_tokens.push_back(dnl_it->second);
+        else {
+            suffix_tokens.push_back(198);
+            suffix_tokens.push_back(198);
+        }
+
+        auto line2_tokens = tokenize_line(line2);
+        suffix_tokens.insert(suffix_tokens.end(), line2_tokens.begin(), line2_tokens.end());
+
+        if (ctx->params.verbosity >= 1)
+            fprintf(stderr, "vibevoice: context injected: %zu tokens for %zu-char context string\n",
+                    suffix_tokens.size(), context_trimmed.size());
+    } else {
+        std::vector<int> dur_tokens;
+        for (const char* p = dur_str; *p; p++) {
+            if (*p >= '0' && *p <= '9')
+                dur_tokens.push_back(15 + (*p - '0'));
+            else if (*p == '.')
+                dur_tokens.push_back(13);
+        }
+        suffix_tokens = {
+            198,                 // \n
+            1986, 374, 264, 220, // This is a<space>
+        };
+        suffix_tokens.insert(suffix_tokens.end(), dur_tokens.begin(), dur_tokens.end());
+        std::vector<int> suffix_mid = {
+            6546, 7699, 11, 4587, 38840, 432, 449,   1493,           // seconds audio, please transcribe it with these
+            6894, 25,                                                // keys:
+            5145, 882,  11, 3972, 882,   11,  29073, 3034, 11, 8883, // Start time, End time, Speaker ID, Content
+        };
+        suffix_tokens.insert(suffix_tokens.end(), suffix_mid.begin(), suffix_mid.end());
+    }
     std::vector<int> suffix_tail = {
-        6546,     7699,  11, 4587, 38840, 432, 449,   1493,           // seconds audio, please transcribe it with these
-        6894,     25,                                                 // keys:
-        5145,     882,   11, 3972, 882,   11,  29073, 3034, 11, 8883, // Start time, End time, Speaker ID, Content
-        IM_END,   198,                                                // <|im_end|>\n
+        IM_END, 198,         // <|im_end|>\n
         IM_START, 77091, 198 // <|im_start|>assistant\n (add_generation_prompt=True)
     };
     suffix_tokens.insert(suffix_tokens.end(), suffix_tail.begin(), suffix_tail.end());
@@ -4975,14 +5047,20 @@ extern "C" float* vibevoice_synthesize(struct vibevoice_context* ctx, const char
 }
 
 extern "C" char* vibevoice_transcribe(struct vibevoice_context* ctx, const float* samples, int n_samples) {
-    return vibevoice_transcribe_impl(ctx, samples, n_samples, nullptr, nullptr);
+    return vibevoice_transcribe_impl(ctx, samples, n_samples, nullptr, nullptr, nullptr);
 }
 
-extern "C" struct vibevoice_result* vibevoice_transcribe_with_probs(struct vibevoice_context* ctx, const float* samples,
-                                                                    int n_samples) {
+extern "C" char* vibevoice_transcribe_with_context(struct vibevoice_context* ctx, const float* samples, int n_samples,
+                                                   const char* context) {
+    return vibevoice_transcribe_impl(ctx, samples, n_samples, nullptr, nullptr, context);
+}
+
+static struct vibevoice_result* vibevoice_transcribe_with_probs_impl(struct vibevoice_context* ctx,
+                                                                     const float* samples, int n_samples,
+                                                                     const char* context) {
     std::vector<int32_t> ids;
     std::vector<float> probs;
-    char* text = vibevoice_transcribe_impl(ctx, samples, n_samples, &ids, &probs);
+    char* text = vibevoice_transcribe_impl(ctx, samples, n_samples, &ids, &probs, context);
     if (!text)
         return nullptr;
     auto* r = (vibevoice_result*)calloc(1, sizeof(vibevoice_result));
@@ -4997,6 +5075,17 @@ extern "C" struct vibevoice_result* vibevoice_transcribe_with_probs(struct vibev
         }
     }
     return r;
+}
+
+extern "C" struct vibevoice_result* vibevoice_transcribe_with_probs(struct vibevoice_context* ctx, const float* samples,
+                                                                    int n_samples) {
+    return vibevoice_transcribe_with_probs_impl(ctx, samples, n_samples, nullptr);
+}
+
+extern "C" struct vibevoice_result* vibevoice_transcribe_with_probs_and_context(struct vibevoice_context* ctx,
+                                                                                const float* samples, int n_samples,
+                                                                                const char* context) {
+    return vibevoice_transcribe_with_probs_impl(ctx, samples, n_samples, context);
 }
 
 extern "C" void vibevoice_result_free(struct vibevoice_result* r) {

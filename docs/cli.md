@@ -620,7 +620,24 @@ Per-word boost suffix: `"Berenz^5.0,NVIDIA^3.0,plain"`.
 |---|---|
 | **CTC-WS trie (Phase A)** — token-level logit boost during CTC/TDT decode | parakeet (CTC + TDT) |
 | **LLM prompt injection (Phase B)** — hotwords appended to the system/instruction prompt | qwen3-asr, voxtral |
+| **Free-form prompt injection** — separate `--context` flag, not `--hotwords` (see below) | vibevoice |
 | Not applicable | voxtral4b (fixed streaming prompt), granite-nle (NAR, no text prompt), funasr (hardcoded prompt), whisper (use `--prompt` instead) |
+
+### VibeVoice-ASR: `--context` (free-form prompt injection)
+
+VibeVoice-ASR uses its own flag, `--context "TEXT"`, rather than
+`--hotwords` — the model's prompt format accepts free-form prose/metadata
+(names, organizations, topic context) instead of a structured hotword
+list with per-word boost weights. The text is spliced directly into the
+model's instruction prompt, matching the `context_info` parameter in
+microsoft/VibeVoice's `vibevoice_asr_processor.py`. Empty or
+whitespace-only `--context` behaves identically to omitting the flag
+(same prompt, byte-for-byte).
+
+```bash
+crispasr --backend vibevoice -m auto -f meeting.wav \
+    --context "ACME Corp, John Smith, Q3 earnings"
+```
 
 ### Example
 

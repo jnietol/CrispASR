@@ -412,6 +412,8 @@ static bool whisper_params_parse_arg_backend_vad(int argc, char** argv, int& i, 
             return false;
         }
         params.lcs_min_length = v;
+    } else if (arg == "--context") {
+        params.context = ARGV_NEXT;
     } else if (arg == "--hotwords") {
         params.hotwords = ARGV_NEXT;
     } else if (arg == "--hotwords-file") {
@@ -833,6 +835,10 @@ static void whisper_print_usage(int /*argc*/, char** argv, const whisper_params&
             "             --hotwords LIST       [%-7s] comma-separated keyword list to bias recognition "
             "(granite: KWB prompt)\n",
             params.hotwords.empty() ? "" : params.hotwords.c_str());
+    fprintf(stderr,
+            "             --context TEXT        [%-7s] hotword/context text injected into the prompt "
+            "(vibevoice-asr only)\n",
+            params.context.empty() ? "" : "set");
     fprintf(stderr,
             "             --prefix-text TEXT    [%-7s] granite incremental decoding: seed the transcript so "
             "the model continues from it\n",
